@@ -1,0 +1,7 @@
+dist
+node_modules
+
+# Official n8n agent instructions are maintained outside project formatting.
+.agents
+AGENTS.md
+CLAUDE.md

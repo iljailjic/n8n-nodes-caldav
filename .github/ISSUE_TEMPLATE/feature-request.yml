@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a provider-neutral CalDAV capability or improvement
+title: '[Feature]: '
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: Describe the workflow need without including private calendar data
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the desired node resource, operation, or interoperability behavior
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: Relevant CalDAV provider
+      description: Leave blank when the request is provider-independent
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and milestones for this request
+          required: true
+        - label: The proposal is not tied to a private workflow or private calendar data
+          required: true

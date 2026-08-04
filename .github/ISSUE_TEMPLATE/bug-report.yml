@@ -1,0 +1,73 @@
+name: Bug report
+description: Report reproducible incorrect behavior in the CalDAV node
+title: '[Bug]: '
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private calendar data, or unredacted server responses.
+
+  - type: input
+    id: package-version
+    attributes:
+      label: Package version
+      placeholder: 1.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: n8n-version
+    attributes:
+      label: n8n version
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: CalDAV provider
+      description: For example iCloud or another standards-compliant server
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem
+      description: Describe what happened and the affected operation
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide a minimal, sanitized sequence that reproduces the problem
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include relevant errors only after removing secrets and private calendar content
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this problem
+          required: true
+        - label: I removed credentials and private calendar data
+          required: true
