@@ -81,6 +81,78 @@ project _may_ contain example nodes and/or credentials that need to be
   CHANGELOG.md** in the root of the repository
 - Read `.agents/workflow.md` for more info
 
+## GitHub repository and delivery workflow
+
+### Repository policy
+
+- Treat `https://github.com/iljailjic/n8n-nodes-caldav` as the canonical public
+  repository and `main` as its default and protected branch.
+- Do not commit or push directly to `main`. Create a focused branch and open a
+  pull request targeting `main`. Agents should use `codex/<short-description>`
+  unless the user specifies another branch name.
+- Do not commit, push, merge, close a pull request, create a tag, create a
+  GitHub Release, or publish to npm without explicit user authorization.
+- Keep commits meaningful and preserve them when merging. Merge commits and
+  rebases are enabled; squash merging is disabled. Prefer a merge commit for a
+  non-trivial or externally contributed pull request.
+- Repository-owned source branches are normally deleted automatically after
+  merge. Never force-push or delete `main`, and never rewrite or delete release
+  tags matching `v*`.
+- Keep Actions permissions read-only by default. Do not weaken branch
+  protection, tag rules, required checks, workflow permissions, dependency
+  security, or secret-scanning settings without explicit user authorization.
+
+### Issues, milestones, and pull requests
+
+- Use milestones for planned version outcomes and issues for independently
+  implementable, reviewable features or technical enablers. Keep small
+  implementation steps as an issue checklist instead of creating
+  micro-issues.
+- Assign roadmap work to the milestone in which it is intended to ship. Treat
+  `docs/MVP.md` as the product roadmap and GitHub issues as the execution
+  tracker.
+- Link pull requests to their issue where applicable. Keep each pull request
+  focused and use the repository pull request template.
+- Resolve all review conversations and update the branch from `main` before
+  merge when GitHub reports it as behind.
+- Required CI checks are `Node.js 22` and `Node.js 24`. Both must pass before
+  merge. CI runs for pull requests targeting `main` and for direct updates to
+  `main`, and performs:
+  - `npm ci`
+  - `npm exec -- prettier --check .`
+  - `npm run lint`
+  - `npm test --if-present`
+  - `npm run build`
+  - `npm pack --dry-run` on Node.js 24
+- GitHub Actions must remain pinned to immutable commit SHAs.
+- Dependabot checks npm and GitHub Actions weekly. Review automated pull
+  requests like any other change: inspect breaking changes and overlap, merge
+  them one at a time, and do not merge a dependency update only because its CI
+  is green.
+
+### Versions and npm publication
+
+- Do not publish versions below `1.0.0` to npm by default. The pre-`1.0.0`
+  milestones represent project development stages, not npm releases. Any
+  exception requires explicit user authorization.
+- Prepare a stable release only from `main`. The package version must be a
+  stable SemVer version of at least `1.0.0`, `CHANGELOG.md` must contain the
+  matching version section, and the milestone with the exact same version must
+  exist exactly once and be closed.
+- Create the release tag as `v<package-version>` and ensure it points to a
+  commit contained in `main`. Do not run `npm run release`, create a version
+  tag, or publish from a contribution branch.
+- npm publication is triggered only by publishing a non-prerelease GitHub
+  Release. `.github/workflows/publish.yml` validates the package identity,
+  version, tag, changelog, `main` ancestry, and closed milestone; then it runs
+  formatting, lint, tests, build, package verification, and `npm run release`
+  on Node.js 24.
+- Treat npm publication as inactive until the owner explicitly prepares and
+  authorizes it. The first publication requires an owner-provided temporary
+  `NPM_TOKEN` repository secret. After the package exists on npm, configure npm
+  Trusted Publisher/OIDC for this repository and remove the temporary token.
+  Never invent npm identity, credentials, secrets, or publishing settings.
+
 ## Context-specific docs
 Load these before working on the relevant area:
 
