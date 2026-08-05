@@ -84,6 +84,42 @@ a standards-compliant UUID. Do not assume an application-specific identifier.
 - sharing, delegation, and attachments
 - provider-specific adapters beyond interoperability fixes needed for iCloud
 
+## Toward Version 2.0.0
+
+Version 2.0.0 is intended to add comprehensive, empirically validated support
+for iCloud Calendar CalDAV extensions. Version 1.0.0 remains focused on a
+provider-neutral standards contract plus the narrow iCloud interoperability
+rules required for that contract to work reliably.
+
+The 2.0.0 roadmap will start with a discovery phase after 1.0.0 is stable. That
+phase will:
+
+- inventory confirmed iCloud namespaces, properties, capabilities, error
+  behavior, and resource semantics;
+- reproduce each confirmed behavior with privacy-safe synthetic fixtures and
+  opt-in tests against a dedicated iCloud test calendar;
+- classify behavior as a standards mapping, an internal provider-adapter rule,
+  or a typed public field under `extensions.icloud`;
+- define compatibility and migration guarantees for existing 1.x workflows;
+- turn only validated capabilities into milestones and independently
+  implementable issues.
+
+Preliminary areas for investigation include iCloud collection metadata and
+settings, event properties outside the 1.0.0 structured model, additional
+discovery and partition-host behavior, and iCloud collaboration semantics.
+These are research areas rather than committed 2.0.0 features until their
+protocol behavior and testable acceptance criteria are documented.
+
+The standards-based top-level calendar and event contracts will remain stable.
+iCloud-specific fields will not be mixed into those contracts; they will use
+the namespaced extension model. Real account responses, calendar contents,
+account identifiers, and partition URLs will not be committed as fixtures or
+published as test artifacts.
+
+Detailed 2.0.0 milestones and implementation issues will be created only after
+the discovery phase. This avoids a speculative backlog while preserving an
+explicit path toward full iCloud Calendar CalDAV extension support.
+
 ## Development milestones
 
 | Version      | Exit criterion                                                                      |
