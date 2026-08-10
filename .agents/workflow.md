@@ -1,97 +1,148 @@
 # Workflow
 
-## How to work on this project
-When asked to build or update a node in this project, follow these steps:
+## Scope and authority
 
-1. Clarify the requirements. Ask for (if not already provided):
-   - Which resources and operations the node needs to have
-   - The authentication method (API key, OAuth2, etc)
-   - Example use case or sample payloads, if available
-   Do this **only** if there are multiple options **after** gathering
-   information and you are not sure which to pick
-2. Decide on the node style (declarative vs programmatic):
-   - Prefer declarative-style nodes when:
-     - The integration is mostly simple HTTP/REST requests and responses
-     - You can express this behavior by mapping parameters to
-       URL/query/body/headers
-   - Use programmatic-style nodes only when you have at least one of:
-     - Multiple dependent API calls are needed per execution
-     - Complex control flow or aggregation
-     - Responses require heavy transformation that can't be described
-       declaratively
-   - If you choose programmatic-style, briefly explain **why**
-     declarative-style won't work for this particular node
-3. Plan before coding:
-   - Outline what description the node will have, its resources and
-     operations
-   - Which credentials the node will use and their properties
-   - Confirm the plan, if you are not given one and are generating it
-   - **Never start coding without a plan**
-4. Implement. Create or update:
-   - The node files (`nodes/<n>/<n>.node.ts`)
-   - The credentials files (`credentials/<n>.credentials.ts`)
-   - Other files with helpers and extracted functions/classes
-   - `package.json` (`n8n.nodes` and `n8n.credentials` entries)
-5. Quality checks:
-   - Build the project to ensure it actually builds
-   - Run the linter to make sure that there aren't any warnings or
-     errors
-   - Ensure UX follows the [n8n UX guidelines](https://docs.n8n.io/integrations/creating-nodes/build/reference/ux-guidelines/)
-   - Ensure the credentials are secure (sensitive values **are marked as
-     `password`**, **no secrets logged** and **there aren't any
-     hardcoded secrets**)
-   - Run the project, so that the user can manually verify that it works.
-     Ask the user on how to run it, and if something goes wrong tell
-     them to run it themselves
-6. Iterate on the code, if needed, going through the process again:
-   - Plan
-   - Implement
-   - Verify
+When `github-feature-orchestrator` is invoked for an issue or milestone, run
+the complete implementation, review, validation, pull-request, and CI loop
+autonomously until the mandatory human review and merge gate.
 
-## Development guidelines
-- Use the `n8n-node` CLI tool **whenever possible**, so for stuff like building
-  a node, using dev mode with hot-reload linting, etc. Using this tool is the
-  best way to make sure the code is of high quality and complies with n8n's
-  standards
-- **Always** make sure to address any lint/typecheck errors/warnings, unless
-  there is a **very specific reason** to ignore/disable it. Linter is your best
-  friend to make sure the code is of high quality and complies with n8n's
-  standards
-- Before making any changes to the code, make sure you've gathered all required
-  context and **planned out** what you're going to do. If the plan looks good,
-  make sure to stick to it to ensure the code you produce is doing what the
-  user expects
-- After making changes verify that there are no lint/typecheck issues. Also
-  allow the user to manually test the node in n8n to verify that it does what
-  is expected
-- Make sure to use **proper types whenever possible**
-- If you are updating the npm package version, make sure to **update
-  CHANGELOG.md** in the root of the repository
+Do not ask for confirmation of routine plans, implementation choices, tests,
+branch operations, commits, pushes, draft pull-request operations, review
+fixes, or CI fixes. Ask the user only when a material business decision cannot
+be derived from the issue, accepted architecture, repository documentation, or
+authoritative external documentation without inventing behavior.
 
-## CLI
-This project uses n8n's CLI tool for developing community nodes: `n8n-node`. It
-is available as a dev dependency and `package.json` has some aliases for common
-commands. Short overview of the commands:
-- `n8n-node dev` - run n8n with your node in development mode with hot reload.
-  This command starts up n8n on `http://localhost:5678` so that the user can
-  manually test the node. It also links it to n8n's custom nodes directory
-  (`~/.n8n-node-cli/.n8n/custom` by default), so it's available within n8n.
-  `--external-n8n` makes it not launch n8n and `--custom-user-folder <path>`
-  can be used to specify the folder where user-specific data is stored
-  (`~/.n8n-node-cli` is the default)
-- `n8n-node build` - compile your node and prepare it for distribution.
-- `n8n-node lint` - lint the node in the current directory.
-  Use `--fix` flag to automatically fix fixable issues.
-- `n8n-node cloud-support` - manage n8n Cloud eligibility.
-  If invoked without arguments, show current cloud support status. Invoke
-  `n8n-node cloud-support enable` to enable strict mode + default ESLint config
-  or `n8n-node cloud-support disable` to allow custom ESLint config (disables
-  cloud eligibility)
-- `n8n-node release` - publish your community node package to npm.
-  This command handles the complete release process using `release-it`:
-  - Builds the node
-  - Runs linting checks
-  - Updates changelog
-  - Creates git tags
-  - Creates GitHub releases
-  - Publishes to npm
+## Git ownership and branch guard
+
+- Only the orchestrator may create or switch branches, stage files, commit,
+  merge, rebase, reset, stash, clean, push, or mutate GitHub state.
+- Contract architects and reviewers are read-only.
+- Implementers and CI fixers may edit only the current issue working tree and
+  must never perform Git or GitHub mutations.
+- Before starting any write-enabled subagent, and again before every commit or
+  push, the orchestrator must verify:
+  - the current branch equals the Delivery Context head branch;
+  - the current branch is not the remote default branch;
+  - the head branch follows the repository naming convention;
+  - once a pull request exists, its head is the current branch and its base is
+    `main`.
+- A write-enabled subagent must refuse to edit when the Delivery Context does
+  not contain `branch_guard: passed` for the current head branch.
+- Never use a commit to `main` as a fallback when branch preparation or push
+  fails.
+
+## Implementation process
+
+1. Gather requirements from the issue, its comments, linked issues and pull
+   requests, milestone context, explicit dependencies, product documentation,
+   existing public interfaces, and authoritative API documentation.
+2. Have `github_contract_architect` define a versioned public contract and
+   externally observable acceptance scenarios. Every clause and scenario must
+   cite its requirement or architectural source.
+3. Record the accepted contract revision in the GitHub issue. Do not request
+   approval unless repository instructions explicitly require design approval.
+4. Decide the node style:
+   - Prefer declarative style for straightforward HTTP or REST request and
+     response mappings.
+   - Use programmatic style for dependent API calls, complex control flow,
+     aggregation, or transformations that cannot be expressed declaratively.
+   - Record why declarative style is insufficient when programmatic style is
+     selected.
+5. Plan implementation and tests against the accepted contract before editing.
+   Proceed without asking the user to confirm the plan.
+6. Write tests exclusively from requirements, the accepted contract, and
+   externally observable behavior. Never derive test expectations from the
+   implementation merely to make it pass.
+7. When practical, create contract-derived tests before production code. The
+   orchestrator may use that first meaningful test commit to push the issue
+   branch and open the draft pull request before production implementation.
+8. Implement the complete issue scope, including node files, credential files,
+   helpers, tests, documentation, `package.json`, and `CHANGELOG.md` where
+   applicable.
+9. Inspect the actual diff and remove unrelated changes from the issue scope
+   without discarding pre-existing user work.
+10. Run all relevant local formatting, linting, type checks, tests, builds, and
+    package checks. Fix failures and rerun the complete relevant validation.
+11. Have `github_task_reviewer` independently review the diff against the
+    issue, architecture, accepted contract revision, compatibility, and test
+    oracle.
+12. Send actionable findings back to `github_task_implementer`, fix them, rerun
+    validation, and repeat independent review until no actionable finding
+    remains.
+13. Commit verified changes, push only the issue branch, update the draft pull
+    request, and poll required GitHub Actions.
+14. Send branch-caused CI failures to `github_ci_fixer`, then rerun local
+    validation and independent review before committing and pushing each fix.
+15. When local validation, independent review, and required Actions are green,
+    mark the pull request ready for human review and stop at the merge gate.
+
+## Repository-local runtime
+
+All writable runtime state must stay inside the repository:
+
+```bash
+mkdir -p \
+  .codex-runtime/tmp \
+  .codex-runtime/npm-cache \
+  .codex-runtime/n8n-node-cli
+```
+
+Prefix every npm, npx, or npm-exec invocation with:
+
+```bash
+TMPDIR="$PWD/.codex-runtime/tmp" \
+npm_config_cache="$PWD/.codex-runtime/npm-cache"
+```
+
+Examples:
+
+```bash
+TMPDIR="$PWD/.codex-runtime/tmp" \
+npm_config_cache="$PWD/.codex-runtime/npm-cache" \
+npm ci
+
+TMPDIR="$PWD/.codex-runtime/tmp" \
+npm_config_cache="$PWD/.codex-runtime/npm-cache" \
+npm run lint
+
+TMPDIR="$PWD/.codex-runtime/tmp" \
+npm_config_cache="$PWD/.codex-runtime/npm-cache" \
+npm test --if-present
+```
+
+Run development mode only with a repository-local user folder:
+
+```bash
+TMPDIR="$PWD/.codex-runtime/tmp" \
+npm_config_cache="$PWD/.codex-runtime/npm-cache" \
+npm exec -- n8n-node dev \
+  --custom-user-folder "$PWD/.codex-runtime/n8n-node-cli"
+```
+
+Never delete `.codex-runtime/` or its contents. Never write tool state to the
+home directory or `/tmp`.
+
+## Quality requirements
+
+- Use the `n8n-node` CLI whenever practical.
+- Resolve lint and type-check errors and warnings unless a documented external
+  blocker makes resolution impossible.
+- Use precise types wherever possible.
+- Verify credential security: sensitive values use password presentation,
+  secrets are never logged, and secrets are never hardcoded.
+- Verify UX against the applicable n8n UX guidance.
+- Automated local validation and GitHub Actions are mandatory. Manual n8n UI
+  verification may be listed as an optional human-review step, but it must not
+  interrupt autonomous delivery unless repository instructions explicitly make
+  it a required gate.
+- Do not run `n8n-node release` or `npm run release` during issue delivery.
+
+## CLI reference
+
+- `n8n-node build` compiles and prepares the node package.
+- `n8n-node lint` lints the node; use `--fix` only for relevant, reviewable
+  fixes.
+- `n8n-node cloud-support` reports or manages Cloud eligibility. Do not change
+  Cloud-support mode unless the issue explicitly requires it.
+- `n8n-node release` performs release and publication operations and is outside
+  the autonomous issue-delivery authority.
