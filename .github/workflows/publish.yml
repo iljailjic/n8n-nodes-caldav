@@ -119,7 +119,7 @@ jobs:
         run: npm run build
 
       - name: Verify package contents
-        run: npm pack --dry-run
+        run: npm run verify:package
 
       - name: Publish package
         env:

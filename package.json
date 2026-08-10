@@ -31,6 +31,9 @@
 		"dev": "n8n-node dev",
 		"lint": "n8n-node lint",
 		"lint:fix": "n8n-node lint --fix",
+		"test": "vitest run --config vitest.config.mts",
+		"test:watch": "vitest watch --config vitest.config.mts",
+		"verify:package": "node scripts/verify-package-contents.mjs",
 		"release": "n8n-node release",
 		"prepublishOnly": "n8n-node prerelease"
 	},
@@ -53,7 +56,8 @@
 		"eslint": "9.32.0",
 		"prettier": "3.9.6",
 		"release-it": "^21.0.1",
-		"typescript": "5.9.2"
+		"typescript": "5.9.2",
+		"vitest": "1.6.1"
 	},
 	"peerDependencies": {
 		"n8n-workflow": "*"
