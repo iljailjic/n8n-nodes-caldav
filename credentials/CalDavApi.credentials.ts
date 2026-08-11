@@ -42,8 +42,6 @@ export function validateAndNormalizeServerUrl(serverUrl: unknown): ValidationRes
 	return { valid: true, newValue: normalizedServerUrl };
 }
 
-// The accepted issue contract explicitly defers a live credential test to the discovery work.
-// eslint-disable-next-line @n8n/community-nodes/credential-test-required
 export class CalDavApi implements ICredentialType {
 	name = 'calDavApi';
 	// The accepted public display name is provider-neutral and intentionally omits the generic "API" suffix.

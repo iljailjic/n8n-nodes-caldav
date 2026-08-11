@@ -6,7 +6,11 @@ import type {
 } from 'n8n-workflow';
 import { NodeConnectionTypes } from 'n8n-workflow';
 
+import { testCalDavApiCredentials } from './methods/credentialTest';
+
 export class CalDav implements INodeType {
+	methods = { credentialTest: { testCalDavApiCredentials } };
+
 	description: INodeTypeDescription = {
 		displayName: 'CalDAV',
 		name: 'calDav',
@@ -19,7 +23,7 @@ export class CalDav implements INodeType {
 		inputs: [NodeConnectionTypes.Main],
 		outputs: [NodeConnectionTypes.Main],
 		usableAsTool: true,
-		credentials: [{ name: 'calDavApi', required: true }],
+		credentials: [{ name: 'calDavApi', required: true, testedBy: 'testCalDavApiCredentials' }],
 		properties: [],
 	};
 
