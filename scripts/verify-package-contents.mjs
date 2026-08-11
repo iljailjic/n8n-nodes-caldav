@@ -4,29 +4,68 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-const TEST_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__']);
-const FIXTURE_DIRECTORY_NAMES = new Set(['fixture', 'fixtures', '__fixtures__']);
-const TEST_FILE_PATTERN = /\.(?:spec|test)\.[^/]+$/i;
-const VITEST_FILE_PATTERN = /^vitest(?:\.|-|$)/i;
-
-function normalizePackagePath(filePath) {
-	return filePath.replaceAll('\\', '/').replace(/^package\//, '');
-}
-
-function isProhibitedPath(filePath) {
-	const normalizedPath = normalizePackagePath(filePath);
-	const pathSegments = normalizedPath.toLowerCase().split('/');
-	const fileName = pathSegments.at(-1) ?? '';
-
-	return (
-		pathSegments.some((segment) => TEST_DIRECTORY_NAMES.has(segment)) ||
-		pathSegments.some((segment) => FIXTURE_DIRECTORY_NAMES.has(segment)) ||
-		TEST_FILE_PATTERN.test(fileName) ||
-		VITEST_FILE_PATTERN.test(fileName) ||
-		pathSegments.includes('vitest') ||
-		pathSegments.includes('@vitest')
-	);
-}
+const EXPECTED_PACKAGE_NAME = '@iljailjic/n8n-nodes-caldav';
+const EXPECTED_PACKAGE_VERSION = '0.1.0';
+const EXPECTED_PACKAGE_FILES = new Set([
+	'LICENSE.md',
+	'README.md',
+	'dist/credentials/CalDavApi.credentials.d.ts',
+	'dist/credentials/CalDavApi.credentials.js',
+	'dist/credentials/CalDavApi.credentials.js.map',
+	'dist/nodes/CalDav/caldav.dark.svg',
+	'dist/nodes/CalDav/CalDav.node.d.ts',
+	'dist/nodes/CalDav/CalDav.node.js',
+	'dist/nodes/CalDav/CalDav.node.js.map',
+	'dist/nodes/CalDav/CalDav.node.json',
+	'dist/nodes/CalDav/caldav.svg',
+	'dist/nodes/CalDav/discovery/calendarHome.d.ts',
+	'dist/nodes/CalDav/discovery/calendarHome.js',
+	'dist/nodes/CalDav/discovery/calendarHome.js.map',
+	'dist/nodes/CalDav/discovery/capabilities.d.ts',
+	'dist/nodes/CalDav/discovery/capabilities.js',
+	'dist/nodes/CalDav/discovery/capabilities.js.map',
+	'dist/nodes/CalDav/discovery/currentUserPrincipal.d.ts',
+	'dist/nodes/CalDav/discovery/currentUserPrincipal.js',
+	'dist/nodes/CalDav/discovery/currentUserPrincipal.js.map',
+	'dist/nodes/CalDav/methods/credentialTest.d.ts',
+	'dist/nodes/CalDav/methods/credentialTest.js',
+	'dist/nodes/CalDav/methods/credentialTest.js.map',
+	'dist/nodes/CalDav/providers/icloud.d.ts',
+	'dist/nodes/CalDav/providers/icloud.js',
+	'dist/nodes/CalDav/providers/icloud.js.map',
+	'dist/nodes/CalDav/providers/registry.d.ts',
+	'dist/nodes/CalDav/providers/registry.js',
+	'dist/nodes/CalDav/providers/registry.js.map',
+	'dist/nodes/CalDav/providers/standard.d.ts',
+	'dist/nodes/CalDav/providers/standard.js',
+	'dist/nodes/CalDav/providers/standard.js.map',
+	'dist/nodes/CalDav/providers/types.d.ts',
+	'dist/nodes/CalDav/providers/types.js',
+	'dist/nodes/CalDav/providers/types.js.map',
+	'dist/nodes/CalDav/transport/http.d.ts',
+	'dist/nodes/CalDav/transport/http.js',
+	'dist/nodes/CalDav/transport/http.js.map',
+	'dist/nodes/CalDav/transport/url.d.ts',
+	'dist/nodes/CalDav/transport/url.js',
+	'dist/nodes/CalDav/transport/url.js.map',
+	'dist/nodes/CalDav/xml/errors.d.ts',
+	'dist/nodes/CalDav/xml/errors.js',
+	'dist/nodes/CalDav/xml/errors.js.map',
+	'dist/nodes/CalDav/xml/escape.d.ts',
+	'dist/nodes/CalDav/xml/escape.js',
+	'dist/nodes/CalDav/xml/escape.js.map',
+	'dist/nodes/CalDav/xml/namespaces.d.ts',
+	'dist/nodes/CalDav/xml/namespaces.js',
+	'dist/nodes/CalDav/xml/namespaces.js.map',
+	'dist/nodes/CalDav/xml/parser.d.ts',
+	'dist/nodes/CalDav/xml/parser.js',
+	'dist/nodes/CalDav/xml/parser.js.map',
+	'dist/nodes/CalDav/xml/requests.d.ts',
+	'dist/nodes/CalDav/xml/requests.js',
+	'dist/nodes/CalDav/xml/requests.js.map',
+	'dist/package.json',
+	'package.json',
+]);
 
 function parsePackOutput(packOutput) {
 	let packResults;
@@ -37,53 +76,72 @@ function parsePackOutput(packOutput) {
 		throw new Error('npm pack did not produce valid JSON output');
 	}
 
-	if (!Array.isArray(packResults) || packResults.length === 0) {
-		throw new Error('npm pack did not report any package contents');
+	if (!Array.isArray(packResults) || packResults.length !== 1) {
+		throw new Error('npm pack must report exactly one package result');
 	}
 
-	return packResults;
+	return packResults[0];
 }
 
-function collectProhibitedEntries(packResults) {
-	const prohibitedEntries = new Set();
-
-	for (const packResult of packResults) {
-		if (!packResult || typeof packResult !== 'object') {
-			throw new Error('npm pack returned an invalid package result');
-		}
-
-		if (!Array.isArray(packResult.files)) {
-			throw new Error('npm pack result is missing its file listing');
-		}
-
-		for (const file of packResult.files) {
-			if (file && typeof file.path === 'string' && isProhibitedPath(file.path)) {
-				prohibitedEntries.add(normalizePackagePath(file.path));
-			}
-		}
-
-		if (Array.isArray(packResult.bundled)) {
-			for (const packageName of packResult.bundled) {
-				if (
-					typeof packageName === 'string' &&
-					(packageName.toLowerCase() === 'vitest' ||
-						packageName.toLowerCase().startsWith('@vitest/'))
-				) {
-					prohibitedEntries.add(`bundled dependency: ${packageName}`);
-				}
-			}
-		}
+function validatePackResult(packResult) {
+	if (!packResult || typeof packResult !== 'object') {
+		throw new Error('npm pack returned an invalid package result');
 	}
 
-	return [...prohibitedEntries].sort();
+	if (
+		packResult.name !== EXPECTED_PACKAGE_NAME ||
+		packResult.version !== EXPECTED_PACKAGE_VERSION
+	) {
+		throw new Error('npm pack returned unexpected package identity');
+	}
+
+	if (!Array.isArray(packResult.files)) {
+		throw new Error('npm pack result is missing its file listing');
+	}
+
+	if (packResult.entryCount !== packResult.files.length) {
+		throw new Error('npm pack result has an invalid entry count');
+	}
+
+	if (!Array.isArray(packResult.bundled)) {
+		throw new Error('npm pack result is missing its bundled dependency listing');
+	}
+
+	if (packResult.bundled.length > 0) {
+		throw new Error(`Bundled dependencies detected:\n${packResult.bundled.join('\n')}`);
+	}
+
+	const packagePaths = packResult.files.map((file) => {
+		if (!file || typeof file !== 'object' || typeof file.path !== 'string' || file.path === '') {
+			throw new Error('npm pack result contains an invalid file entry');
+		}
+
+		return file.path;
+	});
+	const uniquePackagePaths = new Set(packagePaths);
+
+	if (uniquePackagePaths.size !== packagePaths.length) {
+		throw new Error('npm pack result contains duplicate file entries');
+	}
+
+	const missingPaths = [...EXPECTED_PACKAGE_FILES]
+		.filter((filePath) => !uniquePackagePaths.has(filePath))
+		.sort();
+	const unexpectedPaths = packagePaths
+		.filter((filePath) => !EXPECTED_PACKAGE_FILES.has(filePath))
+		.sort();
+
+	if (missingPaths.length > 0 || unexpectedPaths.length > 0) {
+		const details = [
+			...missingPaths.map((filePath) => `missing: ${filePath}`),
+			...unexpectedPaths.map((filePath) => `unexpected: ${filePath}`),
+		];
+		throw new Error(`Package contents do not match the expected manifest:\n${details.join('\n')}`);
+	}
 }
 
 export function verifyPackOutput(packOutput) {
-	const prohibitedEntries = collectProhibitedEntries(parsePackOutput(packOutput));
-
-	if (prohibitedEntries.length > 0) {
-		throw new Error(`Prohibited package content detected:\n${prohibitedEntries.join('\n')}`);
-	}
+	validatePackResult(parsePackOutput(packOutput));
 }
 
 function runNpmPack() {
@@ -112,7 +170,7 @@ function main() {
 	const packOutput = arguments_[0] === '--stdin' ? readFileSync(0, 'utf8') : runNpmPack();
 	verifyPackOutput(packOutput);
 
-	console.log('Package contents contain no test, fixture, or Vitest artifacts.');
+	console.log(`Package contents match the exact ${EXPECTED_PACKAGE_FILES.size}-file manifest.`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
