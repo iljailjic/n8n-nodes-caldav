@@ -1059,7 +1059,12 @@ export async function createN8nCalDavTransport(
 			throw new CalDavAuthenticationError();
 		}
 
-		const serverUrl = normalizeServerUrl(credentials.serverUrl);
+		const serverUrlValidation = validateAndNormalizeServerUrl(credentials.serverUrl);
+		if (!serverUrlValidation.valid || typeof serverUrlValidation.newValue !== 'string') {
+			throw new CalDavUrlValidationError('MALFORMED_URL');
+		}
+
+		const serverUrl = serverUrlValidation.newValue;
 		return createCalDavTransport(
 			serverUrl,
 			createN8nCalDavRequestHelperAdapter(context as ICredentialTestFunctions, credentials),

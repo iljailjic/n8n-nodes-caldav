@@ -47,7 +47,11 @@ import type {
 	CalDavTransportRequest,
 	N8nCalDavRequestOptions,
 } from '../../nodes/CalDav/transport/http';
-import { resolveCalDavHref, validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import {
+	CalDavUrlValidationError,
+	resolveCalDavHref,
+	validateAbsoluteHttpUrl,
+} from '../../nodes/CalDav/transport/url';
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -491,6 +495,67 @@ describe('request forwarding and the n8n helper seam', () => {
 		expect(helper.mock.calls[0][1]).not.toHaveProperty('auth');
 		expect(helper.mock.calls[0][1]).not.toHaveProperty('Authorization');
 	});
+
+	it.each([
+		'https://calendar.example.test/account private/',
+		'https://calendar.example.test/account\tprivate/',
+		'https://calendar.example.test/account\nprivate/',
+	])(
+		'credential-test transport rejects embedded URL whitespace before a helper call',
+		async (serverUrl) => {
+			const request = vi.fn();
+			const credential = {
+				id: 'credential-id-private',
+				name: 'credential-name-private',
+				type: 'calDavApi',
+				data: {
+					serverUrl,
+					username: 'username-sentinel',
+					password: 'password-sentinel',
+				},
+			};
+			const credentialTestContext = {
+				helpers: { request },
+			} as unknown as ICredentialTestFunctions;
+
+			const transportPromise = createN8nCalDavTransport(credentialTestContext, credential);
+			await expect(transportPromise).rejects.toBeInstanceOf(CalDavUrlValidationError);
+			await expect(transportPromise).rejects.toEqual(
+				expect.objectContaining({
+					name: 'CalDavUrlValidationError',
+					code: 'MALFORMED_URL',
+				}),
+			);
+			expect(request).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([
+		['missing username', { password: 'password-sentinel' }],
+		['non-string password', { username: 'username-sentinel', password: 42 }],
+	] as const)(
+		'credential-test transport keeps %s classified as authentication',
+		async (_label, invalidIdentity) => {
+			const request = vi.fn();
+			const credentialTestContext = {
+				helpers: { request },
+			} as unknown as ICredentialTestFunctions;
+			const credential = {
+				id: 'credential-id-private',
+				name: 'credential-name-private',
+				type: 'calDavApi',
+				data: {
+					serverUrl: 'https://calendar.example.test/',
+					...invalidIdentity,
+				},
+			};
+
+			await expect(
+				createN8nCalDavTransport(credentialTestContext, credential),
+			).rejects.toBeInstanceOf(CalDavAuthenticationError);
+			expect(request).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each([
 		['credential retrieval failure', undefined, new Error('credential-store-secret')],

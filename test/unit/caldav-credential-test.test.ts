@@ -343,9 +343,29 @@ describe('CalDAV credential-test sanitized failure mapping and stopping', () => 
 			credential({ serverUrl: 'https://url-user:url-password@private.example.test/' }),
 			MESSAGES.INVALID_URL,
 		],
+		[
+			'configured URL with an embedded space',
+			credential({ serverUrl: 'https://calendar.example.test/account private/' }),
+			MESSAGES.INVALID_URL,
+		],
+		[
+			'configured URL with an embedded tab',
+			credential({ serverUrl: 'https://calendar.example.test/account\tprivate/' }),
+			MESSAGES.INVALID_URL,
+		],
+		[
+			'configured URL with an embedded newline',
+			credential({ serverUrl: 'https://calendar.example.test/account\nprivate/' }),
+			MESSAGES.INVALID_URL,
+		],
 	] as const)('fails %s before any helper request', async (_label, credentials, message) => {
 		const request = vi.fn();
-		await expect(run(request, credentials)).resolves.toEqual({ status: 'Error', message });
+		const result = await run(request, credentials);
+
+		expect(result).toEqual({ status: 'Error', message });
+		expect(JSON.stringify(result)).not.toMatch(
+			/account private|account\\tprivate|account\\nprivate/,
+		);
 		expect(request).not.toHaveBeenCalled();
 	});
 
