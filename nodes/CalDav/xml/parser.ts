@@ -901,6 +901,15 @@ function parseStatus(element: InternalElement): DavStatus {
 	if (code < 100 || code > 599) throw new CalDavXmlProtocolError('INVALID_STATUS');
 
 	const reasonPhrase = value.slice(13);
+	if (
+		reasonPhrase.length > 0 &&
+		(reasonPhrase.charCodeAt(0) === 0x20 ||
+			reasonPhrase.charCodeAt(0) === 0x09 ||
+			reasonPhrase.charCodeAt(reasonPhrase.length - 1) === 0x20 ||
+			reasonPhrase.charCodeAt(reasonPhrase.length - 1) === 0x09)
+	) {
+		throw new CalDavXmlProtocolError('INVALID_STATUS');
+	}
 	for (let index = 0; index < reasonPhrase.length; index += 1) {
 		const codeUnit = reasonPhrase.charCodeAt(index);
 		if (

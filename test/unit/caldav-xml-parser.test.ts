@@ -387,12 +387,30 @@ describe('parseDavMultiStatus', () => {
 		'HTTP/1.1  200 OK',
 		' HTTP/1.1 200 OK',
 		'HTTP/1.1 200 OK\n',
+		'HTTP/1.1 200 OK ',
+		'HTTP/1.1 200  OK',
+		'HTTP/1.1 200 OK\t',
+		'HTTP/1.1 200 \t',
 		'HTTP/10.1 200 OK',
 	])('rejects invalid strict HTTP status text', (status) => {
 		expectProtocolError(
 			`<multistatus xmlns="DAV:"><response><href>x</href><status>${status}</status></response></multistatus>`,
 			'INVALID_STATUS',
 		);
+	});
+
+	it('preserves an empty reason phrase after the mandatory status separator', () => {
+		const response = parseDavMultiStatus(
+			'<multistatus xmlns="DAV:"><response><href>x</href>' +
+				'<status>HTTP/1.1 200 </status></response></multistatus>',
+		).responses[0];
+
+		expect(response?.status).toEqual({
+			httpVersion: '1.1',
+			code: 200,
+			reasonPhrase: '',
+			isSuccessful: true,
+		});
 	});
 
 	it('never includes private source data or dynamic fields in errors', () => {
