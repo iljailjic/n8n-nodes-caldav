@@ -112,6 +112,30 @@ describe('package contents verifier', () => {
 		expect(() => verifyPackOutput(packOutput)).toThrow('Bundled dependencies detected');
 	});
 
+	it('rejects a valid-shaped manifest with an expected path omitted', () => {
+		const packOutput = createPackOutput(expectedPackageFiles.slice(1));
+
+		expect(() => verifyPackOutput(packOutput)).toThrow(
+			'Package contents do not match the expected manifest',
+		);
+	});
+
+	it('rejects a valid-shaped manifest with a duplicate allowed path', () => {
+		const packOutput = createPackOutput([...expectedPackageFiles, expectedPackageFiles[0]]);
+
+		expect(() => verifyPackOutput(packOutput)).toThrow(
+			'npm pack result contains duplicate file entries',
+		);
+	});
+
+	it('rejects a valid-shaped result with a version-only identity mismatch', () => {
+		const packOutput = createPackOutput(expectedPackageFiles, { version: '0.1.1' });
+
+		expect(() => verifyPackOutput(packOutput)).toThrow(
+			'npm pack returned unexpected package identity',
+		);
+	});
+
 	it.each([
 		['invalid JSON', '{'],
 		['missing package result', '[]'],
