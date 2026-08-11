@@ -173,6 +173,22 @@ export function resolveCalDavHref(effectiveResponseUrl: string, href: string): A
 	return serialize(resolved);
 }
 
+export function normalizeCalendarCollectionUrl(collectionUrl: string): AbsoluteHttpUrl {
+	const canonicalUrl = validateAbsoluteHttpUrl(collectionUrl);
+	const parsedUrl = parseUrl(canonicalUrl);
+
+	if (parsedUrl.pathname.endsWith('/')) {
+		return canonicalUrl;
+	}
+
+	const queryIndex = canonicalUrl.indexOf('?');
+	if (queryIndex === -1) {
+		return `${canonicalUrl}/` as AbsoluteHttpUrl;
+	}
+
+	return `${canonicalUrl.slice(0, queryIndex)}/${canonicalUrl.slice(queryIndex)}` as AbsoluteHttpUrl;
+}
+
 function assertValidResourceName(resourceName: string): void {
 	if (
 		resourceName.length === 0 ||
