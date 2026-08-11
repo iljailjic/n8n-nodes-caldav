@@ -131,6 +131,30 @@ npm test --if-present
 npm run build
 ```
 
+### Radicale integration tests
+
+The integration suite requires a working Docker CLI and daemon using the
+standard local Docker socket. Run it directly with:
+
+```bash
+npm run test:integration
+```
+
+That one command builds or reuses the digest-pinned Python image with the exact
+Radicale test version, starts an isolated authenticated service, waits for an
+authenticated CalDAV operation, runs only the integration suite, and always
+tears down its run-owned containers, internal networks, and storage volumes.
+Each invocation generates unique fictional credentials and Docker identities
+and publishes a random port on IPv4 loopback only, so repeated and parallel
+runs do not share service data or expose Radicale publicly. Runtime networking
+has no external egress after the image build.
+
+`npm test` remains the aggregate CI command and runs unit tests before the same
+integration lifecycle. Harness runtime support stays under `.codex-runtime/`;
+cleanup never removes that repository-local runtime directory. On failure, the
+command reports the failed lifecycle stage without printing generated
+credentials or private response bodies.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution requirements and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries.
 

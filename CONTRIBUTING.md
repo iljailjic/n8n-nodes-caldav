@@ -15,6 +15,16 @@ npm run build
 
 Use `npm run dev` for local inspection in the n8n node development environment.
 
+Radicale integration tests require a working local Docker CLI and daemon. Run
+only that suite with `npm run test:integration`; `npm test` runs both unit and
+integration tests. The integration command builds or reuses the pinned image,
+creates a uniquely named authenticated service on a random IPv4 loopback port,
+waits for authenticated readiness, and performs mandatory teardown after
+success or failure. Docker networks are internal and run storage is isolated,
+so parallel invocations do not share credentials, ports, or calendar data.
+Do not copy generated harness credentials or runtime data out of
+`.codex-runtime/`.
+
 ## Change requirements
 
 - Keep the public event and calendar model provider-neutral.
