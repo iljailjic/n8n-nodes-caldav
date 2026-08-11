@@ -18,6 +18,11 @@ export function validateAndNormalizeServerUrl(serverUrl: unknown): ValidationRes
 		return { valid: false, errorMessage: INVALID_SERVER_URL_MESSAGE };
 	}
 
+	const rawAuthority = /^https?:\/\/([^/?#]*)/i.exec(normalizedServerUrl)?.[1];
+	if (rawAuthority?.includes('@')) {
+		return { valid: false, errorMessage: INVALID_SERVER_URL_MESSAGE };
+	}
+
 	try {
 		const parsedServerUrl = new URL(normalizedServerUrl);
 		if (

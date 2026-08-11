@@ -57,6 +57,8 @@ describe('CalDAV credentials', () => {
 		'caldav.example.test',
 		'not a url',
 		'ftp://caldav.example.test',
+		'https://@caldav.example.test',
+		'https://:@caldav.example.test',
 		'https://user@caldav.example.test',
 		'https://user:secret@caldav.example.test',
 	])('provides transport-independent rejection for server URL %j', (serverUrl) => {
@@ -72,6 +74,10 @@ describe('CalDAV credentials', () => {
 		[
 			'\thttps://caldav.example.test/a%2Fb//?query=a%2Fb#fragment\n',
 			'https://caldav.example.test/a%2Fb//?query=a%2Fb#fragment',
+		],
+		[
+			'https://caldav.example.test/user@example.test/?owner=user@example.test#calendar@example.test',
+			'https://caldav.example.test/user@example.test/?owner=user@example.test#calendar@example.test',
 		],
 	])(
 		'provides transport-independent whitespace-only normalization for %j',
