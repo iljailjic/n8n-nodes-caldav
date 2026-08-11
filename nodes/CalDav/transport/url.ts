@@ -29,6 +29,7 @@ const ERROR_MESSAGES: Record<CalDavUrlErrorCode, string> = {
 };
 
 const SCHEME_PREFIX = /^[A-Za-z][A-Za-z\d+.-]*:/;
+const HTTP_SCHEME_PREFIX = /^https?:/i;
 const MALFORMED_PERCENT_TRIPLET = /%(?![\dA-Fa-f]{2})/;
 const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
 
@@ -80,6 +81,7 @@ function getReferenceParts(input: string): { authority?: string; path: string } 
 function assertSafeUrlReference(input: string): void {
 	if (
 		input.length === 0 ||
+		(HTTP_SCHEME_PREFIX.test(input) && !/^https?:\/\//i.test(input)) ||
 		containsRawControl(input) ||
 		input.startsWith(' ') ||
 		input.endsWith(' ') ||

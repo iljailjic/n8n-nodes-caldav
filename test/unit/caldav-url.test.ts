@@ -58,6 +58,9 @@ describe('validateAbsoluteHttpUrl', () => {
 		['mailto:user@example.test', 'UNSUPPORTED_SCHEME'],
 		['/relative/path', 'MALFORMED_URL'],
 		['https://', 'MALFORMED_URL'],
+		['https:calendar.example.test/principal/', 'MALFORMED_URL'],
+		['https:/calendar.example.test/principal/', 'MALFORMED_URL'],
+		['HTTP:calendar.example.test/principal/', 'MALFORMED_URL'],
 		['https:///example.test/path', 'MALFORMED_URL'],
 		['not a url', 'MALFORMED_URL'],
 	] as const)('rejects invalid absolute input %s', (input, code) => {
@@ -149,6 +152,25 @@ describe('resolveCalDavHref', () => {
 		expect(
 			resolveCalDavHref('https://p42-caldav.icloud.com/account/principal/', 'calendars/work/'),
 		).toBe('https://p42-caldav.icloud.com/account/principal/calendars/work/');
+	});
+
+	it.each(['https:attacker.example/calendar', 'https:/attacker.example/calendar'])(
+		'rejects an explicit same-scheme href missing its authority delimiter: %s',
+		(href) => {
+			expectUrlError(
+				() => resolveCalDavHref('https://example.test/principal/', href),
+				'MALFORMED_URL',
+			);
+		},
+	);
+
+	it('continues to accept relative and scheme-relative hrefs', () => {
+		expect(resolveCalDavHref('https://example.test/principal/', 'calendar.example/path')).toBe(
+			'https://example.test/principal/calendar.example/path',
+		);
+		expect(
+			resolveCalDavHref('https://example.test/principal/', '//partition.example/calendar'),
+		).toBe('https://partition.example/calendar');
 	});
 
 	it('rejects an empty href instead of returning the base URL', () => {
