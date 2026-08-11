@@ -32,7 +32,7 @@ Configure a CalDAV account with:
 - **Server URL** — the CalDAV service endpoint;
 - **Username** — the CalDAV account name;
 - **Password** — the CalDAV password;
-- **Skip Certificate Validation** — disabled by default and intended only for
+- **Skip TLS Validation** — disabled by default and intended only for
   isolated development environments.
 
 For iCloud:

@@ -46,7 +46,9 @@
 	"n8n": {
 		"n8nNodesApiVersion": 1,
 		"strict": true,
-		"credentials": [],
+		"credentials": [
+			"dist/credentials/CalDavApi.credentials.js"
+		],
 		"nodes": [
 			"dist/nodes/CalDav/CalDav.node.js"
 		]
