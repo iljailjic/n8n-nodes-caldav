@@ -194,15 +194,7 @@ function getRejectedResponse(error: unknown): unknown {
 
 	try {
 		const response = error.response;
-		if (
-			!isRecord(response) ||
-			!isValidStatusCode(response.statusCode) ||
-			!isRecord(response.headers) ||
-			!(response.body instanceof Readable)
-		) {
-			return undefined;
-		}
-		return response;
+		return isRecord(response) ? response : undefined;
 	} catch {
 		return undefined;
 	}

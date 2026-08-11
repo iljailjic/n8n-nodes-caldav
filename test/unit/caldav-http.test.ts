@@ -740,6 +740,47 @@ describe('HTTP, network, and malformed-response errors', () => {
 	});
 
 	it.each([
+		['invalid status', (body: Readable) => ({ statusCode: 600, headers: {}, body }), undefined],
+		[
+			'throwing header getter',
+			(body: Readable) => ({
+				statusCode: 200,
+				body,
+				get headers() {
+					throw new Error('rejected-header-private-message');
+				},
+			}),
+			200,
+		],
+		['malformed headers', (body: Readable) => ({ statusCode: 200, headers: [], body }), 200],
+	] as const)(
+		'maps a rejected helper response with %s to protocol failure and destroys its stream',
+		async (_label, makeRejectedResponse, expectedStatusCode) => {
+			const body = new PassThrough();
+			const adapter = mockAdapter(async () => {
+				throw { response: makeRejectedResponse(body) };
+			});
+			const error = await captureError(
+				createCalDavTransport('https://calendar.example.test/', adapter).request({
+					method: CalDavMethod.GET,
+				}),
+			);
+
+			expectStableError(
+				error,
+				CalDavRemoteProtocolError,
+				'REMOTE_PROTOCOL_ERROR',
+				'The CalDAV server returned an unexpected response.',
+				expectedStatusCode,
+			);
+			expect(body.destroyed).toBe(true);
+			expect(`${error.stack}${JSON.stringify(error)}`).not.toContain(
+				'rejected-header-private-message',
+			);
+		},
+	);
+
+	it.each([
 		['null envelope', null],
 		['missing status', { headers: {}, body: Readable.from([]) }],
 		['fractional status', { statusCode: 200.5, headers: {}, body: Readable.from([]) }],
