@@ -85,6 +85,19 @@ describe('Radicale harness public commands and test discovery', () => {
 });
 
 describe('Radicale image pinning and production separation', () => {
+	it('keeps host access race-free and loopback-only without publishing the internal network', async () => {
+		const harness = await readRepositoryFile(
+			'test/integration/support/radicale-harness-adapter.ts',
+		);
+
+		expect(harness).toContain('server.listen({ host: LOOPBACK_HOST, port: 0, exclusive: true }');
+		expect(harness).toContain("'--internal'");
+		expect(harness).toContain("'exec'");
+		expect(harness).toContain('network.Internal === true');
+		expect(harness).toContain('attachedNetworkNames.length === 1');
+		expect(harness).not.toContain("'--publish'");
+	});
+
 	it('builds Radicale from the accepted immutable official Python base and exact version', async () => {
 		const dockerfiles = await findFilesNamed(cwd(), 'Dockerfile');
 		const radicaleDockerfiles: Array<{ path: string; source: string }> = [];

@@ -5,6 +5,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
+import { createServer, type AddressInfo, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { cwd, env, execPath } from 'node:process';
 import { clearTimeout, setTimeout } from 'node:timers';
@@ -32,7 +33,8 @@ const RADICALE_VERSION = '3.7.7';
 const RUN_LABEL = 'io.n8n-nodes-caldav.radicale-run';
 const IMAGE_VERSION_LABEL = 'io.n8n-nodes-caldav.radicale-version';
 const IMAGE_BASE_LABEL = 'io.n8n-nodes-caldav.python-base';
-const CONTAINER_PORT = '5232/tcp';
+const CONTAINER_PORT_NUMBER = 5232;
+const LOOPBACK_HOST = '127.0.0.1';
 const CONFIG_DIRECTORY = '/var/lib/radicale/.harness';
 const CONFIG_PATH = `${CONFIG_DIRECTORY}/config`;
 const USERS_PATH = `${CONFIG_DIRECTORY}/users`;
@@ -40,7 +42,63 @@ const STORAGE_PATH = '/var/lib/radicale/storage';
 const READINESS_TIMEOUT_MS = 30_000;
 const COMMAND_TIMEOUT_MS = 30_000;
 const BUILD_TIMEOUT_MS = 5 * 60_000;
+const PROXY_SHUTDOWN_TIMEOUT_MS = 5_000;
+const PROXY_PROCESS_IDLE_TIMEOUT_SECONDS = 15;
+const INTERNET_EGRESS_PROBE_TIMEOUT_MS = 5_000;
+const INTERNET_EGRESS_DETECTED_STATUS = 42;
 const MAX_CAPTURE_BYTES = 256 * 1024;
+const DOCKER_EXEC_PROXY_SOURCE = `
+import os
+import selectors
+import socket
+
+target = socket.create_connection(("127.0.0.1", ${CONTAINER_PORT_NUMBER}), timeout=5)
+target.settimeout(5)
+selector = selectors.DefaultSelector()
+selector.register(0, selectors.EVENT_READ, "client")
+selector.register(target, selectors.EVENT_READ, "service")
+finished = False
+
+try:
+    while selector.get_map() and not finished:
+        events = selector.select(${PROXY_PROCESS_IDLE_TIMEOUT_SECONDS})
+        if not events:
+            break
+        for key, _ in events:
+            if key.data == "client":
+                data = os.read(0, 65536)
+                if data:
+                    target.sendall(data)
+                else:
+                    selector.unregister(0)
+                    try:
+                        target.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+            else:
+                data = target.recv(65536)
+                if not data:
+                    finished = True
+                    break
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(1, view):]
+finally:
+    selector.close()
+    target.close()
+`.trim();
+const INTERNET_EGRESS_PROBE_SOURCE = `
+import socket
+import sys
+
+try:
+    connection = socket.create_connection(("1.1.1.1", 443), timeout=2)
+except OSError:
+    sys.exit(0)
+else:
+    connection.close()
+    sys.exit(${INTERNET_EGRESS_DETECTED_STATUS})
+`.trim();
 
 type HarnessStage =
 	| 'docker capability'
@@ -75,6 +133,14 @@ interface InternalRun {
 	readonly storageIdentity: string;
 	readonly networkIdentity: string;
 	endpoint?: string;
+	proxy?: LoopbackProxy;
+}
+
+interface LoopbackProxy {
+	readonly server: Server;
+	readonly sockets: Set<Socket>;
+	readonly processes: Set<ChildProcessWithoutNullStreams>;
+	closing: boolean;
 }
 
 interface DockerMount {
@@ -83,9 +149,10 @@ interface DockerMount {
 	readonly Type?: unknown;
 }
 
-interface DockerPortBinding {
-	readonly HostIp?: unknown;
-	readonly HostPort?: unknown;
+interface DockerNetworkInspection {
+	readonly Driver?: unknown;
+	readonly Internal?: unknown;
+	readonly Name?: unknown;
 }
 
 class HarnessStageError extends Error {
@@ -398,6 +465,181 @@ async function launchService(run: InternalRun): Promise<void> {
 	);
 }
 
+function relayProxyConnection(run: InternalRun, proxy: LoopbackProxy, socket: Socket): void {
+	if (proxy.closing) {
+		socket.destroy();
+		return;
+	}
+
+	let child: ChildProcessWithoutNullStreams;
+	try {
+		child = spawn(
+			'docker',
+			['exec', '--interactive', run.serviceIdentity, 'python', '-c', DOCKER_EXEC_PROXY_SOURCE],
+			{
+				cwd: REPOSITORY_ROOT,
+				env: commandEnvironment(),
+				stdio: ['pipe', 'pipe', 'pipe'],
+			},
+		);
+	} catch {
+		socket.destroy();
+		return;
+	}
+
+	proxy.sockets.add(socket);
+	proxy.processes.add(child);
+	socket.setNoDelay(true);
+	socket.setTimeout(PROXY_PROCESS_IDLE_TIMEOUT_SECONDS * 1_000, () => {
+		socket.destroy();
+	});
+	socket.on('error', () => {
+		// The subprocess close path below owns connection shutdown diagnostics.
+	});
+	child.stdin.on('error', () => {
+		// A closed client or container is an expected per-connection failure mode.
+	});
+	child.stderr.resume();
+
+	let forcedExit: NodeJS.Timeout | undefined;
+	const clearForcedExit = () => {
+		if (forcedExit !== undefined) {
+			clearTimeout(forcedExit);
+			forcedExit = undefined;
+		}
+	};
+
+	child.once('error', () => {
+		clearForcedExit();
+		proxy.processes.delete(child);
+		socket.destroy();
+	});
+	child.once('close', () => {
+		clearForcedExit();
+		proxy.processes.delete(child);
+		if (!socket.destroyed) {
+			socket.end();
+		}
+	});
+	socket.once('close', () => {
+		proxy.sockets.delete(socket);
+		child.stdin.end();
+		if (child.exitCode === null && child.signalCode === null) {
+			forcedExit = setTimeout(() => {
+				child.kill('SIGKILL');
+			}, 1_000);
+			forcedExit.unref();
+		}
+	});
+
+	socket.pipe(child.stdin);
+	child.stdout.pipe(socket);
+}
+
+function readProxyAddress(run: InternalRun, stage: HarnessStage): AddressInfo {
+	const address = run.proxy?.server.address();
+	if (
+		address === undefined ||
+		address === null ||
+		typeof address === 'string' ||
+		address.address !== LOOPBACK_HOST ||
+		!Number.isInteger(address.port) ||
+		address.port <= 0
+	) {
+		throw new HarnessStageError(stage, 'the run-scoped loopback proxy address is unavailable.');
+	}
+
+	return address;
+}
+
+async function startLoopbackProxy(run: InternalRun): Promise<void> {
+	const server = createServer();
+	const proxy: LoopbackProxy = {
+		server,
+		sockets: new Set(),
+		processes: new Set(),
+		closing: false,
+	};
+	run.proxy = proxy;
+	server.on('connection', (socket) => {
+		relayProxyConnection(run, proxy, socket);
+	});
+	server.on('error', () => {
+		for (const socket of proxy.sockets) {
+			socket.destroy();
+		}
+	});
+
+	await new Promise<void>((resolve, reject) => {
+		const onError = () => {
+			reject(new HarnessStageError('startup', 'unable to bind the run-scoped loopback proxy.'));
+		};
+		server.once('error', onError);
+		server.listen({ host: LOOPBACK_HOST, port: 0, exclusive: true }, () => {
+			server.off('error', onError);
+			resolve();
+		});
+	});
+
+	const address = readProxyAddress(run, 'startup');
+	run.endpoint = `http://${LOOPBACK_HOST}:${address.port}/`;
+}
+
+async function closeLoopbackProxy(run: InternalRun): Promise<void> {
+	const proxy = run.proxy;
+	if (proxy === undefined) {
+		return;
+	}
+
+	proxy.closing = true;
+	const processClosures = [...proxy.processes].map(
+		(child) =>
+			new Promise<void>((resolve) => {
+				if (child.exitCode !== null || child.signalCode !== null) {
+					resolve();
+					return;
+				}
+				child.once('close', () => resolve());
+				child.kill('SIGKILL');
+			}),
+	);
+	for (const socket of proxy.sockets) {
+		socket.destroy();
+	}
+
+	const serverClosure = new Promise<void>((resolve, reject) => {
+		if (!proxy.server.listening) {
+			resolve();
+			return;
+		}
+		proxy.server.close((error) => {
+			if (error === undefined) {
+				resolve();
+			} else {
+				reject(error);
+			}
+		});
+	});
+
+	let timeout: NodeJS.Timeout | undefined;
+	try {
+		await Promise.race([
+			Promise.all([serverClosure, ...processClosures]),
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(() => {
+					reject(new HarnessStageError('cleanup', 'loopback proxy shutdown exceeded its timeout.'));
+				}, PROXY_SHUTDOWN_TIMEOUT_MS);
+			}),
+		]);
+	} finally {
+		if (timeout !== undefined) {
+			clearTimeout(timeout);
+		}
+	}
+
+	run.proxy = undefined;
+}
+
 function basicAuthorization(run: Pick<InternalRun, 'username' | 'password'>): string {
 	return `Basic ${Buffer.from(`${run.username}:${run.password}`, 'utf8').toString('base64')}`;
 }
@@ -448,24 +690,6 @@ async function waitForReadiness(run: InternalRun): Promise<void> {
 	);
 }
 
-async function readEndpoint(run: InternalRun): Promise<string> {
-	const result = await runDocker(['port', run.serviceIdentity, CONTAINER_PORT], 'startup');
-	const bindings = result.stdout
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0);
-	if (bindings.length !== 1) {
-		throw new HarnessStageError('startup', 'Docker returned an ambiguous host binding.');
-	}
-
-	const match = /^127\.0\.0\.1:(\d+)$/.exec(bindings[0]);
-	if (match === null) {
-		throw new HarnessStageError('startup', 'Docker did not publish the service on IPv4 loopback.');
-	}
-
-	return `http://127.0.0.1:${match[1]}/`;
-}
-
 async function createDockerResources(run: InternalRun): Promise<void> {
 	const label = `${RUN_LABEL}=${run.identity}`;
 	await runDocker(
@@ -491,8 +715,6 @@ async function createDockerResources(run: InternalRun): Promise<void> {
 			label,
 			'--network',
 			run.networkIdentity,
-			'--publish',
-			`127.0.0.1::${CONTAINER_PORT}`,
 			'--mount',
 			`type=volume,source=${run.storageIdentity},destination=${STORAGE_PATH}`,
 			'--mount',
@@ -515,9 +737,9 @@ async function createDockerResources(run: InternalRun): Promise<void> {
 		'startup',
 	);
 	await runDocker(['start', run.serviceIdentity], 'startup');
-	run.endpoint = await readEndpoint(run);
 	await configureContainer(run);
 	await launchService(run);
+	await startLoopbackProxy(run);
 	await waitForReadiness(run);
 }
 
@@ -591,6 +813,28 @@ async function cleanupResources(runIdentity: string): Promise<void> {
 	}
 }
 
+async function cleanupOwnedResources(run: InternalRun): Promise<void> {
+	const failures: string[] = [];
+	try {
+		await closeLoopbackProxy(run);
+	} catch (error) {
+		failures.push(sanitizedFailure(error));
+	}
+
+	try {
+		await cleanupResources(run.identity);
+	} catch (error) {
+		failures.push(sanitizedFailure(error));
+	}
+
+	if (failures.length > 0) {
+		throw new HarnessStageError(
+			'cleanup',
+			`${failures.length} owned harness cleanup operation(s) failed.`,
+		);
+	}
+}
+
 async function start(): Promise<RadicaleRun> {
 	await buildImage();
 	const internal = newInternalRun();
@@ -601,7 +845,7 @@ async function start(): Promise<RadicaleRun> {
 		return publicRun(internal);
 	} catch (primaryError) {
 		try {
-			await cleanupResources(internal.identity);
+			await cleanupOwnedResources(internal);
 			runs.delete(internal.identity);
 		} catch (cleanupError) {
 			throw combinedFailure(primaryError, cleanupError);
@@ -653,7 +897,7 @@ async function resetStorage(run: RadicaleRun): Promise<void> {
 		await waitForReadiness(internal);
 	} catch (primaryError) {
 		try {
-			await cleanupResources(internal.identity);
+			await cleanupOwnedResources(internal);
 			runs.delete(internal.identity);
 		} catch (cleanupError) {
 			throw combinedFailure(primaryError, cleanupError);
@@ -666,9 +910,10 @@ async function teardown(run: RadicaleRun): Promise<void> {
 	const internal = runs.get(run.identity);
 	if (internal !== undefined) {
 		lookupRun(run);
+		await cleanupOwnedResources(internal);
+	} else {
+		await cleanupResources(run.identity);
 	}
-
-	await cleanupResources(run.identity);
 	runs.delete(run.identity);
 }
 
@@ -678,39 +923,92 @@ async function findLiveResources(runIdentity: string): Promise<readonly string[]
 		listDockerResources('volume', runIdentity, 'inspection'),
 		listDockerResources('network', runIdentity, 'inspection'),
 	]);
+	const proxy = runs.get(runIdentity)?.proxy;
+	const proxyResources =
+		proxy !== undefined &&
+		(proxy.server.listening || proxy.sockets.size > 0 || proxy.processes.size > 0)
+			? [`proxy:${runIdentity}`]
+			: [];
 
 	return [
+		...proxyResources,
 		...containers.map((identity) => `container:${identity}`),
 		...volumes.map((identity) => `volume:${identity}`),
 		...networks.map((identity) => `network:${identity}`),
 	].sort();
 }
 
+async function probeRuntimeInternetEgress(run: InternalRun): Promise<boolean> {
+	const result = await runDocker(
+		['exec', run.serviceIdentity, 'python', '-c', INTERNET_EGRESS_PROBE_SOURCE],
+		'inspection',
+		{ allowNonzero: true, timeoutMs: INTERNET_EGRESS_PROBE_TIMEOUT_MS },
+	);
+	if (result.status === 0) {
+		return false;
+	}
+	if (result.status === INTERNET_EGRESS_DETECTED_STATUS) {
+		return true;
+	}
+
+	throw new HarnessStageError(
+		'inspection',
+		'the runtime internet egress probe returned an unrecognized result.',
+	);
+}
+
 async function inspect(run: RadicaleRun): Promise<RadicaleRunInspection> {
 	const internal = lookupRun(run);
-	const [portResult, networkResult, mountResult, liveResourceIdentities] = await Promise.all([
+	const [
+		portResult,
+		networkResult,
+		serviceNetworkResult,
+		mountResult,
+		liveResourceIdentities,
+		observedInternetEgress,
+	] = await Promise.all([
 		runDocker(
 			['inspect', internal.serviceIdentity, '--format', '{{json .NetworkSettings.Ports}}'],
 			'inspection',
 		),
 		runDocker(
-			['network', 'inspect', internal.networkIdentity, '--format', '{{.Internal}}'],
+			['network', 'inspect', internal.networkIdentity, '--format', '{{json .}}'],
+			'inspection',
+		),
+		runDocker(
+			['inspect', internal.serviceIdentity, '--format', '{{json .NetworkSettings.Networks}}'],
 			'inspection',
 		),
 		runDocker(['inspect', internal.serviceIdentity, '--format', '{{json .Mounts}}'], 'inspection'),
 		findLiveResources(internal.identity),
+		probeRuntimeInternetEgress(internal),
 	]);
 
 	let loopbackOnly = false;
+	let runtimeInternetEgress = true;
 	let repositoryLocalRuntimeOnly = false;
 	try {
-		const ports = JSON.parse(portResult.stdout) as Record<string, DockerPortBinding[]>;
-		const bindings = ports[CONTAINER_PORT] ?? [];
+		const ports = JSON.parse(portResult.stdout) as Record<string, unknown[] | null>;
+		const hasNoPublishedPorts = Object.values(ports).every(
+			(bindings) => bindings === null || bindings.length === 0,
+		);
+		const proxyAddress = readProxyAddress(internal, 'inspection');
 		loopbackOnly =
-			bindings.length === 1 &&
-			bindings[0].HostIp === '127.0.0.1' &&
-			typeof bindings[0].HostPort === 'string' &&
-			/^\d+$/.test(bindings[0].HostPort);
+			hasNoPublishedPorts &&
+			internal.proxy?.server.listening === true &&
+			internal.endpoint === `http://${LOOPBACK_HOST}:${proxyAddress.port}/`;
+
+		const network = JSON.parse(networkResult.stdout) as DockerNetworkInspection;
+		const serviceNetworks = JSON.parse(serviceNetworkResult.stdout) as Record<string, unknown>;
+		const attachedNetworkNames = Object.keys(serviceNetworks);
+		const attachedOnlyToInternalNetwork =
+			attachedNetworkNames.length === 1 && attachedNetworkNames[0] === internal.networkIdentity;
+		const enforcedInternalBridge =
+			network.Name === internal.networkIdentity &&
+			network.Driver === 'bridge' &&
+			network.Internal === true;
+		runtimeInternetEgress =
+			observedInternetEgress || !(enforcedInternalBridge && attachedOnlyToInternalNetwork);
 
 		const mounts = JSON.parse(mountResult.stdout) as DockerMount[];
 		repositoryLocalRuntimeOnly =
@@ -724,10 +1022,9 @@ async function inspect(run: RadicaleRun): Promise<RadicaleRunInspection> {
 		throw new HarnessStageError('inspection', 'Docker returned malformed resource metadata.');
 	}
 
-	const internalNetwork = networkResult.stdout.trim() === 'true';
 	return {
 		loopbackOnly,
-		runtimeInternetEgress: !internalNetwork,
+		runtimeInternetEgress,
 		repositoryLocalRuntimeOnly,
 		liveResourceIdentities,
 	};
