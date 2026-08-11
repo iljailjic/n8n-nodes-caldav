@@ -12,18 +12,24 @@ import * as httpTransport from '../../nodes/CalDav/transport/http';
 import {
 	CALDAV_CREDENTIAL_TYPE,
 	CALDAV_MAX_ERROR_EXCERPT_BYTES,
+	CALDAV_MAX_REDIRECTS,
 	CALDAV_MAX_RESPONSE_BYTES,
 	CALDAV_REQUEST_TIMEOUT_MS,
 	CalDavAuthenticationError,
 	CalDavAuthorizationError,
+	CalDavInsecureRedirectError,
+	CalDavInvalidRedirectError,
 	CalDavMethod,
 	CalDavNetworkError,
 	CalDavNotFoundError,
+	CalDavRedirectLimitError,
+	CalDavRedirectLoopError,
 	CalDavRemoteProtocolError,
 	CalDavResponseLimitError,
 	CalDavTimeoutError,
 	CalDavTransportError,
 	CalDavTransportErrorCode,
+	CalDavUntrustedTargetError,
 	createCalDavTransport,
 	createN8nCalDavRequestHelperAdapter,
 	createN8nCalDavTransport,
@@ -95,18 +101,24 @@ describe('CalDAV transport public contract', () => {
 			[
 				'CALDAV_CREDENTIAL_TYPE',
 				'CALDAV_MAX_ERROR_EXCERPT_BYTES',
+				'CALDAV_MAX_REDIRECTS',
 				'CALDAV_MAX_RESPONSE_BYTES',
 				'CALDAV_REQUEST_TIMEOUT_MS',
 				'CalDavAuthenticationError',
 				'CalDavAuthorizationError',
+				'CalDavInsecureRedirectError',
+				'CalDavInvalidRedirectError',
 				'CalDavMethod',
 				'CalDavNetworkError',
 				'CalDavNotFoundError',
+				'CalDavRedirectLimitError',
+				'CalDavRedirectLoopError',
 				'CalDavRemoteProtocolError',
 				'CalDavResponseLimitError',
 				'CalDavTimeoutError',
 				'CalDavTransportError',
 				'CalDavTransportErrorCode',
+				'CalDavUntrustedTargetError',
 				'createCalDavTransport',
 				'createN8nCalDavRequestHelperAdapter',
 				'createN8nCalDavTransport',
@@ -116,6 +128,7 @@ describe('CalDAV transport public contract', () => {
 		expect(CALDAV_REQUEST_TIMEOUT_MS).toBe(30_000);
 		expect(CALDAV_MAX_RESPONSE_BYTES).toBe(10_485_760);
 		expect(CALDAV_MAX_ERROR_EXCERPT_BYTES).toBe(8_192);
+		expect(CALDAV_MAX_REDIRECTS).toBe(5);
 		expect(CalDavMethod).toEqual({
 			OPTIONS: 'OPTIONS',
 			PROPFIND: 'PROPFIND',
@@ -132,6 +145,11 @@ describe('CalDAV transport public contract', () => {
 			RESPONSE_LIMIT_EXCEEDED: 'RESPONSE_LIMIT_EXCEEDED',
 			REMOTE_PROTOCOL_ERROR: 'REMOTE_PROTOCOL_ERROR',
 			NETWORK_ERROR: 'NETWORK_ERROR',
+			INVALID_REDIRECT: 'INVALID_REDIRECT',
+			INSECURE_REDIRECT: 'INSECURE_REDIRECT',
+			UNTRUSTED_TARGET: 'UNTRUSTED_TARGET',
+			REDIRECT_LOOP: 'REDIRECT_LOOP',
+			REDIRECT_LIMIT_EXCEEDED: 'REDIRECT_LIMIT_EXCEEDED',
 		});
 	});
 
@@ -177,6 +195,36 @@ describe('CalDAV transport public contract', () => {
 			CalDavNetworkError,
 			'NETWORK_ERROR',
 			'The CalDAV server could not be reached.',
+		],
+		[
+			new CalDavInvalidRedirectError(),
+			CalDavInvalidRedirectError,
+			'INVALID_REDIRECT',
+			'The CalDAV server returned an invalid redirect.',
+		],
+		[
+			new CalDavInsecureRedirectError(),
+			CalDavInsecureRedirectError,
+			'INSECURE_REDIRECT',
+			'The CalDAV redirect would use an insecure connection.',
+		],
+		[
+			new CalDavUntrustedTargetError(),
+			CalDavUntrustedTargetError,
+			'UNTRUSTED_TARGET',
+			'The CalDAV request target is not trusted.',
+		],
+		[
+			new CalDavRedirectLoopError(),
+			CalDavRedirectLoopError,
+			'REDIRECT_LOOP',
+			'The CalDAV request encountered a redirect loop.',
+		],
+		[
+			new CalDavRedirectLimitError(),
+			CalDavRedirectLimitError,
+			'REDIRECT_LIMIT_EXCEEDED',
+			'The CalDAV request exceeded the 5-redirect limit.',
 		],
 	] as const)('provides stable %s metadata', (error, errorClass, code, message) => {
 		expectStableError(error, errorClass, code, message);
@@ -264,7 +312,7 @@ describe('request forwarding and the n8n helper seam', () => {
 		const adapter = mockAdapter(async () => response(207, Buffer.from('<multistatus />')));
 		const transport = createCalDavTransport('https://calendar.example.test/root/', adapter);
 		const explicitUrl = validateAbsoluteHttpUrl(
-			'https://partition.example.test/a%2Fb//principal/?opaque=%2F',
+			'https://calendar.example.test/a%2Fb//principal/?opaque=%2F',
 		);
 
 		const result = await transport.request({ method: CalDavMethod.PROPFIND, url: explicitUrl });
@@ -272,7 +320,7 @@ describe('request forwarding and the n8n helper seam', () => {
 		expect(adapter.request.mock.calls[0][0].url).toBe(explicitUrl);
 		expect(result.effectiveUrl).toBe(explicitUrl);
 		expect(resolveCalDavHref(result.effectiveUrl, 'calendars/work/')).toBe(
-			'https://partition.example.test/a%2Fb//principal/calendars/work/',
+			'https://calendar.example.test/a%2Fb//principal/calendars/work/',
 		);
 	});
 
@@ -640,7 +688,7 @@ describe('HTTP, network, and malformed-response errors', () => {
 		expect(`${error.stack}${JSON.stringify(error)}`).not.toContain('private-response');
 	});
 
-	it.each([302, 307, 308])('does not follow an HTTP %s redirect', async (statusCode) => {
+	it.each([300, 304, 305, 306])('does not follow an HTTP %s redirect', async (statusCode) => {
 		const adapter = mockAdapter(async () =>
 			response(statusCode, Buffer.from('private-redirect-body'), {
 				Location:
@@ -896,6 +944,8 @@ describe('production dependency boundary', () => {
 			'node:stream',
 			'n8n-workflow',
 			'../../../credentials/CalDavApi.credentials',
+			'../providers/registry',
+			'../providers/types',
 			'./url',
 		]);
 		expect(source.match(/as IHttpRequestOptions/g)).toHaveLength(1);
