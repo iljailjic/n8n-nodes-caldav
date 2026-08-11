@@ -378,6 +378,64 @@ describe('request forwarding and the n8n helper seam', () => {
 		expect(request.mock.calls[0][0]).not.toHaveProperty('skipSslCertificateValidation');
 	});
 
+	it.each([CalDavMethod.OPTIONS, CalDavMethod.PROPFIND])(
+		'credential-test adapter permits the read-only %s method',
+		async (method) => {
+			const request = vi.fn(async () => response(200));
+			const context = { helpers: { request } } as unknown as ICredentialTestFunctions;
+			const adapter = createN8nCalDavRequestHelperAdapter(context, {
+				serverUrl: 'https://credentials.example.test/',
+				username: 'username-sentinel',
+				password: 'password-sentinel',
+			});
+
+			await expect(
+				adapter.request({
+					method,
+					url: 'https://credentials.example.test/' as N8nCalDavRequestOptions['url'],
+					encoding: 'stream',
+					returnFullResponse: true,
+					ignoreHttpStatusErrors: true,
+					disableFollowRedirect: true,
+					sendCredentialsOnCrossOriginRedirect: false,
+					timeout: 30_000,
+				}),
+			).resolves.toMatchObject({ statusCode: 200 });
+			expect(request).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	it.each([CalDavMethod.GET, CalDavMethod.REPORT, CalDavMethod.PUT, CalDavMethod.DELETE])(
+		'credential-test adapter rejects the non-contract %s method before the helper',
+		async (method) => {
+			const request = vi.fn();
+			const context = { helpers: { request } } as unknown as ICredentialTestFunctions;
+			const adapter = createN8nCalDavRequestHelperAdapter(context, {
+				serverUrl: 'https://credentials.example.test/',
+				username: 'username-sentinel',
+				password: 'password-sentinel',
+			});
+
+			await expect(
+				adapter.request({
+					method,
+					url: 'https://credentials.example.test/private-target/' as N8nCalDavRequestOptions['url'],
+					encoding: 'stream',
+					returnFullResponse: true,
+					ignoreHttpStatusErrors: true,
+					disableFollowRedirect: true,
+					sendCredentialsOnCrossOriginRedirect: false,
+					timeout: 30_000,
+				}),
+			).rejects.toMatchObject({
+				name: 'CalDavInvalidRedirectError',
+				code: 'INVALID_REDIRECT',
+				message: 'The CalDAV server returned an invalid redirect.',
+			});
+			expect(request).not.toHaveBeenCalled();
+		},
+	);
+
 	it.each([
 		[true, false],
 		[false, true],
@@ -455,6 +513,23 @@ describe('request forwarding and the n8n helper seam', () => {
 		expect(adapter.request).not.toHaveBeenCalled();
 	});
 
+	it('preserves network mapping when a non-credential-test adapter rejects with a redirect error', async () => {
+		const adapter = mockAdapter(async () => {
+			throw new CalDavInvalidRedirectError();
+		});
+		const transport = createCalDavTransport('https://calendar.example.test/', adapter);
+
+		const error = await captureError(transport.request({ method: CalDavMethod.OPTIONS }));
+
+		expectStableError(
+			error,
+			CalDavNetworkError,
+			'NETWORK_ERROR',
+			'The CalDAV server could not be reached.',
+		);
+		expect(adapter.request).toHaveBeenCalledTimes(1);
+	});
+
 	it('uses credential preflight and delegates Basic auth and TLS policy to the authenticated helper', async () => {
 		const credentials = {
 			serverUrl: '  https://credentials.example.test/dav/  ',
@@ -497,12 +572,32 @@ describe('request forwarding and the n8n helper seam', () => {
 	});
 
 	it.each([
-		'https://calendar.example.test/account private/',
-		'https://calendar.example.test/account\tprivate/',
-		'https://calendar.example.test/account\nprivate/',
-	])(
-		'credential-test transport rejects embedded URL whitespace before a helper call',
-		async (serverUrl) => {
+		['embedded space', 'https://calendar.example.test/account private/', 'MALFORMED_URL'],
+		['embedded tab', 'https://calendar.example.test/account\tprivate/', 'MALFORMED_URL'],
+		['embedded newline', 'https://calendar.example.test/account\nprivate/', 'MALFORMED_URL'],
+		[
+			'fragment',
+			'https://calendar.example.test/account-private/#fragment-private',
+			'FRAGMENT_NOT_ALLOWED',
+		],
+		[
+			'malformed percent encoding',
+			'https://calendar.example.test/account-private/%zz-private',
+			'MALFORMED_PERCENT_ENCODING',
+		],
+		[
+			'dot segment',
+			'https://calendar.example.test/account-private/../target-private/',
+			'DOT_SEGMENT_NOT_ALLOWED',
+		],
+		[
+			'userinfo',
+			'https://url-user:url-password@calendar.example.test/account-private/',
+			'MALFORMED_URL',
+		],
+	] as const)(
+		'credential-test transport rejects configured URL with %s before a helper call',
+		async (_label, serverUrl, code) => {
 			const request = vi.fn();
 			const credential = {
 				id: 'credential-id-private',
@@ -523,7 +618,7 @@ describe('request forwarding and the n8n helper seam', () => {
 			await expect(transportPromise).rejects.toEqual(
 				expect.objectContaining({
 					name: 'CalDavUrlValidationError',
-					code: 'MALFORMED_URL',
+					code,
 				}),
 			);
 			expect(request).not.toHaveBeenCalled();

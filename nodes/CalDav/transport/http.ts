@@ -86,6 +86,8 @@ export interface CalDavRequestHelperAdapter {
 	request(options: N8nCalDavRequestOptions): Promise<IN8nHttpFullResponse>;
 }
 
+const CREDENTIAL_TEST_ADAPTERS = new WeakSet<CalDavRequestHelperAdapter>();
+
 interface LegacyCredentialTestRequestOptions {
 	readonly url: string;
 	readonly method: CalDavMethod;
@@ -858,6 +860,12 @@ export function createCalDavTransport(
 					try {
 						helperResponse = await adapter.request(options);
 					} catch (error) {
+						if (
+							CREDENTIAL_TEST_ADAPTERS.has(adapter) &&
+							error instanceof CalDavInvalidRedirectError
+						) {
+							throw error;
+						}
 						if (isTlsValidationFailure(error)) {
 							throw new CalDavTlsError();
 						}
@@ -993,8 +1001,12 @@ export function createN8nCalDavRequestHelperAdapter(
 			throw new CalDavAuthenticationError();
 		}
 
-		return {
+		const adapter: CalDavRequestHelperAdapter = {
 			async request(options: N8nCalDavRequestOptions): Promise<IN8nHttpFullResponse> {
+				if (options.method !== CalDavMethod.OPTIONS && options.method !== CalDavMethod.PROPFIND) {
+					throw new CalDavInvalidRedirectError();
+				}
+
 				const authenticationOptions: IHttpRequestOptions = {
 					...options,
 					// n8n's modern public method union omits the WebDAV OPTIONS/PROPFIND/REPORT verbs.
@@ -1022,6 +1034,8 @@ export function createN8nCalDavRequestHelperAdapter(
 				return (await credentialTestContext.helpers.request(legacyOptions)) as IN8nHttpFullResponse;
 			},
 		};
+		CREDENTIAL_TEST_ADAPTERS.add(adapter);
+		return adapter;
 	}
 
 	const executionContext = context as IExecuteFunctions;
@@ -1064,7 +1078,7 @@ export async function createN8nCalDavTransport(
 			throw new CalDavUrlValidationError('MALFORMED_URL');
 		}
 
-		const serverUrl = serverUrlValidation.newValue;
+		const serverUrl = validateAbsoluteHttpUrl(serverUrlValidation.newValue);
 		return createCalDavTransport(
 			serverUrl,
 			createN8nCalDavRequestHelperAdapter(context as ICredentialTestFunctions, credentials),

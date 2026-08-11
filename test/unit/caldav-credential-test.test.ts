@@ -182,6 +182,48 @@ describe('CalDAV credential-test registration and successful orchestration', () 
 describe('CalDAV credential-test sanitized failure mapping and stopping', () => {
 	it.each([
 		[
+			'capability',
+			() => [response(303, 'capability-redirect-private', { Location: '/after-303-private/' })],
+			['OPTIONS'],
+		],
+		[
+			'principal',
+			() => [
+				response(200, '', { DAV: 'calendar-access' }),
+				response(303, 'principal-redirect-private', { Location: '/after-303-private/' }),
+			],
+			['OPTIONS', 'PROPFIND'],
+		],
+		[
+			'home',
+			() => [
+				response(200, '', { DAV: 'calendar-access' }),
+				response(207, PRINCIPAL_XML),
+				response(303, 'home-redirect-private', { Location: '/after-303-private/' }),
+			],
+			['OPTIONS', 'PROPFIND', 'PROPFIND'],
+		],
+	] as const)(
+		'maps a 303 during %s to an unsafe redirect without issuing GET',
+		async (_phase, responseFactory, expectedMethods) => {
+			const request = vi.fn();
+			for (const helperResponse of responseFactory()) {
+				request.mockResolvedValueOnce(helperResponse);
+			}
+
+			const result = await run(request);
+			const calls = request.mock.calls.map(([options]) => options as LegacyRequestOptions);
+
+			expect(result).toEqual({ status: 'Error', message: MESSAGES.REDIRECT });
+			expect(calls.map(({ method }) => method)).toEqual(expectedMethods);
+			expect(calls.every(({ method }) => method !== 'GET')).toBe(true);
+			expect(calls.every(({ url }) => !url?.includes('after-303-private'))).toBe(true);
+			expect(JSON.stringify(result)).not.toMatch(/after-303-private|redirect-private/);
+		},
+	);
+
+	it.each([
+		[
 			'401',
 			() => vi.fn().mockResolvedValue(response(401, 'private-401-body')),
 			MESSAGES.AUTHENTICATION,
@@ -358,13 +400,25 @@ describe('CalDAV credential-test sanitized failure mapping and stopping', () => 
 			credential({ serverUrl: 'https://calendar.example.test/account\nprivate/' }),
 			MESSAGES.INVALID_URL,
 		],
+		[
+			'configured URL with a fragment',
+			credential({
+				serverUrl: 'https://calendar.example.test/account-private/#fragment-private',
+			}),
+			MESSAGES.INVALID_URL,
+		],
+		[
+			'configured URL with malformed percent encoding',
+			credential({ serverUrl: 'https://calendar.example.test/account-private/%zz-private' }),
+			MESSAGES.INVALID_URL,
+		],
 	] as const)('fails %s before any helper request', async (_label, credentials, message) => {
 		const request = vi.fn();
 		const result = await run(request, credentials);
 
 		expect(result).toEqual({ status: 'Error', message });
 		expect(JSON.stringify(result)).not.toMatch(
-			/account private|account\\tprivate|account\\nprivate/,
+			/account private|account\\tprivate|account\\nprivate|fragment-private|%zz-private/,
 		);
 		expect(request).not.toHaveBeenCalled();
 	});
