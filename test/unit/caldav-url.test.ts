@@ -4,6 +4,7 @@ import {
 	CalDavUrlErrorCode,
 	CalDavUrlValidationError,
 	joinCalendarCollectionUrl,
+	normalizeCalendarCollectionUrl,
 	resolveCalDavHref,
 	validateAbsoluteHttpUrl,
 } from '../../nodes/CalDav/transport/url';
@@ -255,6 +256,37 @@ describe('resolveCalDavHref', () => {
 			);
 		},
 	);
+});
+
+describe('normalizeCalendarCollectionUrl', () => {
+	it.each([
+		['https://example.test/home', 'https://example.test/home/'],
+		['https://example.test/home/', 'https://example.test/home/'],
+		['https://example.test', 'https://example.test/'],
+		['https://example.test/?view=all', 'https://example.test/?view=all'],
+		['https://example.test/a%2Fb//home?view=%2F', 'https://example.test/a%2Fb//home/?view=%2F'],
+		['https://example.test/a%2F', 'https://example.test/a%2F/'],
+		['https://example.test/a%2f?case=%2f', 'https://example.test/a%2f/?case=%2f'],
+		['HTTPS://MÜNICH.example/雪', 'https://xn--mnich-kva.example/%E9%9B%AA/'],
+	] as const)('normalizes the opaque collection URL %s', (input, expected) => {
+		expect(normalizeCalendarCollectionUrl(input)).toBe(expected);
+	});
+
+	it('does not guess or reinterpret provider-specific path segments', () => {
+		expect(normalizeCalendarCollectionUrl('https://p42-caldav.icloud.com/account-sentinel')).toBe(
+			'https://p42-caldav.icloud.com/account-sentinel/',
+		);
+	});
+
+	it.each([
+		['/relative/home', 'MALFORMED_URL'],
+		['ftp://example.test/home', 'UNSUPPORTED_SCHEME'],
+		['https://user:password@example.test/home', 'USERINFO_NOT_ALLOWED'],
+		['https://example.test/home#fragment', 'FRAGMENT_NOT_ALLOWED'],
+		['https://example.test/home%GG', 'MALFORMED_PERCENT_ENCODING'],
+	] as const)('preserves absolute HTTP URL validation for %s', (input, code) => {
+		expectUrlError(() => normalizeCalendarCollectionUrl(input), code);
+	});
 });
 
 describe('joinCalendarCollectionUrl', () => {
