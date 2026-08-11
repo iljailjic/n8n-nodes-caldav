@@ -1,5 +1,5 @@
 import type {
-	IAuthenticateGeneric,
+	IAuthenticate,
 	ICredentialType,
 	INodeProperties,
 	ValidationResult,
@@ -7,6 +7,8 @@ import type {
 
 const INVALID_SERVER_URL_MESSAGE =
 	'Server URL must be an absolute HTTP(S) URL without user information';
+const INVALID_USERNAME_MESSAGE = 'CalDAV username must be a non-empty string';
+const INVALID_PASSWORD_MESSAGE = 'CalDAV password must be a non-empty string';
 
 export function validateAndNormalizeServerUrl(serverUrl: unknown): ValidationResult<'url'> {
 	if (typeof serverUrl !== 'string') {
@@ -91,14 +93,29 @@ export class CalDavApi implements ICredentialType {
 		},
 	];
 
-	authenticate: IAuthenticateGeneric = {
-		type: 'generic',
-		properties: {
+	authenticate: IAuthenticate = async (credentials, requestOptions) => {
+		const username = credentials.username;
+		if (typeof username !== 'string' || username.length === 0) {
+			throw new Error(INVALID_USERNAME_MESSAGE);
+		}
+
+		const password = credentials.password;
+		if (typeof password !== 'string' || password.length === 0) {
+			throw new Error(INVALID_PASSWORD_MESSAGE);
+		}
+
+		const serverUrlValidation = validateAndNormalizeServerUrl(credentials.serverUrl);
+		if (!serverUrlValidation.valid) {
+			throw new Error(serverUrlValidation.errorMessage);
+		}
+
+		return {
+			...requestOptions,
 			auth: {
-				username: '={{$credentials.username}}',
-				password: '={{$credentials.password}}',
+				username,
+				password,
 			},
-			skipSslCertificateValidation: '={{$credentials.allowUnauthorizedCerts}}',
-		},
+			skipSslCertificateValidation: credentials.allowUnauthorizedCerts === true,
+		};
 	};
 }

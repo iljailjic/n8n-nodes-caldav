@@ -1,3 +1,4 @@
+import type { ICredentialDataDecryptedObject } from 'n8n-workflow';
 import { describe, expect, it } from 'vitest';
 
 import { CalDavApi, validateAndNormalizeServerUrl } from '../../credentials/CalDavApi.credentials';
@@ -6,6 +7,32 @@ import packageJson from '../../package.json';
 
 describe('CalDAV credentials', () => {
 	const credential = new CalDavApi();
+	const validCredentials: ICredentialDataDecryptedObject = {
+		serverUrl: '  https://credentials.example.test/dav/  ',
+		username: ' username-sentinel ',
+		password: ' password-sentinel ',
+		allowUnauthorizedCerts: false,
+	};
+
+	function getAuthenticate() {
+		if (typeof credential.authenticate !== 'function') {
+			throw new Error('CalDAV credentials must use custom authentication');
+		}
+
+		return credential.authenticate;
+	}
+
+	async function captureAuthenticationError(
+		credentials: ICredentialDataDecryptedObject,
+	): Promise<Error> {
+		try {
+			await getAuthenticate()(credentials, { url: 'https://request.example.test/resource' });
+		} catch (error) {
+			return error as Error;
+		}
+
+		throw new Error('Expected custom authentication to reject invalid credentials');
+	}
 
 	it('exposes the accepted credential identity and exact field order', () => {
 		expect(credential.name).toBe('calDavApi');
@@ -89,19 +116,124 @@ describe('CalDAV credentials', () => {
 		},
 	);
 
-	it('declares the exact n8n generic Basic authentication metadata', () => {
-		expect(credential.authenticate).toEqual({
-			type: 'generic',
-			properties: {
-				auth: {
-					username: '={{$credentials.username}}',
-					password: '={{$credentials.password}}',
-				},
-				skipSslCertificateValidation: '={{$credentials.allowUnauthorizedCerts}}',
-			},
+	it('decorates a new request object while preserving unrelated request options', async () => {
+		const headers = Object.freeze({ Depth: '0', Accept: 'application/xml' });
+		const query = Object.freeze({ page: 2 });
+		const body = Object.freeze({ operation: 'discover' });
+		const previousAuth = Object.freeze({
+			username: 'previous-username',
+			password: 'previous-password',
 		});
-		expect(JSON.stringify(credential.authenticate)).not.toContain('Authorization');
+		const requestOptions = Object.freeze({
+			url: 'https://request.example.test/principals/user@example.test',
+			method: 'POST' as const,
+			headers,
+			qs: query,
+			body,
+			auth: previousAuth,
+			skipSslCertificateValidation: true,
+		});
+
+		const decoratedRequest = await getAuthenticate()(validCredentials, requestOptions);
+
+		expect(decoratedRequest).not.toBe(requestOptions);
+		expect(decoratedRequest.url).toBe(requestOptions.url);
+		expect(decoratedRequest.method).toBe(requestOptions.method);
+		expect(decoratedRequest.headers).toBe(headers);
+		expect(decoratedRequest.qs).toBe(query);
+		expect(decoratedRequest.body).toBe(body);
+		expect(decoratedRequest.auth?.username).toBe(validCredentials.username);
+		expect(decoratedRequest.auth?.password).toBe(validCredentials.password);
+		expect(decoratedRequest.auth).not.toBe(previousAuth);
+		expect(decoratedRequest.skipSslCertificateValidation).toBe(false);
+		expect(requestOptions.auth).toBe(previousAuth);
+		expect(requestOptions.skipSslCertificateValidation).toBe(true);
+		expect(decoratedRequest.headers).not.toHaveProperty('Authorization');
 	});
+
+	it.each([
+		[true, true],
+		[false, false],
+		['true', false],
+		[1, false],
+		[undefined, false],
+	])('disables TLS validation only for literal true (%j)', async (credentialValue, expected) => {
+		const decoratedRequest = await getAuthenticate()(
+			{ ...validCredentials, allowUnauthorizedCerts: credentialValue },
+			{ url: 'https://request.example.test/resource' },
+		);
+
+		expect(decoratedRequest.skipSslCertificateValidation).toBe(expected);
+	});
+
+	it.each([
+		[
+			'missing username',
+			{
+				serverUrl: 'https://credentials.example.test',
+				password: 'password-sentinel',
+			},
+			'username-sentinel',
+			'password-sentinel',
+			'CalDAV username must be a non-empty string',
+		],
+		[
+			'empty password',
+			{
+				serverUrl: 'https://credentials.example.test',
+				username: 'username-sentinel',
+				password: '',
+			},
+			'username-sentinel',
+			'password-sentinel',
+			'CalDAV password must be a non-empty string',
+		],
+		[
+			'non-string username',
+			{
+				serverUrl: 'https://credentials.example.test',
+				username: 42,
+				password: 'password-sentinel',
+			},
+			'username-sentinel',
+			'password-sentinel',
+			'CalDAV username must be a non-empty string',
+		],
+		[
+			'non-string password',
+			{
+				serverUrl: 'https://credentials.example.test',
+				username: 'username-sentinel',
+				password: false,
+			},
+			'username-sentinel',
+			'password-sentinel',
+			'CalDAV password must be a non-empty string',
+		],
+		[
+			'invalid server URL',
+			{
+				serverUrl: 'https://url-user:url-password@credentials.example.test',
+				username: 'username-sentinel',
+				password: 'password-sentinel',
+			},
+			'username-sentinel',
+			'password-sentinel',
+			'Server URL must be an absolute HTTP(S) URL without user information',
+		],
+	] as const)(
+		'rejects %s with a secret-free error',
+		async (_label, credentials, usernameSentinel, passwordSentinel, expectedMessage) => {
+			const error = await captureAuthenticationError(credentials);
+
+			expect(error).toBeInstanceOf(Error);
+			expect(error.message).toBe(expectedMessage);
+			expect(error.message).not.toContain(usernameSentinel);
+			expect(error.message).not.toContain(passwordSentinel);
+			expect(error.message).not.toContain('url-user');
+			expect(error.message).not.toContain('url-password');
+		},
+	);
 
 	it('does not expose a live credential test or provider-specific fields', () => {
 		expect('test' in credential).toBe(false);
