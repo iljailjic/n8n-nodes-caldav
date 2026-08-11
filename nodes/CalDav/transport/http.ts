@@ -418,52 +418,75 @@ async function normalizeResponse(
 		throw new CalDavRemoteProtocolError();
 	}
 
-	let statusCode: unknown;
-	try {
-		statusCode = response.statusCode;
-	} catch {
-		throw new CalDavRemoteProtocolError();
-	}
-
-	if (!isValidStatusCode(statusCode)) {
-		throw new CalDavRemoteProtocolError();
-	}
-
-	let rawHeaders: unknown;
 	let rawBody: unknown;
+	let bodyWasRead = false;
 	try {
-		rawHeaders = response.headers;
 		rawBody = response.body;
+		bodyWasRead = true;
 	} catch {
-		throw new CalDavRemoteProtocolError(statusCode);
+		// Read the status below so a valid known status remains available on the stable error.
 	}
 
-	const headers = normalizeHeaders(rawHeaders, statusCode);
-	if (!(rawBody instanceof Readable)) {
-		throw new CalDavRemoteProtocolError(statusCode);
+	const stream = rawBody instanceof Readable ? rawBody : undefined;
+	let knownStatusCode: number | undefined;
+
+	try {
+		if (stream !== undefined) {
+			onStream(stream);
+		}
+
+		let statusCode: unknown;
+		try {
+			statusCode = response.statusCode;
+		} catch {
+			throw new CalDavRemoteProtocolError();
+		}
+
+		if (!isValidStatusCode(statusCode)) {
+			throw new CalDavRemoteProtocolError();
+		}
+		knownStatusCode = statusCode;
+
+		if (!bodyWasRead || stream === undefined) {
+			throw new CalDavRemoteProtocolError(statusCode);
+		}
+
+		let rawHeaders: unknown;
+		try {
+			rawHeaders = response.headers;
+		} catch {
+			throw new CalDavRemoteProtocolError(statusCode);
+		}
+
+		const headers = normalizeHeaders(rawHeaders, statusCode);
+		const etag = extractEtag(headers, statusCode);
+
+		if (statusCode < 200 || statusCode > 299) {
+			await consumeErrorExcerpt(stream, statusCode);
+			throw mapHttpFailure(statusCode);
+		}
+
+		if (hasOversizedContentLength(headers)) {
+			throw new CalDavResponseLimitError();
+		}
+
+		const body = await consumeSuccessBody(stream, statusCode);
+		return {
+			statusCode,
+			headers,
+			effectiveUrl,
+			...(etag === undefined ? {} : { etag }),
+			body,
+		};
+	} catch (error) {
+		if (stream !== undefined) {
+			safeDestroy(stream);
+		}
+		if (error instanceof CalDavTransportError) {
+			throw error;
+		}
+		throw new CalDavRemoteProtocolError(knownStatusCode);
 	}
-
-	onStream(rawBody);
-	const etag = extractEtag(headers, statusCode);
-
-	if (statusCode < 200 || statusCode > 299) {
-		await consumeErrorExcerpt(rawBody, statusCode);
-		throw mapHttpFailure(statusCode);
-	}
-
-	if (hasOversizedContentLength(headers)) {
-		safeDestroy(rawBody);
-		throw new CalDavResponseLimitError();
-	}
-
-	const body = await consumeSuccessBody(rawBody, statusCode);
-	return {
-		statusCode,
-		headers,
-		effectiveUrl,
-		...(etag === undefined ? {} : { etag }),
-		body,
-	};
 }
 
 function buildRequestOptions(

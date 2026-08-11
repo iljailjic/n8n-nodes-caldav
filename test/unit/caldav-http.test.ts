@@ -460,11 +460,12 @@ describe('successful response normalization', () => {
 	});
 
 	it('rejects conflicting ETag values without exposing either value', async () => {
+		const body = new PassThrough();
 		const error = await captureError(
 			createCalDavTransport(
 				'https://calendar.example.test/',
 				mockAdapter(async () =>
-					response(200, Buffer.alloc(0), { ETag: '"etag-secret-one"', etag: '"etag-secret-two"' }),
+					response(200, body, { ETag: '"etag-secret-one"', etag: '"etag-secret-two"' }),
 				),
 			).request({ method: CalDavMethod.GET }),
 		);
@@ -476,7 +477,30 @@ describe('successful response normalization', () => {
 			'The CalDAV server returned an unexpected response.',
 			200,
 		);
+		expect(body.destroyed).toBe(true);
 		expect(`${error.stack}${JSON.stringify(error)}`).not.toMatch(/etag-secret-one|etag-secret-two/);
+	});
+
+	it.each([
+		['a non-string header', { 'X-Malformed': 42 }],
+		['an empty ETag array', { ETag: [] }],
+	] as const)('destroys a never-ending response stream for %s', async (_label, headers) => {
+		const body = new PassThrough();
+		const error = await captureError(
+			createCalDavTransport(
+				'https://calendar.example.test/',
+				mockAdapter(async () => response(200, body, headers)),
+			).request({ method: CalDavMethod.GET }),
+		);
+
+		expectStableError(
+			error,
+			CalDavRemoteProtocolError,
+			'REMOTE_PROTOCOL_ERROR',
+			'The CalDAV server returned an unexpected response.',
+			200,
+		);
+		expect(body.destroyed).toBe(true);
 	});
 });
 
