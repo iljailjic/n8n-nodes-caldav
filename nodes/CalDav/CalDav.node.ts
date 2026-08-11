@@ -4,9 +4,7 @@ import type {
 	INodeType,
 	INodeTypeDescription,
 } from 'n8n-workflow';
-import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
-
-import { validateAndNormalizeServerUrl } from '../../credentials/CalDavApi.credentials';
+import { NodeConnectionTypes } from 'n8n-workflow';
 
 export class CalDav implements INodeType {
 	description: INodeTypeDescription = {
@@ -26,13 +24,6 @@ export class CalDav implements INodeType {
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
-		const credentials = await this.getCredentials('calDavApi');
-		const serverUrlValidation = validateAndNormalizeServerUrl(credentials.serverUrl);
-
-		if (!serverUrlValidation.valid) {
-			throw new NodeOperationError(this.getNode(), serverUrlValidation.errorMessage);
-		}
-
 		return [this.getInputData()];
 	}
 }

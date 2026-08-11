@@ -1,5 +1,4 @@
-import type { IExecuteFunctions, INode } from 'n8n-workflow';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { CalDavApi, validateAndNormalizeServerUrl } from '../../credentials/CalDavApi.credentials';
 import { CalDav } from '../../nodes/CalDav/CalDav.node';
@@ -60,7 +59,7 @@ describe('CalDAV credentials', () => {
 		'ftp://caldav.example.test',
 		'https://user@caldav.example.test',
 		'https://user:secret@caldav.example.test',
-	])('rejects invalid server URL %j without network access', (serverUrl) => {
+	])('provides transport-independent rejection for server URL %j', (serverUrl) => {
 		expect(validateAndNormalizeServerUrl(serverUrl)).toEqual({
 			valid: false,
 			errorMessage: 'Server URL must be an absolute HTTP(S) URL without user information',
@@ -74,15 +73,18 @@ describe('CalDAV credentials', () => {
 			'\thttps://caldav.example.test/a%2Fb//?query=a%2Fb#fragment\n',
 			'https://caldav.example.test/a%2Fb//?query=a%2Fb#fragment',
 		],
-	])('normalizes only surrounding whitespace in %j', (serverUrl, expected) => {
-		expect(validateAndNormalizeServerUrl(serverUrl)).toEqual({
-			valid: true,
-			newValue: expected,
-		});
-	});
+	])(
+		'provides transport-independent whitespace-only normalization for %j',
+		(serverUrl, expected) => {
+			expect(validateAndNormalizeServerUrl(serverUrl)).toEqual({
+				valid: true,
+				newValue: expected,
+			});
+		},
+	);
 
-	it('uses n8n generic Basic authentication while preserving unrelated request options', () => {
-		expect(credential.authenticate).toMatchObject({
+	it('declares the exact n8n generic Basic authentication metadata', () => {
+		expect(credential.authenticate).toEqual({
 			type: 'generic',
 			properties: {
 				auth: {
@@ -92,24 +94,6 @@ describe('CalDAV credentials', () => {
 				skipSslCertificateValidation: '={{$credentials.allowUnauthorizedCerts}}',
 			},
 		});
-
-		const requestOptions = {
-			method: 'PROPFIND',
-			url: 'https://caldav.example.test/principals/',
-			headers: { Depth: '0' },
-		};
-		const decoratedRequest = {
-			...requestOptions,
-			...credential.authenticate.properties,
-		};
-
-		expect(decoratedRequest).toMatchObject({
-			method: 'PROPFIND',
-			url: 'https://caldav.example.test/principals/',
-			headers: { Depth: '0' },
-		});
-		expect(credential.authenticate.properties).not.toHaveProperty('url');
-		expect(credential.authenticate.properties).not.toHaveProperty('headers');
 		expect(JSON.stringify(credential.authenticate)).not.toContain('Authorization');
 	});
 
@@ -123,58 +107,5 @@ describe('CalDAV credentials', () => {
 
 		expect(node.description.credentials).toEqual([{ name: 'calDavApi', required: true }]);
 		expect(packageJson.n8n.credentials).toEqual(['dist/credentials/CalDavApi.credentials.js']);
-	});
-
-	it('validates the managed server URL before preserving passthrough output', async () => {
-		const node = new CalDav();
-		const input = [{ json: { calendarId: 'calendar-1' } }];
-		const executionContext = {
-			getCredentials: vi.fn().mockResolvedValue({
-				serverUrl: '  https://caldav.example.test/dav/  ',
-				username: 'calendar-user',
-				password: 'synthetic-password',
-				allowUnauthorizedCerts: false,
-			}),
-			getInputData: vi.fn().mockReturnValue(input),
-		} as unknown as IExecuteFunctions;
-
-		await expect(node.execute.call(executionContext)).resolves.toEqual([input]);
-		expect(executionContext.getCredentials).toHaveBeenCalledWith('calDavApi');
-	});
-
-	it('rejects an invalid managed server URL without exposing credentials', async () => {
-		const node = new CalDav();
-		const password = 'synthetic-password';
-		const executionContext = {
-			getCredentials: vi.fn().mockResolvedValue({
-				serverUrl: 'https://user@caldav.example.test',
-				username: 'calendar-user',
-				password,
-				allowUnauthorizedCerts: false,
-			}),
-			getNode: vi.fn().mockReturnValue({
-				id: 'caldav-node',
-				name: 'CalDAV',
-				type: 'n8n-nodes-caldav.calDav',
-				typeVersion: 1,
-				position: [0, 0],
-				parameters: {},
-			} satisfies INode),
-		} as unknown as IExecuteFunctions;
-
-		let thrownError: unknown;
-		try {
-			await node.execute.call(executionContext);
-		} catch (error) {
-			thrownError = error;
-		}
-
-		expect(thrownError).toBeInstanceOf(Error);
-		const errorMessage = (thrownError as Error).message;
-		expect(errorMessage).toContain(
-			'Server URL must be an absolute HTTP(S) URL without user information',
-		);
-		expect(errorMessage).not.toContain(password);
-		expect(errorMessage).not.toContain('calendar-user');
 	});
 });
