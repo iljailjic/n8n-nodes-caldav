@@ -4,7 +4,14 @@ import { readFile } from 'node:fs/promises';
 // eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { PassThrough, Readable } from 'node:stream';
 
-import type { IExecuteFunctions, IHttpRequestOptions, IN8nHttpFullResponse } from 'n8n-workflow';
+import { NodeSslError } from 'n8n-workflow';
+import type {
+	ICredentialDataDecryptedObject,
+	ICredentialTestFunctions,
+	IExecuteFunctions,
+	IHttpRequestOptions,
+	IN8nHttpFullResponse,
+} from 'n8n-workflow';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CalDavApi } from '../../credentials/CalDavApi.credentials';
@@ -27,6 +34,7 @@ import {
 	CalDavRemoteProtocolError,
 	CalDavResponseLimitError,
 	CalDavTimeoutError,
+	CalDavTlsError,
 	CalDavTransportError,
 	CalDavTransportErrorCode,
 	CalDavUntrustedTargetError,
@@ -39,7 +47,11 @@ import type {
 	CalDavTransportRequest,
 	N8nCalDavRequestOptions,
 } from '../../nodes/CalDav/transport/http';
-import { resolveCalDavHref, validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import {
+	CalDavUrlValidationError,
+	resolveCalDavHref,
+	validateAbsoluteHttpUrl,
+} from '../../nodes/CalDav/transport/url';
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -116,6 +128,7 @@ describe('CalDAV transport public contract', () => {
 				'CalDavRemoteProtocolError',
 				'CalDavResponseLimitError',
 				'CalDavTimeoutError',
+				'CalDavTlsError',
 				'CalDavTransportError',
 				'CalDavTransportErrorCode',
 				'CalDavUntrustedTargetError',
@@ -141,6 +154,7 @@ describe('CalDAV transport public contract', () => {
 			AUTHENTICATION_FAILED: 'AUTHENTICATION_FAILED',
 			AUTHORIZATION_FAILED: 'AUTHORIZATION_FAILED',
 			NOT_FOUND: 'NOT_FOUND',
+			TLS_VALIDATION_FAILED: 'TLS_VALIDATION_FAILED',
 			TIMEOUT: 'TIMEOUT',
 			RESPONSE_LIMIT_EXCEEDED: 'RESPONSE_LIMIT_EXCEEDED',
 			REMOTE_PROTOCOL_ERROR: 'REMOTE_PROTOCOL_ERROR',
@@ -171,6 +185,12 @@ describe('CalDAV transport public contract', () => {
 			CalDavNotFoundError,
 			'NOT_FOUND',
 			'The requested CalDAV resource was not found.',
+		],
+		[
+			new CalDavTlsError(),
+			CalDavTlsError,
+			'TLS_VALIDATION_FAILED',
+			'TLS certificate validation failed.',
 		],
 		[
 			new CalDavTimeoutError(),
@@ -308,6 +328,158 @@ describe('request forwarding and the n8n helper seam', () => {
 		expect(input).toEqual({ method, headers, ...(body === undefined ? {} : { body }) });
 	});
 
+	it('adapts credential-test requests through existing authentication and only the legacy helper', async () => {
+		const credentials: ICredentialDataDecryptedObject = {
+			serverUrl: 'https://credentials.example.test/dav/',
+			username: 'username-sentinel',
+			password: 'password-sentinel',
+			allowUnauthorizedCerts: false,
+		};
+		const request = vi.fn(async () => response(207));
+		const context = { helpers: { request } } as unknown as ICredentialTestFunctions;
+		const adapter = createN8nCalDavRequestHelperAdapter(context, credentials);
+		const headers = Object.freeze({
+			Depth: '0',
+			'Content-Type': 'application/xml; charset=utf-8',
+		});
+
+		await adapter.request({
+			method: CalDavMethod.PROPFIND,
+			url: 'https://credentials.example.test/private/' as N8nCalDavRequestOptions['url'],
+			headers,
+			body: '<propfind>private-request</propfind>',
+			encoding: 'stream',
+			returnFullResponse: true,
+			ignoreHttpStatusErrors: true,
+			disableFollowRedirect: true,
+			sendCredentialsOnCrossOriginRedirect: false,
+			timeout: 30_000,
+		});
+
+		expect(request).toHaveBeenCalledTimes(1);
+		expect(request).toHaveBeenCalledWith({
+			url: 'https://credentials.example.test/private/',
+			method: 'PROPFIND',
+			headers,
+			body: '<propfind>private-request</propfind>',
+			useStream: true,
+			resolveWithFullResponse: true,
+			simple: false,
+			followRedirect: false,
+			followAllRedirects: false,
+			sendCredentialsOnCrossOriginRedirect: false,
+			timeout: 30_000,
+			auth: { username: 'username-sentinel', password: 'password-sentinel' },
+			rejectUnauthorized: true,
+		});
+		expect(request.mock.calls[0][0].headers).toBe(headers);
+		expect(request.mock.calls[0][0]).not.toHaveProperty('Authorization');
+		expect(request.mock.calls[0][0]).not.toHaveProperty('encoding');
+		expect(request.mock.calls[0][0]).not.toHaveProperty('skipSslCertificateValidation');
+	});
+
+	it.each([CalDavMethod.OPTIONS, CalDavMethod.PROPFIND])(
+		'credential-test adapter permits the read-only %s method',
+		async (method) => {
+			const request = vi.fn(async () => response(200));
+			const context = { helpers: { request } } as unknown as ICredentialTestFunctions;
+			const adapter = createN8nCalDavRequestHelperAdapter(context, {
+				serverUrl: 'https://credentials.example.test/',
+				username: 'username-sentinel',
+				password: 'password-sentinel',
+			});
+
+			await expect(
+				adapter.request({
+					method,
+					url: 'https://credentials.example.test/' as N8nCalDavRequestOptions['url'],
+					encoding: 'stream',
+					returnFullResponse: true,
+					ignoreHttpStatusErrors: true,
+					disableFollowRedirect: true,
+					sendCredentialsOnCrossOriginRedirect: false,
+					timeout: 30_000,
+				}),
+			).resolves.toMatchObject({ statusCode: 200 });
+			expect(request).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	it.each([CalDavMethod.GET, CalDavMethod.REPORT, CalDavMethod.PUT, CalDavMethod.DELETE])(
+		'credential-test adapter rejects the non-contract %s method before the helper',
+		async (method) => {
+			const request = vi.fn();
+			const context = { helpers: { request } } as unknown as ICredentialTestFunctions;
+			const adapter = createN8nCalDavRequestHelperAdapter(context, {
+				serverUrl: 'https://credentials.example.test/',
+				username: 'username-sentinel',
+				password: 'password-sentinel',
+			});
+
+			await expect(
+				adapter.request({
+					method,
+					url: 'https://credentials.example.test/private-target/' as N8nCalDavRequestOptions['url'],
+					encoding: 'stream',
+					returnFullResponse: true,
+					ignoreHttpStatusErrors: true,
+					disableFollowRedirect: true,
+					sendCredentialsOnCrossOriginRedirect: false,
+					timeout: 30_000,
+				}),
+			).rejects.toMatchObject({
+				name: 'CalDavInvalidRedirectError',
+				code: 'INVALID_REDIRECT',
+				message: 'The CalDAV server returned an invalid redirect.',
+			});
+			expect(request).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([
+		[true, false],
+		[false, true],
+		['true', true],
+		[1, true],
+		[{}, true],
+		[undefined, true],
+	] as const)(
+		'credential-test requests set rejectUnauthorized from literal true only (%j)',
+		async (allowUnauthorizedCerts, expected) => {
+			const request = vi
+				.fn()
+				.mockResolvedValueOnce(response(302, Buffer.alloc(0), { Location: '/redirected-private/' }))
+				.mockResolvedValueOnce(response(200));
+			const context = { helpers: { request } } as unknown as ICredentialTestFunctions;
+			const credential = {
+				serverUrl: 'https://credentials.example.test/dav/',
+				username: 'username-sentinel',
+				password: 'password-sentinel',
+				allowUnauthorizedCerts,
+			};
+			const transport = createCalDavTransport(
+				credential.serverUrl,
+				createN8nCalDavRequestHelperAdapter(context, credential),
+			);
+
+			await transport.request({ method: CalDavMethod.OPTIONS });
+
+			expect(request).toHaveBeenCalledTimes(2);
+			expect(request.mock.calls.map(([options]) => options.rejectUnauthorized)).toEqual([
+				expected,
+				expected,
+			]);
+			expect(
+				request.mock.calls.every(
+					([options]) =>
+						options.auth.username === 'username-sentinel' &&
+						options.auth.password === 'password-sentinel' &&
+						!('Authorization' in options),
+				),
+			).toBe(true);
+		},
+	);
+
 	it('passes an explicit opaque AbsoluteHttpUrl unchanged and composes the effective URL', async () => {
 		const adapter = mockAdapter(async () => response(207, Buffer.from('<multistatus />')));
 		const transport = createCalDavTransport('https://calendar.example.test/root/', adapter);
@@ -339,6 +511,23 @@ describe('request forwarding and the n8n helper seam', () => {
 			'The CalDAV server returned an unexpected response.',
 		);
 		expect(adapter.request).not.toHaveBeenCalled();
+	});
+
+	it('preserves network mapping when a non-credential-test adapter rejects with a redirect error', async () => {
+		const adapter = mockAdapter(async () => {
+			throw new CalDavInvalidRedirectError();
+		});
+		const transport = createCalDavTransport('https://calendar.example.test/', adapter);
+
+		const error = await captureError(transport.request({ method: CalDavMethod.OPTIONS }));
+
+		expectStableError(
+			error,
+			CalDavNetworkError,
+			'NETWORK_ERROR',
+			'The CalDAV server could not be reached.',
+		);
+		expect(adapter.request).toHaveBeenCalledTimes(1);
 	});
 
 	it('uses credential preflight and delegates Basic auth and TLS policy to the authenticated helper', async () => {
@@ -381,6 +570,87 @@ describe('request forwarding and the n8n helper seam', () => {
 		expect(helper.mock.calls[0][1]).not.toHaveProperty('auth');
 		expect(helper.mock.calls[0][1]).not.toHaveProperty('Authorization');
 	});
+
+	it.each([
+		['embedded space', 'https://calendar.example.test/account private/', 'MALFORMED_URL'],
+		['embedded tab', 'https://calendar.example.test/account\tprivate/', 'MALFORMED_URL'],
+		['embedded newline', 'https://calendar.example.test/account\nprivate/', 'MALFORMED_URL'],
+		[
+			'fragment',
+			'https://calendar.example.test/account-private/#fragment-private',
+			'FRAGMENT_NOT_ALLOWED',
+		],
+		[
+			'malformed percent encoding',
+			'https://calendar.example.test/account-private/%zz-private',
+			'MALFORMED_PERCENT_ENCODING',
+		],
+		[
+			'dot segment',
+			'https://calendar.example.test/account-private/../target-private/',
+			'DOT_SEGMENT_NOT_ALLOWED',
+		],
+		[
+			'userinfo',
+			'https://url-user:url-password@calendar.example.test/account-private/',
+			'MALFORMED_URL',
+		],
+	] as const)(
+		'credential-test transport rejects configured URL with %s before a helper call',
+		async (_label, serverUrl, code) => {
+			const request = vi.fn();
+			const credential = {
+				id: 'credential-id-private',
+				name: 'credential-name-private',
+				type: 'calDavApi',
+				data: {
+					serverUrl,
+					username: 'username-sentinel',
+					password: 'password-sentinel',
+				},
+			};
+			const credentialTestContext = {
+				helpers: { request },
+			} as unknown as ICredentialTestFunctions;
+
+			const transportPromise = createN8nCalDavTransport(credentialTestContext, credential);
+			await expect(transportPromise).rejects.toBeInstanceOf(CalDavUrlValidationError);
+			await expect(transportPromise).rejects.toEqual(
+				expect.objectContaining({
+					name: 'CalDavUrlValidationError',
+					code,
+				}),
+			);
+			expect(request).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([
+		['missing username', { password: 'password-sentinel' }],
+		['non-string password', { username: 'username-sentinel', password: 42 }],
+	] as const)(
+		'credential-test transport keeps %s classified as authentication',
+		async (_label, invalidIdentity) => {
+			const request = vi.fn();
+			const credentialTestContext = {
+				helpers: { request },
+			} as unknown as ICredentialTestFunctions;
+			const credential = {
+				id: 'credential-id-private',
+				name: 'credential-name-private',
+				type: 'calDavApi',
+				data: {
+					serverUrl: 'https://calendar.example.test/',
+					...invalidIdentity,
+				},
+			};
+
+			await expect(
+				createN8nCalDavTransport(credentialTestContext, credential),
+			).rejects.toBeInstanceOf(CalDavAuthenticationError);
+			expect(request).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each([
 		['credential retrieval failure', undefined, new Error('credential-store-secret')],
@@ -661,6 +931,32 @@ describe('bounded bodies and one shared deadline', () => {
 });
 
 describe('HTTP, network, and malformed-response errors', () => {
+	it.each([
+		new NodeSslError(Object.assign(new Error('native-tls-private-message'), { code: 'EPROTO' })),
+		Object.assign(new Error('native-certificate-private-message'), {
+			code: 'DEPTH_ZERO_SELF_SIGNED_CERT',
+		}),
+	])('maps recognized TLS validation failure to a sanitized TLS error', async (tlsFailure) => {
+		const error = await captureError(
+			createCalDavTransport(
+				'https://calendar.example.test/',
+				mockAdapter(async () => {
+					throw tlsFailure;
+				}),
+			).request({ method: CalDavMethod.OPTIONS }),
+		);
+
+		expectStableError(
+			error,
+			CalDavTlsError,
+			'TLS_VALIDATION_FAILED',
+			'TLS certificate validation failed.',
+		);
+		expect(`${error.stack}${JSON.stringify(error)}`).not.toMatch(
+			/native-tls-private-message|native-certificate-private-message|EPROTO|DEPTH_ZERO/,
+		);
+	});
+
 	it.each([
 		[401, CalDavAuthenticationError, 'AUTHENTICATION_FAILED', 'CalDAV authentication failed.'],
 		[
@@ -948,8 +1244,10 @@ describe('production dependency boundary', () => {
 			'../providers/types',
 			'./url',
 		]);
-		expect(source.match(/as IHttpRequestOptions/g)).toHaveLength(1);
+		expect(source.match(/as IHttpRequestOptions/g)).toHaveLength(2);
+		expect(source).toContain("method: options.method as IHttpRequestOptions['method']");
 		expect(source).toContain('httpRequestWithAuthentication.call(');
+		expect(source).toContain('credentialTestContext.helpers.request(legacyOptions)');
 		expect(source).not.toMatch(/\b(?:fetch|axios|requestWithAuthentication)\b/);
 		expect(source).not.toMatch(/n8n-core|@n8n\/backend|node_modules/);
 	});

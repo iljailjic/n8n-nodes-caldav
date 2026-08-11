@@ -4,9 +4,20 @@
 // eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { Readable } from 'node:stream';
 
-import type { IExecuteFunctions, IHttpRequestOptions, IN8nHttpFullResponse } from 'n8n-workflow';
+import {
+	NodeSslError,
+	type ICredentialDataDecryptedObject,
+	type ICredentialsDecrypted,
+	type ICredentialTestFunctions,
+	type IExecuteFunctions,
+	type IHttpRequestOptions,
+	type IN8nHttpFullResponse,
+} from 'n8n-workflow';
 
-import { validateAndNormalizeServerUrl } from '../../../credentials/CalDavApi.credentials';
+import {
+	CalDavApi,
+	validateAndNormalizeServerUrl,
+} from '../../../credentials/CalDavApi.credentials';
 import { defaultCalDavProviderRegistry } from '../providers/registry';
 import type { CalDavProviderAdapter, CalDavProviderRegistry } from '../providers/types';
 import {
@@ -75,6 +86,24 @@ export interface CalDavRequestHelperAdapter {
 	request(options: N8nCalDavRequestOptions): Promise<IN8nHttpFullResponse>;
 }
 
+const CREDENTIAL_TEST_ADAPTERS = new WeakSet<CalDavRequestHelperAdapter>();
+
+interface LegacyCredentialTestRequestOptions {
+	readonly url: string;
+	readonly method: CalDavMethod;
+	readonly headers?: IHttpRequestOptions['headers'];
+	readonly body?: IHttpRequestOptions['body'];
+	readonly useStream: true;
+	readonly resolveWithFullResponse: true;
+	readonly simple: false;
+	readonly followRedirect: false;
+	readonly followAllRedirects: false;
+	readonly sendCredentialsOnCrossOriginRedirect: false;
+	readonly timeout: 30_000;
+	readonly auth: IHttpRequestOptions['auth'];
+	readonly rejectUnauthorized: boolean;
+}
+
 export interface CalDavTransport {
 	readonly serverUrl: string;
 	request(input: CalDavTransportRequest): Promise<CalDavTransportResponse>;
@@ -84,6 +113,7 @@ export const CalDavTransportErrorCode = {
 	AUTHENTICATION_FAILED: 'AUTHENTICATION_FAILED',
 	AUTHORIZATION_FAILED: 'AUTHORIZATION_FAILED',
 	NOT_FOUND: 'NOT_FOUND',
+	TLS_VALIDATION_FAILED: 'TLS_VALIDATION_FAILED',
 	TIMEOUT: 'TIMEOUT',
 	RESPONSE_LIMIT_EXCEEDED: 'RESPONSE_LIMIT_EXCEEDED',
 	REMOTE_PROTOCOL_ERROR: 'REMOTE_PROTOCOL_ERROR',
@@ -143,6 +173,12 @@ export class CalDavNotFoundError extends CalDavTransportError {
 			'The requested CalDAV resource was not found.',
 			statusCode,
 		);
+	}
+}
+
+export class CalDavTlsError extends CalDavTransportError {
+	constructor() {
+		super(CalDavTransportErrorCode.TLS_VALIDATION_FAILED, 'TLS certificate validation failed.');
 	}
 }
 
@@ -230,6 +266,39 @@ export class CalDavRedirectLimitError extends CalDavTransportError {
 const SUPPORTED_METHODS = new Set<string>(Object.values(CalDavMethod));
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const TIMEOUT_ERROR_CODES = new Set(['ETIMEDOUT', 'ECONNABORTED']);
+const TLS_VALIDATION_ERROR_CODES = new Set([
+	'CERT_CHAIN_TOO_LONG',
+	'CERT_EXPIRED',
+	'CERT_HAS_EXPIRED',
+	'CERT_NOT_YET_VALID',
+	'CERT_REJECTED',
+	'CERT_REVOKED',
+	'CERT_SIGNATURE_FAILURE',
+	'CERT_UNTRUSTED',
+	'CRL_HAS_EXPIRED',
+	'CRL_NOT_YET_VALID',
+	'CRL_SIGNATURE_FAILURE',
+	'DEPTH_ZERO_SELF_SIGNED_CERT',
+	'ERROR_IN_CERT_NOT_AFTER_FIELD',
+	'ERROR_IN_CERT_NOT_BEFORE_FIELD',
+	'ERROR_IN_CRL_LAST_UPDATE_FIELD',
+	'ERROR_IN_CRL_NEXT_UPDATE_FIELD',
+	'ERR_TLS_CERT_ALTNAME_INVALID',
+	'ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED',
+	'ERR_TLS_CERT_SIGNATURE_ALGORITHM_WEAK',
+	'ERR_TLS_CERT_VALIDITY_TOO_LONG',
+	'INVALID_CA',
+	'INVALID_PURPOSE',
+	'PATH_LENGTH_EXCEEDED',
+	'SELF_SIGNED_CERT_IN_CHAIN',
+	'UNABLE_TO_DECRYPT_CRL_SIGNATURE',
+	'UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY',
+	'UNABLE_TO_DECRYPT_CERT_SIGNATURE',
+	'UNABLE_TO_GET_CRL',
+	'UNABLE_TO_GET_ISSUER_CERT',
+	'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+	'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -246,6 +315,22 @@ function isTimeoutFailure(error: unknown): boolean {
 
 	try {
 		return typeof error.code === 'string' && TIMEOUT_ERROR_CODES.has(error.code);
+	} catch {
+		return false;
+	}
+}
+
+function isTlsValidationFailure(error: unknown): boolean {
+	if (error instanceof NodeSslError) {
+		return true;
+	}
+
+	if (!isRecord(error)) {
+		return false;
+	}
+
+	try {
+		return typeof error.code === 'string' && TLS_VALIDATION_ERROR_CODES.has(error.code);
 	} catch {
 		return false;
 	}
@@ -775,6 +860,15 @@ export function createCalDavTransport(
 					try {
 						helperResponse = await adapter.request(options);
 					} catch (error) {
+						if (
+							CREDENTIAL_TEST_ADAPTERS.has(adapter) &&
+							error instanceof CalDavInvalidRedirectError
+						) {
+							throw error;
+						}
+						if (isTlsValidationFailure(error)) {
+							throw new CalDavTlsError();
+						}
 						if (isTimeoutFailure(error)) {
 							throw new CalDavTimeoutError();
 						}
@@ -891,11 +985,64 @@ export function createCalDavTransport(
 
 export function createN8nCalDavRequestHelperAdapter(
 	context: IExecuteFunctions,
+): CalDavRequestHelperAdapter;
+export function createN8nCalDavRequestHelperAdapter(
+	context: ICredentialTestFunctions,
+	credentials: ICredentialDataDecryptedObject,
+): CalDavRequestHelperAdapter;
+export function createN8nCalDavRequestHelperAdapter(
+	context: IExecuteFunctions | ICredentialTestFunctions,
+	credentials?: ICredentialDataDecryptedObject,
 ): CalDavRequestHelperAdapter {
+	if (credentials !== undefined) {
+		const credentialTestContext = context as ICredentialTestFunctions;
+		const authenticate = new CalDavApi().authenticate;
+		if (typeof authenticate !== 'function') {
+			throw new CalDavAuthenticationError();
+		}
+
+		const adapter: CalDavRequestHelperAdapter = {
+			async request(options: N8nCalDavRequestOptions): Promise<IN8nHttpFullResponse> {
+				if (options.method !== CalDavMethod.OPTIONS && options.method !== CalDavMethod.PROPFIND) {
+					throw new CalDavInvalidRedirectError();
+				}
+
+				const authenticationOptions: IHttpRequestOptions = {
+					...options,
+					// n8n's modern public method union omits the WebDAV OPTIONS/PROPFIND/REPORT verbs.
+					method: options.method as IHttpRequestOptions['method'],
+				};
+				const authenticatedOptions = await authenticate(credentials, authenticationOptions);
+				const legacyOptions: LegacyCredentialTestRequestOptions = {
+					url: authenticatedOptions.url,
+					method: options.method,
+					...(authenticatedOptions.headers === undefined
+						? {}
+						: { headers: authenticatedOptions.headers }),
+					...(authenticatedOptions.body === undefined ? {} : { body: authenticatedOptions.body }),
+					useStream: true,
+					resolveWithFullResponse: true,
+					simple: false,
+					followRedirect: false,
+					followAllRedirects: false,
+					sendCredentialsOnCrossOriginRedirect: false,
+					timeout: CALDAV_REQUEST_TIMEOUT_MS,
+					auth: authenticatedOptions.auth,
+					rejectUnauthorized: authenticatedOptions.skipSslCertificateValidation !== true,
+				};
+
+				return (await credentialTestContext.helpers.request(legacyOptions)) as IN8nHttpFullResponse;
+			},
+		};
+		CREDENTIAL_TEST_ADAPTERS.add(adapter);
+		return adapter;
+	}
+
+	const executionContext = context as IExecuteFunctions;
 	return {
 		request(options: N8nCalDavRequestOptions): Promise<IN8nHttpFullResponse> {
-			return context.helpers.httpRequestWithAuthentication.call(
-				context,
+			return executionContext.helpers.httpRequestWithAuthentication.call(
+				executionContext,
 				CALDAV_CREDENTIAL_TYPE,
 				options as IHttpRequestOptions,
 			);
@@ -905,9 +1052,42 @@ export function createN8nCalDavRequestHelperAdapter(
 
 export async function createN8nCalDavTransport(
 	context: IExecuteFunctions,
+): Promise<CalDavTransport>;
+export async function createN8nCalDavTransport(
+	context: ICredentialTestFunctions,
+	credential: ICredentialsDecrypted<ICredentialDataDecryptedObject>,
+): Promise<CalDavTransport>;
+export async function createN8nCalDavTransport(
+	context: IExecuteFunctions | ICredentialTestFunctions,
+	credential?: ICredentialsDecrypted<ICredentialDataDecryptedObject>,
 ): Promise<CalDavTransport> {
+	if (credential !== undefined) {
+		const credentials = credential.data;
+		if (
+			credentials === undefined ||
+			typeof credentials.username !== 'string' ||
+			credentials.username.length === 0 ||
+			typeof credentials.password !== 'string' ||
+			credentials.password.length === 0
+		) {
+			throw new CalDavAuthenticationError();
+		}
+
+		const serverUrlValidation = validateAndNormalizeServerUrl(credentials.serverUrl);
+		if (!serverUrlValidation.valid || typeof serverUrlValidation.newValue !== 'string') {
+			throw new CalDavUrlValidationError('MALFORMED_URL');
+		}
+
+		const serverUrl = validateAbsoluteHttpUrl(serverUrlValidation.newValue);
+		return createCalDavTransport(
+			serverUrl,
+			createN8nCalDavRequestHelperAdapter(context as ICredentialTestFunctions, credentials),
+		);
+	}
+
+	const executionContext = context as IExecuteFunctions;
 	try {
-		const credentials = await context.getCredentials(CALDAV_CREDENTIAL_TYPE);
+		const credentials = await executionContext.getCredentials(CALDAV_CREDENTIAL_TYPE);
 		if (
 			typeof credentials.username !== 'string' ||
 			credentials.username.length === 0 ||
@@ -918,7 +1098,7 @@ export async function createN8nCalDavTransport(
 		}
 
 		const serverUrl = normalizeServerUrl(credentials.serverUrl);
-		return createCalDavTransport(serverUrl, createN8nCalDavRequestHelperAdapter(context));
+		return createCalDavTransport(serverUrl, createN8nCalDavRequestHelperAdapter(executionContext));
 	} catch {
 		throw new CalDavAuthenticationError();
 	}

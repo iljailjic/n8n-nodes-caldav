@@ -246,7 +246,7 @@ describe('CalDAV credentials', () => {
 		},
 	);
 
-	it('does not expose a live credential test or provider-specific fields', () => {
+	it('does not expose a declarative credential test or provider-specific fields', () => {
 		expect('test' in credential).toBe(false);
 		expect(credential.properties.some(({ name }) => name === 'provider')).toBe(false);
 	});
@@ -254,7 +254,12 @@ describe('CalDAV credentials', () => {
 	it('registers the credential with the node and package manifest', () => {
 		const node = new CalDav();
 
-		expect(node.description.credentials).toEqual([{ name: 'calDavApi', required: true }]);
+		expect(node.description.credentials).toEqual([
+			{ name: 'calDavApi', required: true, testedBy: 'testCalDavApiCredentials' },
+		]);
+		expect(node.methods).toEqual({
+			credentialTest: { testCalDavApiCredentials: expect.any(Function) },
+		});
 		expect(packageJson.n8n.credentials).toEqual(['dist/credentials/CalDavApi.credentials.js']);
 	});
 });
