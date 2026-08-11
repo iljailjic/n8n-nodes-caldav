@@ -19,6 +19,7 @@ export class CalDav implements INodeType {
 		inputs: [NodeConnectionTypes.Main],
 		outputs: [NodeConnectionTypes.Main],
 		usableAsTool: true,
+		credentials: [{ name: 'calDavApi', required: true }],
 		properties: [],
 	};
 
