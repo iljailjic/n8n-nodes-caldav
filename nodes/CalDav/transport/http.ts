@@ -488,7 +488,6 @@ function hasOversizedContentLength(headers: CalDavResponseHeaders): boolean {
 interface CalDavResponseEnvelope {
 	readonly statusCode: number;
 	readonly headers: CalDavResponseHeaders;
-	readonly etag?: string;
 	readonly body: Readable;
 }
 
@@ -541,11 +540,9 @@ function normalizeResponseEnvelope(
 		}
 
 		const headers = normalizeHeaders(rawHeaders, statusCode);
-		const etag = extractEtag(headers, statusCode);
 		return {
 			statusCode,
 			headers,
-			...(etag === undefined ? {} : { etag }),
 			body: stream,
 		};
 	} catch (error) {
@@ -563,9 +560,11 @@ async function consumeFinalResponse(
 	envelope: CalDavResponseEnvelope,
 	effectiveUrl: AbsoluteHttpUrl,
 ): Promise<CalDavTransportResponse> {
-	const { statusCode, headers, etag, body: stream } = envelope;
+	const { statusCode, headers, body: stream } = envelope;
 
 	try {
+		const etag = extractEtag(headers, statusCode);
+
 		if (statusCode < 200 || statusCode > 299) {
 			await consumeErrorExcerpt(stream, statusCode);
 			throw mapHttpFailure(statusCode);

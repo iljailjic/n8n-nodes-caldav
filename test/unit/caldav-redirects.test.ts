@@ -133,6 +133,47 @@ describe('secure redirect target handling', () => {
 		expect(adapter.request.mock.calls[1][0].url).toBe('https://calendar.example.test/next');
 	});
 
+	it.each([
+		['empty ETag array', { Location: '/next', ETag: [] }],
+		['repeated ETag array', { Location: '/next', ETag: ['one', 'two'] }],
+		['conflicting case-variant ETags', { Location: '/next', ETag: 'one', etag: 'two' }],
+	] as const)('ignores %s when following a recognized redirect', async (_label, headers) => {
+		let call = 0;
+		const adapter = mockAdapter(async () => {
+			call += 1;
+			return call === 1 ? response(302, Buffer.alloc(0), headers) : response(204);
+		});
+
+		await createCalDavTransport('https://calendar.example.test/', adapter).request({
+			method: CalDavMethod.GET,
+		});
+		expect(adapter.request).toHaveBeenCalledTimes(2);
+		expect(adapter.request.mock.calls[1][0].url).toBe('https://calendar.example.test/next');
+	});
+
+	it.each([
+		['missing Location with empty ETag', { ETag: [] }],
+		['empty Location with repeated ETags', { Location: '', ETag: ['one', 'two'] }],
+		['missing Location with conflicting ETags', { ETag: 'one', etag: 'two' }],
+	] as const)(
+		'gives invalid %s precedence over anomalous redirect ETags',
+		async (_label, headers) => {
+			const body = new PassThrough();
+			const adapter = mockAdapter(async () => response(302, body, headers));
+			const error = await captureError(
+				createCalDavTransport('https://calendar.example.test/', adapter).request({
+					method: CalDavMethod.GET,
+				}),
+			);
+
+			expect(error).toBeInstanceOf(CalDavInvalidRedirectError);
+			expect(error.code).toBe('INVALID_REDIRECT');
+			expect(error.statusCode).toBe(302);
+			expect(adapter.request).toHaveBeenCalledTimes(1);
+			expect(body.destroyed).toBe(true);
+		},
+	);
+
 	it('maps an inaccessible Location to the stable invalid-redirect error', async () => {
 		const body = new PassThrough();
 		const headers = Object.create(null) as Record<string, unknown>;
