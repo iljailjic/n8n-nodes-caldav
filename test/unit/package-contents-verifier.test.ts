@@ -2,32 +2,126 @@ import { describe, expect, it } from 'vitest';
 
 import { verifyPackOutput } from '../../scripts/verify-package-contents.mjs';
 
-function createPackOutput(paths: string[], bundled: string[] = []) {
+const expectedPackageFiles = [
+	'LICENSE.md',
+	'README.md',
+	'dist/credentials/CalDavApi.credentials.d.ts',
+	'dist/credentials/CalDavApi.credentials.js',
+	'dist/credentials/CalDavApi.credentials.js.map',
+	'dist/nodes/CalDav/caldav.dark.svg',
+	'dist/nodes/CalDav/CalDav.node.d.ts',
+	'dist/nodes/CalDav/CalDav.node.js',
+	'dist/nodes/CalDav/CalDav.node.js.map',
+	'dist/nodes/CalDav/CalDav.node.json',
+	'dist/nodes/CalDav/caldav.svg',
+	'dist/nodes/CalDav/discovery/calendarHome.d.ts',
+	'dist/nodes/CalDav/discovery/calendarHome.js',
+	'dist/nodes/CalDav/discovery/calendarHome.js.map',
+	'dist/nodes/CalDav/discovery/capabilities.d.ts',
+	'dist/nodes/CalDav/discovery/capabilities.js',
+	'dist/nodes/CalDav/discovery/capabilities.js.map',
+	'dist/nodes/CalDav/discovery/currentUserPrincipal.d.ts',
+	'dist/nodes/CalDav/discovery/currentUserPrincipal.js',
+	'dist/nodes/CalDav/discovery/currentUserPrincipal.js.map',
+	'dist/nodes/CalDav/methods/credentialTest.d.ts',
+	'dist/nodes/CalDav/methods/credentialTest.js',
+	'dist/nodes/CalDav/methods/credentialTest.js.map',
+	'dist/nodes/CalDav/providers/icloud.d.ts',
+	'dist/nodes/CalDav/providers/icloud.js',
+	'dist/nodes/CalDav/providers/icloud.js.map',
+	'dist/nodes/CalDav/providers/registry.d.ts',
+	'dist/nodes/CalDav/providers/registry.js',
+	'dist/nodes/CalDav/providers/registry.js.map',
+	'dist/nodes/CalDav/providers/standard.d.ts',
+	'dist/nodes/CalDav/providers/standard.js',
+	'dist/nodes/CalDav/providers/standard.js.map',
+	'dist/nodes/CalDav/providers/types.d.ts',
+	'dist/nodes/CalDav/providers/types.js',
+	'dist/nodes/CalDav/providers/types.js.map',
+	'dist/nodes/CalDav/transport/http.d.ts',
+	'dist/nodes/CalDav/transport/http.js',
+	'dist/nodes/CalDav/transport/http.js.map',
+	'dist/nodes/CalDav/transport/url.d.ts',
+	'dist/nodes/CalDav/transport/url.js',
+	'dist/nodes/CalDav/transport/url.js.map',
+	'dist/nodes/CalDav/xml/errors.d.ts',
+	'dist/nodes/CalDav/xml/errors.js',
+	'dist/nodes/CalDav/xml/errors.js.map',
+	'dist/nodes/CalDav/xml/escape.d.ts',
+	'dist/nodes/CalDav/xml/escape.js',
+	'dist/nodes/CalDav/xml/escape.js.map',
+	'dist/nodes/CalDav/xml/namespaces.d.ts',
+	'dist/nodes/CalDav/xml/namespaces.js',
+	'dist/nodes/CalDav/xml/namespaces.js.map',
+	'dist/nodes/CalDav/xml/parser.d.ts',
+	'dist/nodes/CalDav/xml/parser.js',
+	'dist/nodes/CalDav/xml/parser.js.map',
+	'dist/nodes/CalDav/xml/requests.d.ts',
+	'dist/nodes/CalDav/xml/requests.js',
+	'dist/nodes/CalDav/xml/requests.js.map',
+	'dist/package.json',
+	'package.json',
+];
+
+interface PackResultOverrides {
+	bundled?: unknown;
+	entryCount?: unknown;
+	files?: unknown;
+	name?: unknown;
+	version?: unknown;
+}
+
+function createPackOutput(paths: string[], overrides: PackResultOverrides = {}) {
 	return JSON.stringify([
 		{
-			bundled,
+			name: '@iljailjic/n8n-nodes-caldav',
+			version: '0.1.0',
 			files: paths.map((path) => ({ path })),
+			entryCount: paths.length,
+			bundled: [],
+			...overrides,
 		},
 	]);
 }
 
 describe('package contents verifier', () => {
-	it('accepts production package files', () => {
-		const packOutput = createPackOutput(['package.json', 'dist/nodes/CalDav/CalDav.node.js']);
+	it('accepts only the exact production package manifest', () => {
+		const packOutput = createPackOutput(expectedPackageFiles);
 
 		expect(() => verifyPackOutput(packOutput)).not.toThrow();
 	});
 
 	it.each([
-		['test directory', 'dist/test/unit/example.js', []],
-		['test file', 'dist/nodes/CalDav/example.test.js', []],
-		['fixture', 'dist/fixtures/calendar.ics', []],
-		['Vitest configuration', 'dist/vitest.config.mjs', []],
-		['Vitest library', 'dist/node_modules/@vitest/runner/index.js', []],
-		['bundled Vitest runtime', 'dist/nodes/CalDav/CalDav.node.js', ['vitest']],
-	] as const)('rejects a prohibited %s', (_description, path, bundled) => {
-		const packOutput = createPackOutput(['package.json', path], [...bundled]);
+		['TypeScript build metadata', 'dist/tsconfig.tsbuildinfo'],
+		['private artifact', 'dist/private/account.json'],
+		['test artifact', 'dist/test/unit/example.js'],
+		['fixture artifact', 'dist/fixtures/calendar.ics'],
+		['Vitest artifact', 'dist/vitest.config.mjs'],
+		['bundled source', 'dist/nodes/CalDav/xml/parser.ts'],
+	] as const)('rejects unexpected %s', (_description, path) => {
+		const packOutput = createPackOutput([...expectedPackageFiles, path]);
 
-		expect(() => verifyPackOutput(packOutput)).toThrow('Prohibited package content detected');
+		expect(() => verifyPackOutput(packOutput)).toThrow(
+			'Package contents do not match the expected manifest',
+		);
+	});
+
+	it('rejects bundled dependencies', () => {
+		const packOutput = createPackOutput(expectedPackageFiles, { bundled: ['example-runtime'] });
+
+		expect(() => verifyPackOutput(packOutput)).toThrow('Bundled dependencies detected');
+	});
+
+	it.each([
+		['invalid JSON', '{'],
+		['missing package result', '[]'],
+		['multiple package results', JSON.stringify([{}, {}])],
+		['missing package identity', createPackOutput(expectedPackageFiles, { name: undefined })],
+		['missing file listing', createPackOutput(expectedPackageFiles, { files: undefined })],
+		['invalid file entry', createPackOutput(expectedPackageFiles, { files: [{}] })],
+		['incorrect entry count', createPackOutput(expectedPackageFiles, { entryCount: 57 })],
+		['missing bundled listing', createPackOutput(expectedPackageFiles, { bundled: undefined })],
+	] as const)('rejects malformed or incomplete output: %s', (_description, packOutput) => {
+		expect(() => verifyPackOutput(packOutput)).toThrow();
 	});
 });
