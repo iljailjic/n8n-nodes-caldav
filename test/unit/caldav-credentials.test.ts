@@ -96,6 +96,17 @@ describe('CalDAV credentials', () => {
 	});
 
 	it.each([
+		['hostname-less HTTP(S) URL', 'https://:443/calendar'],
+		['embedded raw whitespace', 'https://caldav.example.test/calendar path'],
+		['malformed no-whitespace HTTP(S) URL', 'https://[::1/calendar'],
+	])('rejects the %s case', (_caseName, serverUrl) => {
+		expect(validateAndNormalizeServerUrl(serverUrl)).toEqual({
+			valid: false,
+			errorMessage: 'Server URL must be an absolute HTTP(S) URL without user information',
+		});
+	});
+
+	it.each([
 		['https://caldav.example.test', 'https://caldav.example.test'],
 		['  http://localhost:5232/dav/  ', 'http://localhost:5232/dav/'],
 		[
