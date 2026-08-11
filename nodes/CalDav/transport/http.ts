@@ -7,12 +7,20 @@ import { Readable } from 'node:stream';
 import type { IExecuteFunctions, IHttpRequestOptions, IN8nHttpFullResponse } from 'n8n-workflow';
 
 import { validateAndNormalizeServerUrl } from '../../../credentials/CalDavApi.credentials';
-import type { AbsoluteHttpUrl } from './url';
+import { defaultCalDavProviderRegistry } from '../providers/registry';
+import type { CalDavProviderAdapter, CalDavProviderRegistry } from '../providers/types';
+import {
+	type AbsoluteHttpUrl,
+	CalDavUrlValidationError,
+	resolveCalDavHref,
+	validateAbsoluteHttpUrl,
+} from './url';
 
 export const CALDAV_CREDENTIAL_TYPE = 'calDavApi';
 export const CALDAV_REQUEST_TIMEOUT_MS = 30_000;
 export const CALDAV_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 export const CALDAV_MAX_ERROR_EXCERPT_BYTES = 8 * 1024;
+export const CALDAV_MAX_REDIRECTS = 5;
 
 export const CalDavMethod = {
 	OPTIONS: 'OPTIONS',
@@ -80,6 +88,11 @@ export const CalDavTransportErrorCode = {
 	RESPONSE_LIMIT_EXCEEDED: 'RESPONSE_LIMIT_EXCEEDED',
 	REMOTE_PROTOCOL_ERROR: 'REMOTE_PROTOCOL_ERROR',
 	NETWORK_ERROR: 'NETWORK_ERROR',
+	INVALID_REDIRECT: 'INVALID_REDIRECT',
+	INSECURE_REDIRECT: 'INSECURE_REDIRECT',
+	UNTRUSTED_TARGET: 'UNTRUSTED_TARGET',
+	REDIRECT_LOOP: 'REDIRECT_LOOP',
+	REDIRECT_LIMIT_EXCEEDED: 'REDIRECT_LIMIT_EXCEEDED',
 } as const;
 
 export type CalDavTransportErrorCode =
@@ -164,7 +177,58 @@ export class CalDavNetworkError extends CalDavTransportError {
 	}
 }
 
+export class CalDavInvalidRedirectError extends CalDavTransportError {
+	constructor(statusCode?: number) {
+		super(
+			CalDavTransportErrorCode.INVALID_REDIRECT,
+			'The CalDAV server returned an invalid redirect.',
+			statusCode,
+		);
+	}
+}
+
+export class CalDavInsecureRedirectError extends CalDavTransportError {
+	constructor(statusCode?: number) {
+		super(
+			CalDavTransportErrorCode.INSECURE_REDIRECT,
+			'The CalDAV redirect would use an insecure connection.',
+			statusCode,
+		);
+	}
+}
+
+export class CalDavUntrustedTargetError extends CalDavTransportError {
+	constructor(statusCode?: number) {
+		super(
+			CalDavTransportErrorCode.UNTRUSTED_TARGET,
+			'The CalDAV request target is not trusted.',
+			statusCode,
+		);
+	}
+}
+
+export class CalDavRedirectLoopError extends CalDavTransportError {
+	constructor(statusCode?: number) {
+		super(
+			CalDavTransportErrorCode.REDIRECT_LOOP,
+			'The CalDAV request encountered a redirect loop.',
+			statusCode,
+		);
+	}
+}
+
+export class CalDavRedirectLimitError extends CalDavTransportError {
+	constructor(statusCode?: number) {
+		super(
+			CalDavTransportErrorCode.REDIRECT_LIMIT_EXCEEDED,
+			'The CalDAV request exceeded the 5-redirect limit.',
+			statusCode,
+		);
+	}
+}
+
 const SUPPORTED_METHODS = new Set<string>(Object.values(CalDavMethod));
+const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const TIMEOUT_ERROR_CODES = new Set(['ETIMEDOUT', 'ECONNABORTED']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -233,16 +297,36 @@ function normalizeHeaders(headers: unknown, statusCode: number): CalDavResponseH
 	}
 
 	const normalized = Object.create(null) as Record<string, CalDavResponseHeaderValue>;
+	const isRedirect = REDIRECT_STATUS_CODES.has(statusCode);
 
 	try {
-		for (const [name, rawValue] of Object.entries(headers)) {
+		const names = Object.keys(headers);
+		const orderedNames = isRedirect
+			? [
+					...names.filter((name) => asciiLowercase(name) !== 'location'),
+					...names.filter((name) => asciiLowercase(name) === 'location'),
+				]
+			: names;
+
+		for (const name of orderedNames) {
 			const normalizedName = asciiLowercase(name);
-			const value = copyHeaderValue(rawValue);
+			let value: CalDavResponseHeaderValue;
+			try {
+				value = copyHeaderValue(headers[name]);
+			} catch {
+				if (isRedirect && normalizedName === 'location') {
+					throw new CalDavInvalidRedirectError(statusCode);
+				}
+				throw new CalDavRemoteProtocolError(statusCode);
+			}
 			const previousValue = normalized[normalizedName];
 			normalized[normalizedName] =
 				previousValue === undefined ? value : mergeHeaderValues(previousValue, value);
 		}
 	} catch (error) {
+		if (error instanceof CalDavInvalidRedirectError) {
+			throw error;
+		}
 		if (error instanceof CalDavTransportError) {
 			throw new CalDavRemoteProtocolError(statusCode);
 		}
@@ -401,11 +485,17 @@ function hasOversizedContentLength(headers: CalDavResponseHeaders): boolean {
 	return Number(scalarValue) > CALDAV_MAX_RESPONSE_BYTES;
 }
 
-async function normalizeResponse(
+interface CalDavResponseEnvelope {
+	readonly statusCode: number;
+	readonly headers: CalDavResponseHeaders;
+	readonly etag?: string;
+	readonly body: Readable;
+}
+
+function normalizeResponseEnvelope(
 	response: unknown,
-	effectiveUrl: string,
 	onStream: (stream: Readable) => void,
-): Promise<CalDavTransportResponse> {
+): CalDavResponseEnvelope {
 	if (!isRecord(response)) {
 		throw new CalDavRemoteProtocolError();
 	}
@@ -452,7 +542,30 @@ async function normalizeResponse(
 
 		const headers = normalizeHeaders(rawHeaders, statusCode);
 		const etag = extractEtag(headers, statusCode);
+		return {
+			statusCode,
+			headers,
+			...(etag === undefined ? {} : { etag }),
+			body: stream,
+		};
+	} catch (error) {
+		if (stream !== undefined) {
+			safeDestroy(stream);
+		}
+		if (error instanceof CalDavTransportError) {
+			throw error;
+		}
+		throw new CalDavRemoteProtocolError(knownStatusCode);
+	}
+}
 
+async function consumeFinalResponse(
+	envelope: CalDavResponseEnvelope,
+	effectiveUrl: AbsoluteHttpUrl,
+): Promise<CalDavTransportResponse> {
+	const { statusCode, headers, etag, body: stream } = envelope;
+
+	try {
 		if (statusCode < 200 || statusCode > 299) {
 			await consumeErrorExcerpt(stream, statusCode);
 			throw mapHttpFailure(statusCode);
@@ -471,22 +584,27 @@ async function normalizeResponse(
 			body,
 		};
 	} catch (error) {
-		if (stream !== undefined) {
-			safeDestroy(stream);
-		}
+		safeDestroy(stream);
 		if (error instanceof CalDavTransportError) {
 			throw error;
 		}
-		throw new CalDavRemoteProtocolError(knownStatusCode);
+		throw new CalDavRemoteProtocolError(statusCode);
 	}
 }
 
-function buildRequestOptions(
-	serverUrl: string,
+interface CalDavRequestState {
+	readonly method: CalDavMethod;
+	readonly url: AbsoluteHttpUrl;
+	readonly headers?: CalDavRequestHeaders;
+	readonly body?: string | Buffer;
+}
+
+function buildInitialRequestState(
+	configuredUrl: AbsoluteHttpUrl,
 	input: CalDavTransportRequest,
-): N8nCalDavRequestOptions {
+): CalDavRequestState {
 	let method: unknown;
-	let url: AbsoluteHttpUrl | undefined;
+	let url: unknown;
 	let headers: CalDavRequestHeaders | undefined;
 	let body: string | Buffer | undefined;
 
@@ -503,11 +621,27 @@ function buildRequestOptions(
 		throw new CalDavRemoteProtocolError();
 	}
 
+	let canonicalUrl: AbsoluteHttpUrl;
+	try {
+		canonicalUrl = url === undefined ? configuredUrl : validateAbsoluteHttpUrl(url as string);
+	} catch {
+		throw new CalDavUntrustedTargetError();
+	}
+
 	return {
 		method,
-		url: url ?? serverUrl,
+		url: canonicalUrl,
 		...(headers === undefined ? {} : { headers }),
 		...(body === undefined ? {} : { body }),
+	};
+}
+
+function buildRequestOptions(state: CalDavRequestState): N8nCalDavRequestOptions {
+	return {
+		method: state.method,
+		url: state.url,
+		...(state.headers === undefined ? {} : { headers: state.headers }),
+		...(state.body === undefined ? {} : { body: state.body }),
 		encoding: 'stream',
 		returnFullResponse: true,
 		ignoreHttpStatusErrors: true,
@@ -515,6 +649,80 @@ function buildRequestOptions(
 		sendCredentialsOnCrossOriginRedirect: false,
 		timeout: CALDAV_REQUEST_TIMEOUT_MS,
 	};
+}
+
+function allowsCredentialForwarding(
+	providerAdapter: CalDavProviderAdapter,
+	configuredUrl: AbsoluteHttpUrl,
+	fromUrl: AbsoluteHttpUrl,
+	targetUrl: AbsoluteHttpUrl,
+): boolean {
+	try {
+		return providerAdapter.allowsCredentialForwarding({ configuredUrl, fromUrl, targetUrl });
+	} catch {
+		return false;
+	}
+}
+
+function getRedirectLocation(headers: CalDavResponseHeaders, statusCode: number): string {
+	const location = headers.location;
+
+	if (typeof location === 'string') {
+		if (location.length > 0) {
+			return location;
+		}
+		throw new CalDavInvalidRedirectError(statusCode);
+	}
+
+	if (location?.length === 1 && location[0].length > 0) {
+		return location[0];
+	}
+
+	throw new CalDavInvalidRedirectError(statusCode);
+}
+
+function resolveRedirectTarget(
+	currentUrl: AbsoluteHttpUrl,
+	location: string,
+	statusCode: number,
+): AbsoluteHttpUrl {
+	try {
+		return resolveCalDavHref(currentUrl, location);
+	} catch (error) {
+		if (error instanceof CalDavUrlValidationError && error.code === 'INSECURE_PROTOCOL_DOWNGRADE') {
+			throw new CalDavInsecureRedirectError(statusCode);
+		}
+		throw new CalDavInvalidRedirectError(statusCode);
+	}
+}
+
+function redirectedHeaders(
+	headers: CalDavRequestHeaders | undefined,
+	dropContentHeaders: boolean,
+	statusCode: number,
+): CalDavRequestHeaders | undefined {
+	if (headers === undefined) {
+		return undefined;
+	}
+
+	try {
+		const redirected = Object.fromEntries(
+			Object.entries(headers).filter(([name]) => {
+				const normalizedName = asciiLowercase(name);
+				return (
+					normalizedName !== 'host' &&
+					(!dropContentHeaders || !normalizedName.startsWith('content-'))
+				);
+			}),
+		);
+		return Object.freeze(redirected);
+	} catch {
+		throw new CalDavRemoteProtocolError(statusCode);
+	}
+}
+
+function redirectIdentity(method: CalDavMethod, url: AbsoluteHttpUrl): string {
+	return `${method}\u0000${url}`;
 }
 
 function normalizeServerUrl(serverUrl: unknown): string {
@@ -528,52 +736,137 @@ function normalizeServerUrl(serverUrl: unknown): string {
 export function createCalDavTransport(
 	serverUrl: unknown,
 	adapter: CalDavRequestHelperAdapter,
+	providerRegistry: CalDavProviderRegistry = defaultCalDavProviderRegistry,
 ): CalDavTransport {
 	const normalizedServerUrl = normalizeServerUrl(serverUrl);
+	let configuredUrl: AbsoluteHttpUrl;
+	let providerAdapter: CalDavProviderAdapter;
+	try {
+		configuredUrl = validateAbsoluteHttpUrl(normalizedServerUrl);
+		providerAdapter = providerRegistry.select(configuredUrl);
+	} catch {
+		throw new CalDavAuthenticationError();
+	}
 
 	return {
 		serverUrl: normalizedServerUrl,
 		async request(input: CalDavTransportRequest): Promise<CalDavTransportResponse> {
-			const options = buildRequestOptions(normalizedServerUrl, input);
+			let requestState = buildInitialRequestState(configuredUrl, input);
+			if (
+				!allowsCredentialForwarding(providerAdapter, configuredUrl, configuredUrl, requestState.url)
+			) {
+				throw new CalDavUntrustedTargetError();
+			}
+
 			let activeStream: Readable | undefined;
 			let deadlineExpired = false;
 			let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
 			const requestAndConsume = (async () => {
-				let helperResponse: unknown;
-				try {
-					helperResponse = await adapter.request(options);
-				} catch (error) {
-					if (isTimeoutFailure(error)) {
+				const visited = new Set<string>([redirectIdentity(requestState.method, requestState.url)]);
+				let followedRedirects = 0;
+
+				while (true) {
+					if (deadlineExpired) {
 						throw new CalDavTimeoutError();
 					}
 
-					const rejectedResponse = getRejectedResponse(error);
-					if (rejectedResponse === undefined) {
-						throw new CalDavNetworkError();
-					}
-					helperResponse = rejectedResponse;
-				}
-
-				if (deadlineExpired) {
-					if (isRecord(helperResponse)) {
-						try {
-							if (helperResponse.body instanceof Readable) {
-								safeDestroy(helperResponse.body);
-							}
-						} catch {
-							// The deadline error remains authoritative.
+					const options = buildRequestOptions(requestState);
+					let helperResponse: unknown;
+					try {
+						helperResponse = await adapter.request(options);
+					} catch (error) {
+						if (isTimeoutFailure(error)) {
+							throw new CalDavTimeoutError();
 						}
-					}
-					throw new CalDavTimeoutError();
-				}
 
-				return await normalizeResponse(helperResponse, options.url, (stream) => {
-					activeStream = stream;
-					if (deadlineExpired) {
-						safeDestroy(stream);
+						const rejectedResponse = getRejectedResponse(error);
+						if (rejectedResponse === undefined) {
+							throw new CalDavNetworkError();
+						}
+						helperResponse = rejectedResponse;
 					}
-				});
+
+					if (deadlineExpired) {
+						if (isRecord(helperResponse)) {
+							try {
+								if (helperResponse.body instanceof Readable) {
+									safeDestroy(helperResponse.body);
+								}
+							} catch {
+								// The deadline error remains authoritative.
+							}
+						}
+						throw new CalDavTimeoutError();
+					}
+
+					const envelope = normalizeResponseEnvelope(helperResponse, (stream) => {
+						activeStream = stream;
+						if (deadlineExpired) {
+							safeDestroy(stream);
+						}
+					});
+
+					if (!REDIRECT_STATUS_CODES.has(envelope.statusCode)) {
+						return await consumeFinalResponse(envelope, requestState.url);
+					}
+
+					try {
+						const location = getRedirectLocation(envelope.headers, envelope.statusCode);
+						const targetUrl = resolveRedirectTarget(
+							requestState.url,
+							location,
+							envelope.statusCode,
+						);
+						if (
+							!allowsCredentialForwarding(
+								providerAdapter,
+								configuredUrl,
+								requestState.url,
+								targetUrl,
+							)
+						) {
+							throw new CalDavUntrustedTargetError(envelope.statusCode);
+						}
+
+						const followsSeeOther = envelope.statusCode === 303;
+						const nextMethod = followsSeeOther ? CalDavMethod.GET : requestState.method;
+						const identity = redirectIdentity(nextMethod, targetUrl);
+						if (visited.has(identity)) {
+							throw new CalDavRedirectLoopError(envelope.statusCode);
+						}
+						if (followedRedirects >= CALDAV_MAX_REDIRECTS) {
+							throw new CalDavRedirectLimitError(envelope.statusCode);
+						}
+
+						const nextHeaders = redirectedHeaders(
+							requestState.headers,
+							followsSeeOther,
+							envelope.statusCode,
+						);
+						await consumeErrorExcerpt(envelope.body, envelope.statusCode);
+						safeDestroy(envelope.body);
+						activeStream = undefined;
+
+						visited.add(identity);
+						followedRedirects += 1;
+						requestState = {
+							method: nextMethod,
+							url: targetUrl,
+							...(nextHeaders === undefined ? {} : { headers: nextHeaders }),
+							...(followsSeeOther || requestState.body === undefined
+								? {}
+								: { body: requestState.body }),
+						};
+					} catch (error) {
+						safeDestroy(envelope.body);
+						activeStream = undefined;
+						if (error instanceof CalDavTransportError) {
+							throw error;
+						}
+						throw new CalDavInvalidRedirectError(envelope.statusCode);
+					}
+				}
 			})();
 
 			const deadline = new Promise<never>((_resolve, reject) => {
