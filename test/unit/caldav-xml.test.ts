@@ -1,3 +1,6 @@
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports -- A foreign Date realm is required by this unshipped regression test.
+import { runInNewContext } from 'node:vm';
+
 import { describe, expect, it } from 'vitest';
 
 import { XmlBuildError } from '../../nodes/CalDav/xml/errors';
@@ -319,6 +322,39 @@ describe('CalDAV PROPFIND request builders', () => {
 		expect(error.code).toBe('UNKNOWN_PROPERTY');
 		expect(error.message).not.toContain('private-property-sentinel');
 	});
+
+	it('sanitizes failures from property element getters', () => {
+		const properties: PropfindPropertyName[] = ['currentUserPrincipal'];
+		Object.defineProperty(properties, 0, {
+			get: () => {
+				throw new Error('private-property-getter-sentinel');
+			},
+		});
+
+		const error = captureError(() => buildPropfindRequest(properties));
+
+		expect(error.code).toBe('UNKNOWN_PROPERTY');
+		expect(error.field).toBe('properties');
+		expect(error.message).not.toContain('private-property-getter-sentinel');
+	});
+
+	it('sanitizes failures from property array proxies', () => {
+		const properties = new Proxy<PropfindPropertyName[]>(['currentUserPrincipal'], {
+			get: (target, property, receiver) => {
+				if (property === 'length') {
+					throw new Error('private-property-proxy-sentinel');
+				}
+
+				return Reflect.get(target, property, receiver);
+			},
+		});
+
+		const error = captureError(() => buildPropfindRequest(properties));
+
+		expect(error.code).toBe('INVALID_PROPERTY_SET');
+		expect(error.field).toBe('properties');
+		expect(error.message).not.toContain('private-property-proxy-sentinel');
+	});
 });
 
 describe('CalDAV REPORT request builders', () => {
@@ -368,6 +404,20 @@ describe('CalDAV REPORT request builders', () => {
 		expect(error.field).toBe('uid');
 	});
 
+	it('sanitizes failures from the UID input getter', () => {
+		const input = Object.defineProperty({}, 'uid', {
+			get: () => {
+				throw new Error('private-uid-getter-sentinel');
+			},
+		}) as CalendarUidQueryInput;
+
+		const error = captureError(() => buildCalendarUidQueryReport(input));
+
+		expect(error.code).toBe('INVALID_UID');
+		expect(error.field).toBe('uid');
+		expect(error.message).not.toContain('private-uid-getter-sentinel');
+	});
+
 	it('rejects an XML-invalid UID without leaking it', () => {
 		const error = captureError(() =>
 			buildCalendarUidQueryReport({ uid: 'private-uid-sentinel\u0000' }),
@@ -400,6 +450,16 @@ describe('CalDAV REPORT request builders', () => {
 		expectCleanDocument(document);
 	});
 
+	it('accepts valid Date objects created in another realm', () => {
+		const start = runInNewContext(`new Date('2026-03-04T05:06:07.000Z')`) as Date;
+		const end = runInNewContext(`new Date('2026-03-05T06:07:08.000Z')`) as Date;
+
+		expect(start).not.toBeInstanceOf(Date);
+		expect(buildCalendarTimeRangeQueryReport({ start, end })).toContain(
+			'<c:time-range start="20260304T050607Z" end="20260305T060708Z"/>',
+		);
+	});
+
 	it.each([
 		['non-Date start', { start: '2026-01-01', end: new Date('2026-01-02T00:00:00Z') }, 'start'],
 		[
@@ -424,6 +484,40 @@ describe('CalDAV REPORT request builders', () => {
 
 		expect(error.code).toBe('INVALID_DATE');
 		expect(error.field).toBe(field);
+	});
+
+	it('rejects Date-like impostors without invoking their methods', () => {
+		const getTime = () => new Date('2026-01-01T00:00:00Z').getTime();
+		const input = {
+			start: { getTime },
+			end: new Date('2026-01-02T00:00:00Z'),
+		} as unknown as CalendarTimeRangeQueryInput;
+
+		const error = captureError(() => buildCalendarTimeRangeQueryReport(input));
+
+		expect(error.code).toBe('INVALID_DATE');
+		expect(error.field).toBe('start');
+	});
+
+	it.each([
+		['start', 'private-start-getter-sentinel'],
+		['end', 'private-end-getter-sentinel'],
+	] as const)('sanitizes failures from the %s input getter', (field, sentinel) => {
+		const input = {
+			start: new Date('2026-01-01T00:00:00Z'),
+			end: new Date('2026-01-02T00:00:00Z'),
+		};
+		Object.defineProperty(input, field, {
+			get: () => {
+				throw new Error(sentinel);
+			},
+		});
+
+		const error = captureError(() => buildCalendarTimeRangeQueryReport(input));
+
+		expect(error.code).toBe('INVALID_DATE');
+		expect(error.field).toBe(field);
+		expect(error.message).not.toContain(sentinel);
 	});
 
 	it.each([

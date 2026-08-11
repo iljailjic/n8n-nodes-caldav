@@ -43,6 +43,25 @@ export const CALENDAR_COLLECTION_PROPERTIES: readonly [
 
 const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>';
 
+const DATE_GET_TIME = Date.prototype.getTime;
+const DATE_GET_UTC_FULL_YEAR = Date.prototype.getUTCFullYear;
+const DATE_GET_UTC_MONTH = Date.prototype.getUTCMonth;
+const DATE_GET_UTC_DATE = Date.prototype.getUTCDate;
+const DATE_GET_UTC_HOURS = Date.prototype.getUTCHours;
+const DATE_GET_UTC_MINUTES = Date.prototype.getUTCMinutes;
+const DATE_GET_UTC_SECONDS = Date.prototype.getUTCSeconds;
+const DATE_GET_UTC_MILLISECONDS = Date.prototype.getUTCMilliseconds;
+
+interface ValidatedUtcDate {
+	readonly timestamp: number;
+	readonly year: number;
+	readonly month: number;
+	readonly day: number;
+	readonly hours: number;
+	readonly minutes: number;
+	readonly seconds: number;
+}
+
 const PROPFIND_PROPERTY_NAMES: Readonly<Record<PropfindPropertyName, XmlQualifiedName>> =
 	Object.freeze({
 		currentUserPrincipal: XML_QUALIFIED_NAMES.currentUserPrincipal,
@@ -71,30 +90,81 @@ function emptyElement(name: XmlQualifiedName, indentation: number): string {
 	return `${'  '.repeat(indentation)}<${name.qualifiedName}/>`;
 }
 
-function validateUidInput(input: CalendarUidQueryInput): string {
-	if (
-		typeof input !== 'object' ||
-		input === null ||
-		typeof input.uid !== 'string' ||
-		input.uid.length === 0
-	) {
-		throw new XmlBuildError('INVALID_UID', 'Calendar UID must be a non-empty string', 'uid');
-	}
-
-	return escapeXmlText(input.uid);
+function invalidUidError(): XmlBuildError {
+	return new XmlBuildError('INVALID_UID', 'Calendar UID must be a non-empty string', 'uid');
 }
 
-function validateDate(value: unknown, field: 'start' | 'end'): Date {
-	if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
-		throw new XmlBuildError(
-			'INVALID_DATE',
-			'Calendar query dates must be valid Date objects',
-			field,
-		);
+function validateUidInput(input: CalendarUidQueryInput): string {
+	let uid: unknown;
+
+	try {
+		uid =
+			typeof input === 'object' && input !== null
+				? (input as unknown as { readonly uid?: unknown }).uid
+				: undefined;
+	} catch {
+		throw invalidUidError();
 	}
 
-	const year = value.getUTCFullYear();
-	if (year < 0 || year > 9999 || value.getUTCMilliseconds() !== 0) {
+	if (typeof uid !== 'string' || uid.length === 0) {
+		throw invalidUidError();
+	}
+
+	return escapeXmlText(uid);
+}
+
+function invalidDateError(field: 'start' | 'end'): XmlBuildError {
+	return new XmlBuildError(
+		'INVALID_DATE',
+		'Calendar query dates must be valid Date objects',
+		field,
+	);
+}
+
+function readTimeRangeField(input: CalendarTimeRangeQueryInput, field: 'start' | 'end'): unknown {
+	try {
+		return typeof input === 'object' && input !== null
+			? (input as unknown as Record<'start' | 'end', unknown>)[field]
+			: undefined;
+	} catch {
+		throw invalidDateError(field);
+	}
+}
+
+function validateDate(value: unknown, field: 'start' | 'end'): ValidatedUtcDate {
+	let timestamp: number;
+
+	try {
+		timestamp = DATE_GET_TIME.call(value);
+	} catch {
+		throw invalidDateError(field);
+	}
+
+	if (!Number.isFinite(timestamp)) {
+		throw invalidDateError(field);
+	}
+
+	let year: number;
+	let month: number;
+	let day: number;
+	let hours: number;
+	let minutes: number;
+	let seconds: number;
+	let milliseconds: number;
+
+	try {
+		year = DATE_GET_UTC_FULL_YEAR.call(value);
+		month = DATE_GET_UTC_MONTH.call(value) + 1;
+		day = DATE_GET_UTC_DATE.call(value);
+		hours = DATE_GET_UTC_HOURS.call(value);
+		minutes = DATE_GET_UTC_MINUTES.call(value);
+		seconds = DATE_GET_UTC_SECONDS.call(value);
+		milliseconds = DATE_GET_UTC_MILLISECONDS.call(value);
+	} catch {
+		throw invalidDateError(field);
+	}
+
+	if (year < 0 || year > 9999 || milliseconds !== 0) {
 		throw new XmlBuildError(
 			'INVALID_DATE',
 			'Calendar query dates require a four-digit UTC year and zero milliseconds',
@@ -102,20 +172,84 @@ function validateDate(value: unknown, field: 'start' | 'end'): Date {
 		);
 	}
 
-	return value;
+	return { timestamp, year, month, day, hours, minutes, seconds };
 }
 
-function formatUtcDate(value: Date): string {
+function formatUtcDate(value: ValidatedUtcDate): string {
 	return [
-		value.getUTCFullYear().toString().padStart(4, '0'),
-		(value.getUTCMonth() + 1).toString().padStart(2, '0'),
-		value.getUTCDate().toString().padStart(2, '0'),
+		value.year.toString().padStart(4, '0'),
+		value.month.toString().padStart(2, '0'),
+		value.day.toString().padStart(2, '0'),
 		'T',
-		value.getUTCHours().toString().padStart(2, '0'),
-		value.getUTCMinutes().toString().padStart(2, '0'),
-		value.getUTCSeconds().toString().padStart(2, '0'),
+		value.hours.toString().padStart(2, '0'),
+		value.minutes.toString().padStart(2, '0'),
+		value.seconds.toString().padStart(2, '0'),
 		'Z',
 	].join('');
+}
+
+function invalidPropertySetError(): XmlBuildError {
+	return new XmlBuildError(
+		'INVALID_PROPERTY_SET',
+		'PROPFIND requires a non-empty property array',
+		'properties',
+	);
+}
+
+function unknownPropertyError(): XmlBuildError {
+	return new XmlBuildError(
+		'UNKNOWN_PROPERTY',
+		'PROPFIND contains an unknown property',
+		'properties',
+	);
+}
+
+function resolvePropfindProperties(properties: unknown): XmlQualifiedName[] {
+	let isArray: boolean;
+
+	try {
+		isArray = Array.isArray(properties);
+	} catch {
+		throw invalidPropertySetError();
+	}
+
+	if (!isArray) {
+		throw invalidPropertySetError();
+	}
+
+	let propertyCount: unknown;
+	try {
+		propertyCount = (properties as { readonly length?: unknown }).length;
+	} catch {
+		throw invalidPropertySetError();
+	}
+
+	if (
+		typeof propertyCount !== 'number' ||
+		!Number.isSafeInteger(propertyCount) ||
+		propertyCount <= 0
+	) {
+		throw invalidPropertySetError();
+	}
+
+	const qualifiedProperties: XmlQualifiedName[] = [];
+	for (let index = 0; index < propertyCount; index++) {
+		let property: unknown;
+
+		try {
+			property = (properties as readonly unknown[])[index];
+		} catch {
+			throw unknownPropertyError();
+		}
+
+		if (!hasPropfindPropertyName(property)) {
+			throw unknownPropertyError();
+		}
+
+		qualifiedProperties.push(PROPFIND_PROPERTY_NAMES[property]);
+	}
+
+	return qualifiedProperties;
 }
 
 function reportPrefixLines(): string[] {
@@ -142,17 +276,7 @@ function reportSuffixLines(): string[] {
 }
 
 export function buildPropfindRequest(properties: readonly PropfindPropertyName[]): string {
-	if (!Array.isArray(properties) || properties.length === 0) {
-		throw new XmlBuildError('INVALID_PROPERTY_SET', 'PROPFIND requires a non-empty property array');
-	}
-
-	const qualifiedProperties = properties.map((property) => {
-		if (!hasPropfindPropertyName(property)) {
-			throw new XmlBuildError('UNKNOWN_PROPERTY', 'PROPFIND contains an unknown property');
-		}
-
-		return PROPFIND_PROPERTY_NAMES[property];
-	});
+	const qualifiedProperties = resolvePropfindProperties(properties);
 	const includeCalDav = qualifiedProperties.some(({ namespace }) => namespace === 'caldav');
 
 	return [
@@ -190,16 +314,10 @@ export function buildCalendarUidQueryReport(input: CalendarUidQueryInput): strin
 }
 
 export function buildCalendarTimeRangeQueryReport(input: CalendarTimeRangeQueryInput): string {
-	const start = validateDate(
-		typeof input === 'object' && input !== null ? input.start : undefined,
-		'start',
-	);
-	const end = validateDate(
-		typeof input === 'object' && input !== null ? input.end : undefined,
-		'end',
-	);
+	const start = validateDate(readTimeRangeField(input, 'start'), 'start');
+	const end = validateDate(readTimeRangeField(input, 'end'), 'end');
 
-	if (end.getTime() <= start.getTime()) {
+	if (end.timestamp <= start.timestamp) {
 		throw new XmlBuildError('INVALID_TIME_RANGE', 'Calendar query end must be later than start');
 	}
 
