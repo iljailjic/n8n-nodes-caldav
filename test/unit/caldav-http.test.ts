@@ -10,6 +10,7 @@ import type {
 	ICredentialTestFunctions,
 	IExecuteFunctions,
 	IHttpRequestOptions,
+	ILoadOptionsFunctions,
 	IN8nHttpFullResponse,
 } from 'n8n-workflow';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -296,6 +297,35 @@ describe('request forwarding and the n8n helper seam', () => {
 			expect(helperThisValues).toEqual([context]);
 		},
 	);
+
+	it('supports the load-options authenticated helper context used by list search', async () => {
+		const helperThisValues: unknown[] = [];
+		const helper = vi.fn(async function (this: unknown) {
+			helperThisValues.push(this);
+			return response(207);
+		});
+		const context = {
+			getCredentials: vi.fn().mockResolvedValue({
+				serverUrl: 'https://calendar.example.test/root/',
+				username: 'username-sentinel',
+				password: 'password-sentinel',
+			}),
+			helpers: { httpRequestWithAuthentication: helper },
+		} as unknown as ILoadOptionsFunctions;
+
+		const transport = await createN8nCalDavTransport(context);
+		await transport.request({ method: CalDavMethod.PROPFIND });
+
+		expect(context.getCredentials).toHaveBeenCalledWith(CALDAV_CREDENTIAL_TYPE);
+		expect(helper).toHaveBeenCalledWith(
+			CALDAV_CREDENTIAL_TYPE,
+			expect.objectContaining({
+				method: CalDavMethod.PROPFIND,
+				url: 'https://calendar.example.test/root/',
+			}),
+		);
+		expect(helperThisValues).toEqual([context]);
+	});
 
 	it.each([
 		[CalDavMethod.OPTIONS, undefined],

@@ -2,7 +2,14 @@
 // eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { Readable } from 'node:stream';
 
-import type { IExecuteFunctions, IHttpRequestOptions, INode } from 'n8n-workflow';
+import type {
+	IExecuteFunctions,
+	IHttpRequestOptions,
+	ILoadOptionsFunctions,
+	INode,
+	INodeListSearchResult,
+	INodeType,
+} from 'n8n-workflow';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { CalDav } from '../../nodes/CalDav/CalDav.node';
@@ -51,7 +58,17 @@ function basicAuthorization(run: RadicaleRun, password = run.password): string {
 	return `Basic ${Buffer.from(`${run.username}:${password}`, 'utf8').toString('base64')}`;
 }
 
-function requestAdapter(run: RadicaleRun, password = run.password): CalDavRequestHelperAdapter {
+type ResponseBodyTransform = (
+	options: N8nCalDavRequestOptions,
+	requestBody: string | undefined,
+	responseBody: Buffer,
+) => Buffer;
+
+function requestAdapter(
+	run: RadicaleRun,
+	password = run.password,
+	transformResponseBody?: ResponseBodyTransform,
+): CalDavRequestHelperAdapter {
 	return {
 		async request(options: N8nCalDavRequestOptions) {
 			const requestBody =
@@ -80,7 +97,9 @@ function requestAdapter(run: RadicaleRun, password = run.password): CalDavReques
 			return {
 				statusCode: response.status,
 				headers: responseHeaders,
-				body: Readable.from(responseBody),
+				body: Readable.from(
+					transformResponseBody?.(options, requestBody, responseBody) ?? responseBody,
+				),
 			};
 		},
 	};
@@ -135,12 +154,15 @@ async function authenticatedFetch(
 	});
 }
 
-function mkCalendarBody(displayName: string, component: 'VEVENT' | 'VTODO' = 'VEVENT'): string {
+function mkCalendarBody(
+	displayName: string | undefined,
+	component: 'VEVENT' | 'VTODO' = 'VEVENT',
+): string {
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
   <d:set>
     <d:prop>
-      <d:displayname>${displayName}</d:displayname>
+      ${displayName === undefined ? '' : `<d:displayname>${displayName}</d:displayname>`}
       <c:supported-calendar-component-set><c:comp name="${component}"/></c:supported-calendar-component-set>
     </d:prop>
   </d:set>
@@ -150,7 +172,7 @@ function mkCalendarBody(displayName: string, component: 'VEVENT' | 'VTODO' = 'VE
 async function createSyntheticCalendar(
 	run: RadicaleRun,
 	suffix: string,
-	displayName: string,
+	displayName: string | undefined,
 	component: 'VEVENT' | 'VTODO' = 'VEVENT',
 ): Promise<string> {
 	const homeUrl = await discoverPrincipalAndHome(run);
@@ -210,6 +232,85 @@ function calendarGetManyContext(run: RadicaleRun): IExecuteFunctions {
 		},
 	};
 	return context as unknown as IExecuteFunctions;
+}
+
+function calendarListSearchContext(
+	run: RadicaleRun,
+	transformResponseBody?: ResponseBodyTransform,
+): ILoadOptionsFunctions {
+	const adapter = requestAdapter(run, run.password, transformResponseBody);
+	return {
+		getCredentials: vi.fn().mockResolvedValue({
+			serverUrl: run.endpoint,
+			username: run.username,
+			password: run.password,
+			allowUnauthorizedCerts: false,
+		}),
+		getNode: vi.fn().mockReturnValue(workflowNode()),
+		helpers: {
+			async httpRequestWithAuthentication(_credentialType: string, options: IHttpRequestOptions) {
+				return await adapter.request(options as N8nCalDavRequestOptions);
+			},
+		},
+	} as unknown as ILoadOptionsFunctions;
+}
+
+async function searchRadicaleCalendars(
+	run: RadicaleRun,
+	filter?: string,
+	paginationToken?: string,
+	transformResponseBody?: ResponseBodyTransform,
+): Promise<INodeListSearchResult> {
+	const method = (new CalDav() as INodeType).methods?.listSearch?.searchCalendars;
+	expect(method).toBeTypeOf('function');
+	if (method === undefined) throw new Error('Missing listSearch.searchCalendars method.');
+	return await method.call(
+		calendarListSearchContext(run, transformResponseBody),
+		filter,
+		paginationToken,
+	);
+}
+
+function escapeRegularExpression(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function calendarCollectionPath(collectionUrl: string): string {
+	return decodeURIComponent(new URL(collectionUrl).pathname).replace(/^\/+|\/+$/g, '');
+}
+
+function missingAndEmptyDisplayNameFixture(
+	emptyDisplayNameUrl: string,
+	missingDisplayNameUrl: string,
+): ResponseBodyTransform {
+	// Radicale 3.7.7 replaces a falsey DAV:displayname with collection.path in PROPFIND.
+	// Restore the provider-neutral wire shapes only in the list response under test.
+	const fixtures = [
+		{ url: emptyDisplayNameUrl, replacement: 'empty' },
+		{ url: missingDisplayNameUrl, replacement: 'missing' },
+	] as const;
+
+	return (options, requestBody, responseBody) => {
+		if (
+			options.method !== 'PROPFIND' ||
+			requestBody?.includes('supported-calendar-component-set') !== true
+		) {
+			return responseBody;
+		}
+
+		let xml = responseBody.toString('utf8');
+		for (const fixture of fixtures) {
+			const fallbackName = calendarCollectionPath(fixture.url);
+			const displayName = new RegExp(
+				`<((?:[A-Za-z_][\\w.-]*:)?displayname)(?:\\s[^>]*)?>${escapeRegularExpression(fallbackName)}</\\1\\s*>`,
+				'g',
+			);
+			expect(xml.match(displayName)).toHaveLength(1);
+			xml = xml.replace(displayName, fixture.replacement === 'empty' ? '<$1/>' : '');
+		}
+
+		return Buffer.from(xml, 'utf8');
+	};
 }
 
 async function createSyntheticEvent(run: RadicaleRun, calendarSuffix = 'default'): Promise<string> {
@@ -384,6 +485,81 @@ describe('Radicale authenticated discovery', () => {
 			]);
 			const serialized = JSON.stringify(output);
 			expect(serialized).not.toContain(nonEventUrl);
+			expect(serialized).not.toContain(run.password);
+			expect(serialized).not.toContain(basicAuthorization(run));
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('loads duplicate, missing, empty, writable, and read-only VEVENT calendars while excluding VTODO-only collections', async () => {
+		const run = await startRun();
+		try {
+			await expect(searchRadicaleCalendars(run, '', 'ignored-pagination-token')).resolves.toEqual({
+				results: [],
+			});
+
+			const duplicateAUrl = await createSyntheticCalendar(run, 'duplicate-a', 'Duplicate');
+			const duplicateZUrl = await createSyntheticCalendar(run, 'duplicate-z', 'Duplicate');
+			const emptyUrl = await createSyntheticCalendar(run, 'empty', '');
+			const missingUrl = await createSyntheticCalendar(run, 'missing', undefined);
+			const readOnlyUrl = await createSyntheticCalendar(run, 'read-only-search', 'Read Only');
+			const todoOnlyUrl = await createSyntheticCalendar(
+				run,
+				'todo-only-search',
+				'Task Only',
+				'VTODO',
+			);
+			await harness.makeCalendarReadOnly(run, readOnlyUrl);
+			const displayNameFixture = missingAndEmptyDisplayNameFixture(emptyUrl, missingUrl);
+
+			const all = await searchRadicaleCalendars(run, undefined, undefined, displayNameFixture);
+			expect(all).not.toHaveProperty('paginationToken');
+			expect(all.results.map(({ value }) => value)).toEqual([
+				emptyUrl,
+				missingUrl,
+				duplicateAUrl,
+				duplicateZUrl,
+				readOnlyUrl,
+			]);
+			expect(all.results[0]).toEqual({
+				name: emptyUrl,
+				value: emptyUrl,
+				description: 'Read: yes; Write: yes',
+			});
+			expect(all.results[1]).toEqual({
+				name: missingUrl,
+				value: missingUrl,
+				description: 'Read: yes; Write: yes',
+			});
+			for (const [index, url] of [
+				[2, duplicateAUrl],
+				[3, duplicateZUrl],
+			] as const) {
+				expect(all.results[index].name).toContain('Duplicate');
+				expect(all.results[index].name).toContain(url);
+				expect(all.results[index]).toMatchObject({
+					value: url,
+					description: 'Read: yes; Write: yes',
+				});
+			}
+			expect(all.results[2].name).not.toBe(all.results[3].name);
+			expect(all.results[4]).toEqual({
+				name: 'Read Only',
+				value: readOnlyUrl,
+				description: 'Read: yes; Write: no',
+			});
+			expect(all.results.every((option) => option.disabled !== true)).toBe(true);
+			expect(JSON.stringify(all)).not.toContain(todoOnlyUrl);
+
+			const filtered = await searchRadicaleCalendars(
+				run,
+				'DUPLICATE',
+				undefined,
+				displayNameFixture,
+			);
+			expect(filtered.results.map(({ value }) => value)).toEqual([duplicateAUrl, duplicateZUrl]);
+			const serialized = JSON.stringify({ all, filtered });
 			expect(serialized).not.toContain(run.password);
 			expect(serialized).not.toContain(basicAuthorization(run));
 		} finally {
