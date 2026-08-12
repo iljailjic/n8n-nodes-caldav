@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { discoverCalendarHome } from '../../nodes/CalDav/discovery/calendarHome';
+import { discoverCalendarCollections } from '../../nodes/CalDav/discovery/calendarCollections';
 import { discoverCurrentUserPrincipal } from '../../nodes/CalDav/discovery/currentUserPrincipal';
 import {
 	CalDavAuthenticationError,
@@ -16,6 +17,7 @@ import type {
 	CalDavTransport,
 	N8nCalDavRequestOptions,
 } from '../../nodes/CalDav/transport/http';
+import type { AbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 import {
 	loadRadicaleHarnessAdapter,
 	type RadicaleHarnessAdapter,
@@ -98,7 +100,7 @@ async function teardownRun(run: RadicaleRun): Promise<void> {
 	}
 }
 
-async function discoverPrincipalAndHome(run: RadicaleRun): Promise<string> {
+async function discoverPrincipalAndHome(run: RadicaleRun): Promise<AbsoluteHttpUrl> {
 	const currentUserPrincipal = await discoverCurrentUserPrincipal(transport(run));
 	expect(currentUserPrincipal.kind).toBe('authenticated');
 	if (currentUserPrincipal.kind !== 'authenticated') {
@@ -128,9 +130,12 @@ async function authenticatedFetch(
 	});
 }
 
-async function createSyntheticEvent(run: RadicaleRun): Promise<string> {
+async function createSyntheticEvent(run: RadicaleRun, calendarSuffix = 'default'): Promise<string> {
 	const homeUrl = await discoverPrincipalAndHome(run);
-	const collectionUrl = new URL(`oracle-${encodeURIComponent(run.identity)}/`, homeUrl).href;
+	const collectionUrl = new URL(
+		`oracle-${encodeURIComponent(run.identity)}-${encodeURIComponent(calendarSuffix)}/`,
+		homeUrl,
+	).href;
 	const createCollection = await authenticatedFetch(run, collectionUrl, 'MKCALENDAR');
 	expect([201, 204]).toContain(createCollection.status);
 
@@ -192,6 +197,47 @@ describe('Radicale authenticated discovery', () => {
 			expect(String(unavailableError)).not.toContain(run.password);
 			expect(String(unavailableError)).not.toContain(basicAuthorization(run));
 			expect(Date.now() - startedAt).toBeLessThan(10_000);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('discovers real writable and read-only VEVENT calendars with accurate privileges', async () => {
+		const run = await startRun();
+		try {
+			const writableEventUrl = await createSyntheticEvent(run, 'writable');
+			const readOnlyEventUrl = await createSyntheticEvent(run, 'read-only');
+			const writableCollectionUrl = new URL('./', writableEventUrl).href;
+			const readOnlyCollectionUrl = new URL('./', readOnlyEventUrl).href;
+			await harness.makeCalendarReadOnly(run, readOnlyCollectionUrl);
+
+			const homeUrl = await discoverPrincipalAndHome(run);
+			const collections = await discoverCalendarCollections(transport(run), homeUrl);
+			const writableCollection = collections.find(({ url }) => url === writableCollectionUrl);
+			const readOnlyCollection = collections.find(({ url }) => url === readOnlyCollectionUrl);
+
+			expect(writableCollection).toMatchObject({
+				url: writableCollectionUrl,
+				supportedComponents: ['VTODO', 'VEVENT', 'VJOURNAL'],
+				canRead: true,
+				canWrite: true,
+			});
+			expect(readOnlyCollection).toMatchObject({
+				url: readOnlyCollectionUrl,
+				supportedComponents: ['VTODO', 'VEVENT', 'VJOURNAL'],
+				canRead: true,
+				canWrite: false,
+			});
+			expect(writableCollection?.displayName).toBeTypeOf('string');
+			expect(readOnlyCollection?.displayName).toBeTypeOf('string');
+			expect(writableCollection).not.toHaveProperty('extensions');
+			expect(readOnlyCollection).not.toHaveProperty('extensions');
+			expect((await authenticatedFetch(run, readOnlyEventUrl)).status).toBe(200);
+			expect(
+				(await authenticatedFetch(run, readOnlyEventUrl, 'PUT', syntheticEvent(run))).status,
+			).toBe(403);
+			const serialized = JSON.stringify(collections);
+			expect(serialized).not.toContain(run.password);
 		} finally {
 			await teardownRun(run);
 		}

@@ -90,6 +90,13 @@ describe('CalDAV XML namespaces', () => {
 				localName: 'current-user-principal',
 				qualifiedName: 'd:current-user-principal',
 			},
+			currentUserPrivilegeSet: {
+				namespace: 'dav',
+				namespaceUri: 'DAV:',
+				prefix: 'd',
+				localName: 'current-user-privilege-set',
+				qualifiedName: 'd:current-user-privilege-set',
+			},
 			resourceType: {
 				namespace: 'dav',
 				namespaceUri: 'DAV:',
@@ -124,6 +131,13 @@ describe('CalDAV XML namespaces', () => {
 				prefix: 'c',
 				localName: 'calendar-description',
 				qualifiedName: 'c:calendar-description',
+			},
+			calendarTimezone: {
+				namespace: 'caldav',
+				namespaceUri: 'urn:ietf:params:xml:ns:caldav',
+				prefix: 'c',
+				localName: 'calendar-timezone',
+				qualifiedName: 'c:calendar-timezone',
 			},
 			supportedCalendarComponentSet: {
 				namespace: 'caldav',

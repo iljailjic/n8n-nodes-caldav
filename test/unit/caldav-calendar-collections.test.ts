@@ -8,6 +8,10 @@ import {
 } from '../../nodes/CalDav/discovery/calendarCollections';
 import type { CalendarCollection } from '../../nodes/CalDav/discovery/calendarCollections';
 import { iCloudCalDavProviderAdapter } from '../../nodes/CalDav/providers/icloud';
+import type {
+	CalDavCalendarCollectionPropertyView,
+	CalDavProviderAdapter,
+} from '../../nodes/CalDav/providers/types';
 import { CalDavMethod } from '../../nodes/CalDav/transport/http';
 import type {
 	CalDavTransport,
@@ -188,6 +192,20 @@ describe('calendar-collection public surface and request descriptor', () => {
 });
 
 describe('calendar-collection filtering and property status handling', () => {
+	it('returns an immutable empty array for a valid response with no qualifying collections', async () => {
+		const result = await discoverCalendarCollections(
+			mockTransport(async () =>
+				transportResponse(
+					multistatus(response('/plain/', propstat(resourceType('<d:collection/>')))),
+				),
+			),
+			calendarHomeUrl(),
+		);
+
+		expect(result).toEqual([]);
+		expect(Object.isFrozen(result)).toBe(true);
+	});
+
 	it('returns only VEVENT calendars from mixed WebDAV and CalDAV resource types', async () => {
 		const responses = [
 			response('/principals/account/', propstat(resourceType('<d:collection/>', '<d:principal/>'))),
@@ -331,6 +349,203 @@ describe('calendar-collection filtering and property status handling', () => {
 				canWrite: false,
 			},
 		]);
+	});
+
+	it('preserves successful empty and non-empty optional text while omitting failed fields', async () => {
+		const timezone = 'BEGIN:VCALENDAR\nBEGIN:VTIMEZONE\nEND:VTIMEZONE\nEND:VCALENDAR';
+		const xml = multistatus(
+			calendarResponse(
+				'/calendar/',
+				'<d:displayname/>' +
+					'<c:calendar-description>  Events\nCalendar  </c:calendar-description>' +
+					`<c:calendar-timezone>${timezone}</c:calendar-timezone>`,
+				propstat(
+					'<i:calendar-color xmlns:i="http://apple.com/ns/ical/">#FFFFFF</i:calendar-color>',
+					'HTTP/1.1 404 Not Found',
+				),
+			),
+		);
+
+		await expect(
+			discoverCalendarCollections(
+				mockTransport(async () => transportResponse(xml)),
+				calendarHomeUrl(),
+				iCloudCalDavProviderAdapter,
+			),
+		).resolves.toEqual([
+			{
+				url: 'https://partition.example.test/calendar/',
+				displayName: '',
+				description: '  Events\nCalendar  ',
+				timezone,
+				canRead: null,
+				canWrite: null,
+			},
+		]);
+	});
+
+	it.each([
+		[
+			'attributed resource type',
+			'<d:resourcetype private="yes"><d:collection/><c:calendar/></d:resourcetype>',
+			false,
+		],
+		['nested display name', '<d:displayname><d:href>private</d:href></d:displayname>', true],
+		[
+			'malformed component',
+			'<c:supported-calendar-component-set><c:comp/></c:supported-calendar-component-set>',
+			true,
+		],
+		[
+			'malformed privilege',
+			'<d:current-user-privilege-set><d:privilege><d:read/><d:write/></d:privilege></d:current-user-privilege-set>',
+			true,
+		],
+	] as const)('rejects a recognized %s property', async (_label, property, includeResourceType) => {
+		const xml = multistatus(
+			response(
+				'/calendar/',
+				propstat(`${includeResourceType ? calendarResourceType() : ''}${property}`),
+			),
+		);
+
+		await expect(
+			discoverCalendarCollections(
+				mockTransport(async () => transportResponse(xml)),
+				calendarHomeUrl(),
+			),
+		).rejects.toMatchObject({ code: 'INVALID_CALENDAR_COLLECTION_RESPONSE' });
+	});
+
+	it('rejects duplicate successful singleton properties even when identical', async () => {
+		const xml = multistatus(
+			calendarResponse(
+				'/calendar/',
+				'<d:displayname>Same</d:displayname><d:displayname>Same</d:displayname>',
+			),
+		);
+
+		await expect(
+			discoverCalendarCollections(
+				mockTransport(async () => transportResponse(xml)),
+				calendarHomeUrl(),
+			),
+		).rejects.toMatchObject({ code: 'AMBIGUOUS_CALENDAR_COLLECTION_PROPERTY' });
+	});
+
+	it('nests only sanitized JSON-compatible adapter output under the provider ID', async () => {
+		const provider: CalDavProviderAdapter = {
+			id: 'synthetic',
+			matchesConfiguredServerUrl: () => false,
+			allowsCredentialForwarding: () => false,
+			readCalendarCollectionProperties: () => ({
+				extensions: { nested: { enabled: true }, values: ['one', 2, null] },
+			}),
+		};
+		const xml = multistatus(calendarResponse('/calendar/'));
+
+		const [calendar] = await discoverCalendarCollections(
+			mockTransport(async () => transportResponse(xml)),
+			calendarHomeUrl(),
+			provider,
+		);
+
+		expect(calendar.extensions).toEqual({
+			synthetic: { nested: { enabled: true }, values: ['one', 2, null] },
+		});
+		expect(Object.isFrozen(calendar.extensions)).toBe(true);
+		expect(Object.isFrozen(calendar.extensions?.synthetic)).toBe(true);
+	});
+
+	it('drops non-JSON adapter output rather than exposing functions or prototypes', async () => {
+		const provider: CalDavProviderAdapter = {
+			id: 'synthetic',
+			matchesConfiguredServerUrl: () => false,
+			allowsCredentialForwarding: () => false,
+			readCalendarCollectionProperties: () => ({
+				extensions: { unsafe: () => 'private' },
+			}),
+		};
+
+		const [calendar] = await discoverCalendarCollections(
+			mockTransport(async () => transportResponse(multistatus(calendarResponse('/calendar/')))),
+			calendarHomeUrl(),
+			provider,
+		);
+
+		expect(calendar).not.toHaveProperty('extensions');
+	});
+
+	it('passes requested expanded-name properties to adapters as immutable structured values', async () => {
+		const readCalendarCollectionProperties = vi.fn(
+			(properties: CalDavCalendarCollectionPropertyView) => {
+				const matches = properties.get('urn:example:calendar', 'synthetic-property');
+				expect(matches).toHaveLength(1);
+				expect(Object.isFrozen(matches)).toBe(true);
+				expect(Object.isFrozen(matches[0])).toBe(true);
+				expect(Object.isFrozen(matches[0].children)).toBe(true);
+				return { extensions: { retained: matches[0].name.localName } };
+			},
+		);
+		const provider: CalDavProviderAdapter = {
+			id: 'synthetic',
+			calendarCollectionProperties: Object.freeze([
+				Object.freeze({
+					namespaceUri: 'urn:example:calendar',
+					localName: 'synthetic-property',
+				}),
+			]),
+			matchesConfiguredServerUrl: () => false,
+			allowsCredentialForwarding: () => false,
+			readCalendarCollectionProperties,
+		};
+		const xml = multistatus(
+			calendarResponse(
+				'/calendar/',
+				'<x:synthetic-property xmlns:x="urn:example:calendar"><x:value>retained</x:value></x:synthetic-property>',
+			),
+		);
+		const transport = mockTransport(async () => transportResponse(xml));
+
+		const [calendar] = await discoverCalendarCollections(transport, calendarHomeUrl(), provider);
+
+		expect(readCalendarCollectionProperties).toHaveBeenCalledTimes(1);
+		expect(calendar.extensions).toEqual({
+			synthetic: { retained: 'synthetic-property' },
+		});
+		expect(transport.request.mock.calls[0][0].body).toMatch(/xmlns:x0="urn:example:calendar"/);
+		expect(transport.request.mock.calls[0][0].body).toContain('<x0:synthetic-property/>');
+	});
+
+	it('rejects ambiguous and malformed successful adapter properties deterministically', async () => {
+		const duplicate = multistatus(
+			calendarResponse(
+				'/calendar/',
+				'<i:calendar-color xmlns:i="http://apple.com/ns/ical/">#000000</i:calendar-color>' +
+					'<i:calendar-color xmlns:i="http://apple.com/ns/ical/">#FFFFFF</i:calendar-color>',
+			),
+		);
+		const malformed = multistatus(
+			calendarResponse(
+				'/calendar/',
+				'<i:calendar-color xmlns:i="http://apple.com/ns/ical/"><i:value>#000000</i:value></i:calendar-color>',
+			),
+		);
+
+		await expect(
+			discoverCalendarCollections(
+				mockTransport(async () => transportResponse(duplicate)),
+				calendarHomeUrl(),
+				iCloudCalDavProviderAdapter,
+			),
+		).rejects.toMatchObject({ code: 'AMBIGUOUS_CALENDAR_COLLECTION_PROPERTY' });
+		await expect(
+			discoverCalendarCollections(
+				mockTransport(async () => transportResponse(malformed)),
+				calendarHomeUrl(),
+				iCloudCalDavProviderAdapter,
+			),
+		).rejects.toMatchObject({ code: 'INVALID_CALENDAR_COLLECTION_RESPONSE' });
 	});
 });
 

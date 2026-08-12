@@ -53,7 +53,9 @@ export const XML_QUALIFIED_NAMES: Readonly<{
 	getEtag: XmlQualifiedName;
 	calendarHomeSet: XmlQualifiedName;
 	calendarDescription: XmlQualifiedName;
+	calendarTimezone: XmlQualifiedName;
 	supportedCalendarComponentSet: XmlQualifiedName;
+	currentUserPrivilegeSet: XmlQualifiedName;
 	calendarQuery: XmlQualifiedName;
 	calendarData: XmlQualifiedName;
 	filter: XmlQualifiedName;
@@ -70,7 +72,9 @@ export const XML_QUALIFIED_NAMES: Readonly<{
 	getEtag: createQualifiedName('dav', 'getetag'),
 	calendarHomeSet: createQualifiedName('caldav', 'calendar-home-set'),
 	calendarDescription: createQualifiedName('caldav', 'calendar-description'),
+	calendarTimezone: createQualifiedName('caldav', 'calendar-timezone'),
 	supportedCalendarComponentSet: createQualifiedName('caldav', 'supported-calendar-component-set'),
+	currentUserPrivilegeSet: createQualifiedName('dav', 'current-user-privilege-set'),
 	calendarQuery: createQualifiedName('caldav', 'calendar-query'),
 	calendarData: createQualifiedName('caldav', 'calendar-data'),
 	filter: createQualifiedName('caldav', 'filter'),
