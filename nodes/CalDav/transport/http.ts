@@ -817,6 +817,14 @@ function normalizeServerUrl(serverUrl: unknown): string {
 	return validation.newValue;
 }
 
+function validateCredentialServerUrl(serverUrl: unknown): AbsoluteHttpUrl {
+	const validation = validateAndNormalizeServerUrl(serverUrl);
+	if (!validation.valid || typeof validation.newValue !== 'string') {
+		throw new CalDavUrlValidationError('MALFORMED_URL');
+	}
+	return validateAbsoluteHttpUrl(validation.newValue);
+}
+
 export function createCalDavTransport(
 	serverUrl: unknown,
 	adapter: CalDavRequestHelperAdapter,
@@ -1073,12 +1081,7 @@ export async function createN8nCalDavTransport(
 			throw new CalDavAuthenticationError();
 		}
 
-		const serverUrlValidation = validateAndNormalizeServerUrl(credentials.serverUrl);
-		if (!serverUrlValidation.valid || typeof serverUrlValidation.newValue !== 'string') {
-			throw new CalDavUrlValidationError('MALFORMED_URL');
-		}
-
-		const serverUrl = validateAbsoluteHttpUrl(serverUrlValidation.newValue);
+		const serverUrl = validateCredentialServerUrl(credentials.serverUrl);
 		return createCalDavTransport(
 			serverUrl,
 			createN8nCalDavRequestHelperAdapter(context as ICredentialTestFunctions, credentials),
@@ -1086,20 +1089,21 @@ export async function createN8nCalDavTransport(
 	}
 
 	const executionContext = context as IExecuteFunctions;
+	let credentials: ICredentialDataDecryptedObject;
 	try {
-		const credentials = await executionContext.getCredentials(CALDAV_CREDENTIAL_TYPE);
-		if (
-			typeof credentials.username !== 'string' ||
-			credentials.username.length === 0 ||
-			typeof credentials.password !== 'string' ||
-			credentials.password.length === 0
-		) {
-			throw new CalDavAuthenticationError();
-		}
-
-		const serverUrl = normalizeServerUrl(credentials.serverUrl);
-		return createCalDavTransport(serverUrl, createN8nCalDavRequestHelperAdapter(executionContext));
+		credentials = await executionContext.getCredentials(CALDAV_CREDENTIAL_TYPE);
 	} catch {
 		throw new CalDavAuthenticationError();
 	}
+	if (
+		typeof credentials.username !== 'string' ||
+		credentials.username.length === 0 ||
+		typeof credentials.password !== 'string' ||
+		credentials.password.length === 0
+	) {
+		throw new CalDavAuthenticationError();
+	}
+
+	const serverUrl = validateCredentialServerUrl(credentials.serverUrl);
+	return createCalDavTransport(serverUrl, createN8nCalDavRequestHelperAdapter(executionContext));
 }

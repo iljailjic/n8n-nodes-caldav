@@ -75,6 +75,8 @@ interface ItemParameters {
 
 interface ContextOptions {
 	readonly continueOnFail?: boolean;
+	readonly credentials?: unknown;
+	readonly requestHelper?: ReturnType<typeof vi.fn>;
 	readonly onParameterRead?: (name: string, itemIndex: number) => void;
 }
 
@@ -100,8 +102,10 @@ function executionContext(
 			options.onParameterRead?.(name, itemIndex);
 			return parameters[itemIndex][name as keyof ItemParameters];
 		}),
+		getCredentials: vi.fn().mockResolvedValue(options.credentials),
 		continueOnFail: vi.fn().mockReturnValue(options.continueOnFail ?? false),
 		getNode: vi.fn().mockReturnValue(workflowNode()),
+		helpers: { httpRequestWithAuthentication: options.requestHelper ?? vi.fn() },
 	} as unknown as IExecuteFunctions;
 }
 
@@ -367,6 +371,49 @@ describe('Calendar Get Many validation and dispatch', () => {
 });
 
 describe('Calendar Get Many safe failure behavior', () => {
+	it.each([false, true])(
+		'exposes only the safe stored-URL category with continueOnFail=%s and makes no request',
+		async (continueOnFail) => {
+			const actualTransportModule = await vi.importActual<
+				typeof import('../../nodes/CalDav/transport/http')
+			>('../../nodes/CalDav/transport/http');
+			dependencyMocks.createTransport.mockImplementation(
+				async (context: IExecuteFunctions) =>
+					await actualTransportModule.createN8nCalDavTransport(context),
+			);
+			const requestHelper = vi.fn();
+			const context = executionContext([defaultParameters()], {
+				continueOnFail,
+				credentials: {
+					serverUrl: 'https://url-user:url-password@calendar.example.test/private-account-path/',
+					username: 'username-sentinel',
+					password: 'password-sentinel',
+				},
+				requestHelper,
+			});
+
+			if (continueOnFail) {
+				await expect(execute(context)).resolves.toEqual([
+					[{ json: { error: 'The URL is malformed.' }, pairedItem: { item: 0 } }],
+				]);
+			} else {
+				const error = await captureError(execute(context));
+				expect(error).toBeInstanceOf(NodeApiError);
+				expect(error).toMatchObject({
+					message: 'The URL is malformed.',
+					context: { itemIndex: 0 },
+				});
+				expect(JSON.stringify(error)).not.toMatch(
+					/url-user|url-password|private-account-path|username-sentinel|password-sentinel/,
+				);
+			}
+
+			expect(context.getCredentials).toHaveBeenCalledWith('calDavApi');
+			expect(requestHelper).not.toHaveBeenCalled();
+			expect(dependencyMocks.discoverPrincipal).not.toHaveBeenCalled();
+		},
+	);
+
 	it.each([
 		[
 			'unauthenticated',

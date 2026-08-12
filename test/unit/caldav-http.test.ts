@@ -88,6 +88,16 @@ async function captureError(promise: Promise<unknown>): Promise<CalDavTransportE
 	throw new Error('Expected the transport request to fail');
 }
 
+async function captureUnknownError(promise: Promise<unknown>): Promise<unknown> {
+	try {
+		await promise;
+	} catch (error) {
+		return error;
+	}
+
+	throw new Error('Expected the request to fail');
+}
+
 function expectStableError(
 	error: CalDavTransportError,
 	expectedClass: new (...arguments_: never[]) => CalDavTransportError,
@@ -655,6 +665,11 @@ describe('request forwarding and the n8n helper seam', () => {
 	it.each([
 		['credential retrieval failure', undefined, new Error('credential-store-secret')],
 		[
+			'credential retrieval URL-shaped failure',
+			undefined,
+			new CalDavUrlValidationError('USERINFO_NOT_ALLOWED'),
+		],
+		[
 			'missing username',
 			{ serverUrl: 'https://calendar.example.test', password: 'password-sentinel' },
 			undefined,
@@ -667,15 +682,6 @@ describe('request forwarding and the n8n helper seam', () => {
 		[
 			'non-string password',
 			{ serverUrl: 'https://calendar.example.test', username: 'username-sentinel', password: 42 },
-			undefined,
-		],
-		[
-			'invalid server URL',
-			{
-				serverUrl: 'https://url-user:url-password@calendar.example.test/private',
-				username: 'username-sentinel',
-				password: 'password-sentinel',
-			},
 			undefined,
 		],
 	] as const)('fails %s before any helper request', async (_label, credentials, retrievalError) => {
@@ -701,6 +707,41 @@ describe('request forwarding and the n8n helper seam', () => {
 			/credential-store-secret|username-sentinel|password-sentinel|url-user|url-password/,
 		);
 	});
+
+	it.each([
+		[
+			'userinfo',
+			'https://url-user:url-password@calendar.example.test/private-path/',
+			'MALFORMED_URL',
+		],
+		[
+			'fragment',
+			'https://calendar.example.test/private-path/#private-fragment',
+			'FRAGMENT_NOT_ALLOWED',
+		],
+	] as const)(
+		'preserves the safe URL category for an execution credential with %s',
+		async (_label, serverUrl, code) => {
+			const helper = vi.fn();
+			const context = {
+				getCredentials: vi.fn().mockResolvedValue({
+					serverUrl,
+					username: 'username-sentinel',
+					password: 'password-sentinel',
+				}),
+				helpers: { httpRequestWithAuthentication: helper },
+			} as unknown as IExecuteFunctions;
+
+			const error = await captureUnknownError(createN8nCalDavTransport(context));
+
+			expect(error).toBeInstanceOf(CalDavUrlValidationError);
+			expect(error).toMatchObject({ name: 'CalDavUrlValidationError', code });
+			expect(helper).not.toHaveBeenCalled();
+			expect(JSON.stringify(error)).not.toMatch(
+				/url-user|url-password|private-path|private-fragment|username-sentinel|password-sentinel/,
+			);
+		},
+	);
 });
 
 describe('successful response normalization', () => {
