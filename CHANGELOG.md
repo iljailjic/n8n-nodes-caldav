@@ -3,6 +3,15 @@
 Changes from published releases and declared project milestones will be
 documented in this file.
 
+## [0.2.0] - 2026-08-12
+
+### Development checkpoint
+
+- Added a reproducible, isolated Radicale integration-test harness for authenticated CalDAV discovery and clean lifecycle validation (#19).
+- Added provider-neutral VEVENT calendar collection discovery with canonical URLs, capability flags, and synthetic standard and iCloud pipeline coverage (#20, #21).
+- Added the Calendar Get and Get Many operations with canonical URL identity, n8n item pairing, deterministic ordering, and bounded result handling (#22, #23).
+- Added a searchable Calendar resource locator with From List and By URL modes while retaining canonical URLs as workflow identity (#24).
+
 ## [0.1.0] - 2026-08-11
 
 ### Added
