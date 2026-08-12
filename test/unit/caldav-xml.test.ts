@@ -234,7 +234,9 @@ describe('CalDAV PROPFIND request builders', () => {
 			'resourceType',
 			'displayName',
 			'calendarDescription',
+			'calendarTimezone',
 			'supportedCalendarComponentSet',
+			'currentUserPrivilegeSet',
 		]);
 		expect(Object.isFrozen(CURRENT_USER_PRINCIPAL_PROPERTIES)).toBe(true);
 		expect(Object.isFrozen(CALENDAR_HOME_PROPERTIES)).toBe(true);
@@ -297,7 +299,9 @@ describe('CalDAV PROPFIND request builders', () => {
     <d:resourcetype/>
     <d:displayname/>
     <c:calendar-description/>
+    <c:calendar-timezone/>
     <c:supported-calendar-component-set/>
+    <d:current-user-privilege-set/>
   </d:prop>
 </d:propfind>`);
 	});
