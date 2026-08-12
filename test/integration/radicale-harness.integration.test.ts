@@ -4,6 +4,7 @@ import { Readable } from 'node:stream';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { getCalendarCollection } from '../../nodes/CalDav/actions/calendar/get';
 import { discoverCalendarHome } from '../../nodes/CalDav/discovery/calendarHome';
 import { discoverCalendarCollections } from '../../nodes/CalDav/discovery/calendarCollections';
 import { discoverCurrentUserPrincipal } from '../../nodes/CalDav/discovery/currentUserPrincipal';
@@ -18,6 +19,7 @@ import type {
 	N8nCalDavRequestOptions,
 } from '../../nodes/CalDav/transport/http';
 import type { AbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 import {
 	loadRadicaleHarnessAdapter,
 	type RadicaleHarnessAdapter,
@@ -215,6 +217,14 @@ describe('Radicale authenticated discovery', () => {
 			const collections = await discoverCalendarCollections(transport(run), homeUrl);
 			const writableCollection = collections.find(({ url }) => url === writableCollectionUrl);
 			const readOnlyCollection = collections.find(({ url }) => url === readOnlyCollectionUrl);
+			const writableGet = await getCalendarCollection(
+				transport(run),
+				validateAbsoluteHttpUrl(writableCollectionUrl),
+			);
+			const readOnlyGet = await getCalendarCollection(
+				transport(run),
+				validateAbsoluteHttpUrl(readOnlyCollectionUrl),
+			);
 
 			expect(writableCollection).toMatchObject({
 				url: writableCollectionUrl,
@@ -228,15 +238,31 @@ describe('Radicale authenticated discovery', () => {
 				canRead: true,
 				canWrite: false,
 			});
+			expect(writableGet).toMatchObject({
+				url: writableCollectionUrl,
+				supportedComponents: ['VTODO', 'VEVENT', 'VJOURNAL'],
+				canRead: true,
+				canWrite: true,
+			});
+			expect(readOnlyGet).toMatchObject({
+				url: readOnlyCollectionUrl,
+				supportedComponents: ['VTODO', 'VEVENT', 'VJOURNAL'],
+				canRead: true,
+				canWrite: false,
+			});
 			expect(writableCollection?.displayName).toBeTypeOf('string');
 			expect(readOnlyCollection?.displayName).toBeTypeOf('string');
+			expect(writableGet.displayName).toBeTypeOf('string');
+			expect(readOnlyGet.displayName).toBeTypeOf('string');
 			expect(writableCollection).not.toHaveProperty('extensions');
 			expect(readOnlyCollection).not.toHaveProperty('extensions');
+			expect(writableGet).not.toHaveProperty('extensions');
+			expect(readOnlyGet).not.toHaveProperty('extensions');
 			expect((await authenticatedFetch(run, readOnlyEventUrl)).status).toBe(200);
 			expect(
 				(await authenticatedFetch(run, readOnlyEventUrl, 'PUT', syntheticEvent(run))).status,
 			).toBe(403);
-			const serialized = JSON.stringify(collections);
+			const serialized = JSON.stringify({ collections, writableGet, readOnlyGet });
 			expect(serialized).not.toContain(run.password);
 		} finally {
 			await teardownRun(run);

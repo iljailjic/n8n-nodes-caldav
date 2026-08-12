@@ -370,11 +370,24 @@ function providerFields(
 	};
 }
 
+type CalendarCollectionRejectionReason =
+	'not-calendar' | 'vevent-unsupported' | 'component-support-unproven';
+
+interface CalendarCollectionQueryOptions {
+	readonly depth?: '0' | '1';
+	readonly requireExactlyOneResponse?: boolean;
+	readonly onRejected?: (reason: CalendarCollectionRejectionReason) => never;
+}
+
+type CalendarCollectionMapping =
+	| { readonly collection: CalendarCollection }
+	| { readonly rejection: CalendarCollectionRejectionReason };
+
 function parseCollection(
 	response: DavPropertyResponse,
 	effectiveUrl: string,
 	provider: CalDavProviderAdapter,
-): CalendarCollection | undefined {
+): CalendarCollectionMapping {
 	const href = response.hrefs[0];
 	if (href.length === 0) {
 		return invalidResponse();
@@ -397,36 +410,44 @@ function parseCollection(
 			? { canRead: null, canWrite: null }
 			: readPrivileges(selected.privilegeSet);
 
+	if (!isCalendar) {
+		return { rejection: 'not-calendar' };
+	}
 	if (
-		!isCalendar ||
-		(supportedComponents !== undefined &&
-			!supportedComponents.some((component) => component.toUpperCase() === 'VEVENT')) ||
-		(supportedComponents === undefined && selected.componentSetFailedNon404)
+		supportedComponents !== undefined &&
+		!supportedComponents.some((component) => component.toUpperCase() === 'VEVENT')
 	) {
-		return undefined;
+		return { rejection: 'vevent-unsupported' };
+	}
+	if (supportedComponents === undefined && selected.componentSetFailedNon404) {
+		return { rejection: 'component-support-unproven' };
 	}
 
-	return Object.freeze({
-		url,
-		...(displayName === undefined ? {} : { displayName }),
-		...(description === undefined ? {} : { description }),
-		...(timezone === undefined ? {} : { timezone }),
-		...(supportedComponents === undefined ? {} : { supportedComponents }),
-		...privileges,
-		...providerFields(provider, selected.successful),
-	});
+	return {
+		collection: Object.freeze({
+			url,
+			...(displayName === undefined ? {} : { displayName }),
+			...(description === undefined ? {} : { description }),
+			...(timezone === undefined ? {} : { timezone }),
+			...(supportedComponents === undefined ? {} : { supportedComponents }),
+			...privileges,
+			...providerFields(provider, selected.successful),
+		}),
+	};
 }
 
 export async function discoverCalendarCollections(
 	transport: CalDavTransport,
 	calendarHomeUrl: AbsoluteHttpUrl,
 	provider: CalDavProviderAdapter = standardCalDavProviderAdapter,
+	options: CalendarCollectionQueryOptions = {},
 ): Promise<readonly CalendarCollection[]> {
+	const depth = options.depth ?? '1';
 	const response = await transport.request({
 		method: CalDavMethod.PROPFIND,
 		url: calendarHomeUrl,
 		headers: {
-			Depth: '1',
+			Depth: depth,
 			'Content-Type': 'application/xml; charset=utf-8',
 		},
 		body: buildCalendarCollectionListingPropfind(provider.calendarCollectionProperties),
@@ -437,16 +458,23 @@ export async function discoverCalendarCollections(
 	}
 
 	const multiStatus = parseDavMultiStatus(response.body.toString('utf8'));
+	if (options.requireExactlyOneResponse === true && multiStatus.responses.length !== 1) {
+		return invalidResponse();
+	}
 	const results: CalendarCollection[] = [];
 	const seen = new Set<string>();
 	for (const davResponse of multiStatus.responses) {
 		if (davResponse.kind !== 'propstat') {
 			return invalidResponse();
 		}
-		const collection = parseCollection(davResponse, response.effectiveUrl, provider);
-		if (collection !== undefined && !seen.has(collection.url)) {
-			seen.add(collection.url);
-			results.push(collection);
+		const mapping = parseCollection(davResponse, response.effectiveUrl, provider);
+		if ('rejection' in mapping) {
+			options.onRejected?.(mapping.rejection);
+			continue;
+		}
+		if (!seen.has(mapping.collection.url)) {
+			seen.add(mapping.collection.url);
+			results.push(mapping.collection);
 		}
 	}
 
