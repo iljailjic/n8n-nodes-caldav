@@ -162,13 +162,14 @@ beforeEach(() => {
 });
 
 describe('Calendar Get Many node description', () => {
-	it('exposes exactly Calendar/Get Many with conventional Return All and Limit fields', () => {
+	it('exposes additive Calendar operations with conventional operation-specific fields', () => {
 		const description = new CalDav().description.properties;
 		expect(description.map(({ name }) => name)).toEqual([
 			'resource',
 			'operation',
 			'returnAll',
 			'limit',
+			'calendar',
 		]);
 
 		expect(property(description, 'resource')).toMatchObject({
@@ -182,9 +183,12 @@ describe('Calendar Get Many node description', () => {
 			displayName: 'Operation',
 			type: 'options',
 			noDataExpression: true,
-			default: 'getMany',
+			default: 'get',
 			displayOptions: { show: { resource: ['calendar'] } },
-			options: [{ name: 'Get Many', value: 'getMany' }],
+			options: [
+				{ name: 'Get', value: 'get' },
+				{ name: 'Get Many', value: 'getMany' },
+			],
 		});
 		expect(property(description, 'returnAll')).toMatchObject({
 			displayName: 'Return All',
@@ -202,6 +206,16 @@ describe('Calendar Get Many node description', () => {
 			},
 		});
 		expect(property(description, 'limit').typeOptions).not.toHaveProperty('maxValue');
+		expect(property(description, 'calendar')).toMatchObject({
+			displayName: 'Calendar',
+			type: 'resourceLocator',
+			required: true,
+			default: { mode: 'url', value: '' },
+			displayOptions: { show: { resource: ['calendar'], operation: ['get'] } },
+			modes: [{ displayName: 'By URL', name: 'url', type: 'string' }],
+		});
+		expect(JSON.stringify(description)).not.toContain('From List');
+		expect('listSearch' in new CalDav().methods).toBe(false);
 	});
 });
 
@@ -353,7 +367,7 @@ describe('Calendar Get Many validation and dispatch', () => {
 	});
 
 	it.each([
-		['calendar', 'get'],
+		['calendar', 'getEvents'],
 		['event', 'getMany'],
 		['calendar', 'fromList'],
 	] as const)(
