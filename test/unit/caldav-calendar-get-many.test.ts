@@ -134,8 +134,16 @@ async function execute(context: IExecuteFunctions): Promise<INodeExecutionData[]
 	return await new CalDav().execute.call(context);
 }
 
-function property(description: readonly INodeProperties[], name: string): INodeProperties {
-	const result = description.find((candidate) => candidate.name === name);
+function property(
+	description: readonly INodeProperties[],
+	name: string,
+	resource?: string,
+): INodeProperties {
+	const result = description.find(
+		(candidate) =>
+			candidate.name === name &&
+			(resource === undefined || candidate.displayOptions?.show?.resource?.includes(resource)),
+	);
 	if (result === undefined) throw new Error(`Missing node property ${name}.`);
 	return result;
 }
@@ -167,9 +175,13 @@ describe('Calendar Get Many node description', () => {
 		expect(description.map(({ name }) => name)).toEqual([
 			'resource',
 			'operation',
+			'operation',
 			'returnAll',
 			'limit',
 			'calendar',
+			'identifierMode',
+			'resourceUrl',
+			'uid',
 		]);
 
 		expect(property(description, 'resource')).toMatchObject({
@@ -177,9 +189,12 @@ describe('Calendar Get Many node description', () => {
 			type: 'options',
 			noDataExpression: true,
 			default: 'calendar',
-			options: [{ name: 'Calendar', value: 'calendar' }],
+			options: [
+				{ name: 'Calendar', value: 'calendar' },
+				{ name: 'Event', value: 'event' },
+			],
 		});
-		expect(property(description, 'operation')).toMatchObject({
+		expect(property(description, 'operation', 'calendar')).toMatchObject({
 			displayName: 'Operation',
 			type: 'options',
 			noDataExpression: true,
@@ -211,7 +226,7 @@ describe('Calendar Get Many node description', () => {
 			type: 'resourceLocator',
 			required: true,
 			default: { mode: 'url', value: '' },
-			displayOptions: { show: { resource: ['calendar'], operation: ['get'] } },
+			displayOptions: { show: { resource: ['calendar', 'event'], operation: ['get'] } },
 			modes: [
 				{
 					displayName: 'From List',
