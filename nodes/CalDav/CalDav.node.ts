@@ -20,6 +20,19 @@ import {
 	CalDavCalendarCollectionDiscoveryError,
 	type CalendarCollection,
 } from './discovery/calendarCollections';
+import {
+	CalDavCalendarEventResourceGetError,
+	CalendarEventResourceGetFailureCode,
+	getCalendarEventByResourceUrl,
+} from './events/getByResourceUrl';
+import {
+	CalDavCalendarEventUidResolutionError,
+	CalendarEventUidResolutionFailureCode,
+	resolveCalendarEventByUid,
+} from './events/resolveByUid';
+import { CalDavCalendarEventReadModelError } from './icalendar/eventReadModel';
+import type { CalendarEvent } from './icalendar/eventReadModel';
+import { CalDavICalendarParseError } from './icalendar/parser';
 import { testCalDavApiCredentials } from './methods/credentialTest';
 import { defaultCalDavProviderRegistry } from './providers/registry';
 import type { CalDavProviderAdapter } from './providers/types';
@@ -39,8 +52,11 @@ import { XmlBuildError } from './xml/errors';
 import { CalDavXmlParseError, CalDavXmlProtocolError } from './xml/parser';
 
 const CALENDAR_RESOURCE = 'calendar';
+const EVENT_RESOURCE = 'event';
 const GET_OPERATION = 'get';
 const GET_MANY_OPERATION = 'getMany';
+const RESOURCE_URL_IDENTIFIER_MODE = 'resourceUrl';
+const UID_IDENTIFIER_MODE = 'uid';
 const INVALID_LIMIT_MESSAGE = 'Limit must be an integer greater than or equal to 1.';
 const UNSUPPORTED_OPERATION_MESSAGE = 'Unsupported CalDAV resource or operation.';
 const GENERIC_GET_MANY_ERROR_MESSAGE = 'The Calendar Get Many operation failed.';
@@ -62,6 +78,29 @@ const GET_MESSAGES = {
 	NETWORK: 'The CalDAV server could not be reached.',
 	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar response.',
 	GENERIC: 'Calendar Get failed.',
+} as const;
+
+const EVENT_GET_MESSAGES = {
+	INVALID_CALENDAR_URL:
+		'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
+	INVALID_RESOURCE_URL:
+		'The Event Resource URL is invalid or does not belong to the selected calendar.',
+	INVALID_UID: 'UID must be a non-empty valid iCalendar text value.',
+	AUTHENTICATION: 'Event Get authentication failed.',
+	AUTHORIZATION: 'Event Get is not authorized.',
+	NOT_FOUND: 'The calendar event was not found.',
+	AMBIGUOUS:
+		'More than one calendar event with the requested UID was found in the selected calendar.',
+	TLS: 'TLS certificate validation failed.',
+	TIMEOUT: 'Event Get timed out.',
+	RESPONSE_LIMIT: 'The Event Get response exceeded the size limit.',
+	REDIRECT: 'The CalDAV server returned an unsafe or invalid redirect.',
+	UNTRUSTED: 'The Event Resource URL targets an untrusted endpoint.',
+	NETWORK: 'The CalDAV server could not be reached.',
+	MALFORMED_ICALENDAR: 'The CalDAV server returned malformed iCalendar event data.',
+	UNSUPPORTED_EVENT: 'The calendar event uses an unsupported event representation.',
+	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event response.',
+	GENERIC: 'Event Get failed.',
 } as const;
 
 interface SafeNodeFailure {
@@ -145,6 +184,112 @@ function calendarLocatorUrl(value: unknown): AbsoluteHttpUrl | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+function isValidXmlText(value: string): boolean {
+	for (const character of value) {
+		const codePoint = character.codePointAt(0);
+		if (
+			codePoint === undefined ||
+			(codePoint !== 0x9 &&
+				codePoint !== 0xa &&
+				codePoint !== 0xd &&
+				(codePoint < 0x20 ||
+					(codePoint > 0xd7ff && codePoint < 0xe000) ||
+					(codePoint > 0xfffd && codePoint < 0x10000) ||
+					codePoint > 0x10ffff))
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function eventJson(event: CalendarEvent): IDataObject {
+	return {
+		calendarUrl: event.calendarUrl,
+		resourceUrl: event.resourceUrl,
+		...(event.etag === undefined ? {} : { etag: event.etag }),
+		uid: event.uid,
+		...(event.summary === undefined ? {} : { summary: event.summary }),
+		...(event.description === undefined ? {} : { description: event.description }),
+		...(event.location === undefined ? {} : { location: event.location }),
+		...(event.url === undefined ? {} : { url: event.url }),
+		start: event.start,
+		end: event.end,
+	};
+}
+
+function eventTransportFailure(error: CalDavTransportError): SafeNodeFailure {
+	switch (error.code) {
+		case CalDavTransportErrorCode.AUTHENTICATION_FAILED:
+			return apiFailure(EVENT_GET_MESSAGES.AUTHENTICATION, error);
+		case CalDavTransportErrorCode.AUTHORIZATION_FAILED:
+			return apiFailure(EVENT_GET_MESSAGES.AUTHORIZATION, error);
+		case CalDavTransportErrorCode.NOT_FOUND:
+			return apiFailure(EVENT_GET_MESSAGES.NOT_FOUND, error);
+		case CalDavTransportErrorCode.TLS_VALIDATION_FAILED:
+			return apiFailure(EVENT_GET_MESSAGES.TLS, error);
+		case CalDavTransportErrorCode.TIMEOUT:
+			return apiFailure(EVENT_GET_MESSAGES.TIMEOUT, error);
+		case CalDavTransportErrorCode.RESPONSE_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_GET_MESSAGES.RESPONSE_LIMIT, error);
+		case CalDavTransportErrorCode.INVALID_REDIRECT:
+		case CalDavTransportErrorCode.INSECURE_REDIRECT:
+		case CalDavTransportErrorCode.REDIRECT_LOOP:
+		case CalDavTransportErrorCode.REDIRECT_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_GET_MESSAGES.REDIRECT, error);
+		case CalDavTransportErrorCode.UNTRUSTED_TARGET:
+			return apiFailure(EVENT_GET_MESSAGES.UNTRUSTED, error);
+		case CalDavTransportErrorCode.NETWORK_ERROR:
+			return apiFailure(EVENT_GET_MESSAGES.NETWORK, error);
+		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
+			return apiFailure(EVENT_GET_MESSAGES.INVALID_RESPONSE, error);
+	}
+}
+
+interface EventGetFailure extends SafeNodeFailure {
+	readonly configuration: boolean;
+}
+
+function eventGetFailure(error: unknown): EventGetFailure {
+	if (
+		error instanceof CalDavCalendarEventResourceGetError &&
+		error.code === CalendarEventResourceGetFailureCode.OUTSIDE_CALENDAR
+	) {
+		return { message: EVENT_GET_MESSAGES.INVALID_RESOURCE_URL, configuration: true };
+	}
+	if (error instanceof XmlBuildError && error.code === 'INVALID_UID') {
+		return { message: EVENT_GET_MESSAGES.INVALID_UID, configuration: true };
+	}
+	if (error instanceof CalDavTransportError) {
+		return { ...eventTransportFailure(error), configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventUidResolutionError) {
+		if (error.code === CalendarEventUidResolutionFailureCode.NOT_FOUND) {
+			return { message: EVENT_GET_MESSAGES.NOT_FOUND, configuration: false };
+		}
+		if (error.code === CalendarEventUidResolutionFailureCode.AMBIGUOUS) {
+			return { message: EVENT_GET_MESSAGES.AMBIGUOUS, configuration: false };
+		}
+		return { message: EVENT_GET_MESSAGES.INVALID_RESPONSE, configuration: false };
+	}
+	if (error instanceof CalDavICalendarParseError) {
+		return { message: EVENT_GET_MESSAGES.MALFORMED_ICALENDAR, configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventReadModelError) {
+		return { message: EVENT_GET_MESSAGES.UNSUPPORTED_EVENT, configuration: false };
+	}
+	if (
+		error instanceof CalDavCalendarEventResourceGetError ||
+		error instanceof CalDavXmlParseError ||
+		error instanceof CalDavXmlProtocolError ||
+		error instanceof CalDavUrlValidationError ||
+		error instanceof XmlBuildError
+	) {
+		return { message: EVENT_GET_MESSAGES.INVALID_RESPONSE, configuration: false };
+	}
+	return { message: EVENT_GET_MESSAGES.GENERIC, configuration: false };
 }
 
 const SAFE_DOMAIN_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
@@ -376,7 +521,10 @@ export class CalDav implements INodeType {
 				name: 'resource',
 				type: 'options',
 				noDataExpression: true,
-				options: [{ name: 'Calendar', value: CALENDAR_RESOURCE }],
+				options: [
+					{ name: 'Calendar', value: CALENDAR_RESOURCE },
+					{ name: 'Event', value: EVENT_RESOURCE },
+				],
 				default: CALENDAR_RESOURCE,
 			},
 			{
@@ -397,6 +545,22 @@ export class CalDav implements INodeType {
 						value: GET_MANY_OPERATION,
 						description: 'Return accessible event calendars',
 						action: 'Get many calendars',
+					},
+				],
+				default: GET_OPERATION,
+			},
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: { show: { resource: [EVENT_RESOURCE] } },
+				options: [
+					{
+						name: 'Get',
+						value: GET_OPERATION,
+						description: 'Retrieve a calendar event',
+						action: 'Retrieve a calendar event',
 					},
 				],
 				default: GET_OPERATION,
@@ -433,7 +597,10 @@ export class CalDav implements INodeType {
 				required: true,
 				default: { mode: 'url', value: '' },
 				displayOptions: {
-					show: { resource: [CALENDAR_RESOURCE], operation: [GET_OPERATION] },
+					show: {
+						resource: [CALENDAR_RESOURCE, EVENT_RESOURCE],
+						operation: [GET_OPERATION],
+					},
 				},
 				modes: [
 					{
@@ -453,6 +620,49 @@ export class CalDav implements INodeType {
 					},
 				],
 			},
+			{
+				displayName: 'Identifier Mode',
+				name: 'identifierMode',
+				type: 'options',
+				required: true,
+				noDataExpression: true,
+				options: [
+					{ name: 'Resource URL', value: RESOURCE_URL_IDENTIFIER_MODE },
+					{ name: 'UID', value: UID_IDENTIFIER_MODE },
+				],
+				default: RESOURCE_URL_IDENTIFIER_MODE,
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [GET_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Resource URL',
+				name: 'resourceUrl',
+				type: 'string',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [GET_OPERATION],
+						identifierMode: [RESOURCE_URL_IDENTIFIER_MODE],
+					},
+				},
+			},
+			{
+				displayName: 'UID',
+				name: 'uid',
+				type: 'string',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [GET_OPERATION],
+						identifierMode: [UID_IDENTIFIER_MODE],
+					},
+				},
+			},
 		],
 	};
 
@@ -468,30 +678,24 @@ export class CalDav implements INodeType {
 			try {
 				resource = this.getNodeParameter('resource', itemIndex);
 				operation = this.getNodeParameter('operation', itemIndex);
-			} catch (error) {
-				const failure = safeGetFailure(error);
+			} catch {
 				if (this.continueOnFail()) {
 					returnData.push({
-						json: { error: failure.message },
+						json: { error: UNSUPPORTED_OPERATION_MESSAGE },
 						pairedItem: { item: itemIndex },
 					});
 					continue;
 				}
-				throw new NodeApiError(
-					this.getNode(),
-					{},
-					{
-						message: failure.message,
-						itemIndex,
-						...(failure.httpCode === undefined ? {} : { httpCode: failure.httpCode }),
-					},
-				);
+				throw new NodeOperationError(this.getNode(), UNSUPPORTED_OPERATION_MESSAGE, {
+					itemIndex,
+				});
 			}
 
-			if (
-				resource !== CALENDAR_RESOURCE ||
-				(operation !== GET_OPERATION && operation !== GET_MANY_OPERATION)
-			) {
+			const isCalendarOperation =
+				resource === CALENDAR_RESOURCE &&
+				(operation === GET_OPERATION || operation === GET_MANY_OPERATION);
+			const isEventGet = resource === EVENT_RESOURCE && operation === GET_OPERATION;
+			if (!isCalendarOperation && !isEventGet) {
 				if (this.continueOnFail()) {
 					returnData.push({
 						json: { error: UNSUPPORTED_OPERATION_MESSAGE },
@@ -500,6 +704,138 @@ export class CalDav implements INodeType {
 					continue;
 				}
 				throw new NodeOperationError(this.getNode(), UNSUPPORTED_OPERATION_MESSAGE, { itemIndex });
+			}
+
+			if (isEventGet) {
+				let calendar: unknown;
+				let identifierMode: unknown;
+				try {
+					calendar = this.getNodeParameter('calendar', itemIndex);
+					identifierMode = this.getNodeParameter('identifierMode', itemIndex);
+				} catch {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: UNSUPPORTED_OPERATION_MESSAGE },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), UNSUPPORTED_OPERATION_MESSAGE, {
+						itemIndex,
+					});
+				}
+
+				const calendarUrl = calendarLocatorUrl(calendar);
+				if (calendarUrl === undefined) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: EVENT_GET_MESSAGES.INVALID_CALENDAR_URL },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), EVENT_GET_MESSAGES.INVALID_CALENDAR_URL, {
+						itemIndex,
+					});
+				}
+
+				if (
+					identifierMode !== RESOURCE_URL_IDENTIFIER_MODE &&
+					identifierMode !== UID_IDENTIFIER_MODE
+				) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: UNSUPPORTED_OPERATION_MESSAGE },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), UNSUPPORTED_OPERATION_MESSAGE, {
+						itemIndex,
+					});
+				}
+
+				let identifier: unknown;
+				try {
+					identifier = this.getNodeParameter(identifierMode, itemIndex);
+				} catch {
+					identifier = undefined;
+				}
+
+				let resourceUrl: AbsoluteHttpUrl | undefined;
+				let uid: string | undefined;
+				if (identifierMode === RESOURCE_URL_IDENTIFIER_MODE) {
+					try {
+						resourceUrl =
+							typeof identifier === 'string' && identifier.length > 0
+								? validateAbsoluteHttpUrl(identifier)
+								: undefined;
+					} catch {
+						resourceUrl = undefined;
+					}
+					if (resourceUrl === undefined) {
+						if (this.continueOnFail()) {
+							returnData.push({
+								json: { error: EVENT_GET_MESSAGES.INVALID_RESOURCE_URL },
+								pairedItem: { item: itemIndex },
+							});
+							continue;
+						}
+						throw new NodeOperationError(this.getNode(), EVENT_GET_MESSAGES.INVALID_RESOURCE_URL, {
+							itemIndex,
+						});
+					}
+				} else {
+					uid =
+						typeof identifier === 'string' && identifier.length > 0 && isValidXmlText(identifier)
+							? identifier
+							: undefined;
+					if (uid === undefined) {
+						if (this.continueOnFail()) {
+							returnData.push({
+								json: { error: EVENT_GET_MESSAGES.INVALID_UID },
+								pairedItem: { item: itemIndex },
+							});
+							continue;
+						}
+						throw new NodeOperationError(this.getNode(), EVENT_GET_MESSAGES.INVALID_UID, {
+							itemIndex,
+						});
+					}
+				}
+
+				try {
+					if (getTransport === undefined) {
+						getTransport = await createN8nCalDavTransport(this);
+					}
+					const result =
+						resourceUrl === undefined
+							? await resolveCalendarEventByUid(getTransport, calendarUrl, uid!)
+							: await getCalendarEventByResourceUrl(getTransport, calendarUrl, resourceUrl);
+					returnData.push({ json: eventJson(result.event), pairedItem: { item: itemIndex } });
+				} catch (error) {
+					const failure = eventGetFailure(error);
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: failure.message },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					if (failure.configuration) {
+						throw new NodeOperationError(this.getNode(), failure.message, { itemIndex });
+					}
+					throw new NodeApiError(
+						this.getNode(),
+						{},
+						{
+							message: failure.message,
+							itemIndex,
+							...(failure.httpCode === undefined ? {} : { httpCode: failure.httpCode }),
+						},
+					);
+				}
+				continue;
 			}
 
 			if (operation === GET_OPERATION) {
@@ -543,6 +879,8 @@ export class CalDav implements INodeType {
 				try {
 					if (getTransport === undefined) {
 						getTransport = await createN8nCalDavTransport(this);
+					}
+					if (getProvider === undefined) {
 						getProvider = defaultCalDavProviderRegistry.select(
 							validateAbsoluteHttpUrl(getTransport.serverUrl),
 						);

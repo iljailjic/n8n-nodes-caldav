@@ -374,7 +374,21 @@ describe('CalDAV Event Get dispatch and output', () => {
 			'start',
 			'end',
 		]);
-		expect(output).toEqual({ json: event.event, pairedItem: { item: 0 } });
+		expect(output).toEqual({
+			json: {
+				calendarUrl: event.event.calendarUrl,
+				resourceUrl: event.event.resourceUrl,
+				etag: event.event.etag,
+				uid: event.event.uid,
+				summary: event.event.summary,
+				description: event.event.description,
+				location: event.event.location,
+				url: event.event.url,
+				start: event.event.start,
+				end: event.event.end,
+			},
+			pairedItem: { item: 0 },
+		});
 		expect(output.json).not.toHaveProperty('context');
 		expect(output.json).not.toHaveProperty('extensions');
 		expect(output.json).not.toHaveProperty('id');
@@ -432,6 +446,36 @@ describe('CalDAV Event Get dispatch and output', () => {
 });
 
 describe('CalDAV Event Get configuration validation', () => {
+	it.each(['resource', 'operation'] as const)(
+		'classifies a throwing %s parameter expression as item-indexed dispatch configuration',
+		async (parameterName) => {
+			const resourceUrl = 'https://calendar.example.test/calendars/work/event';
+			const executionContext = context([parameters('resourceUrl', resourceUrl)]);
+			vi.mocked(executionContext.getNodeParameter).mockImplementation((name) => {
+				if (name === parameterName) throw new Error('private-expression-sentinel');
+				return Reflect.get(parameters('resourceUrl', resourceUrl), name);
+			});
+
+			const error = await captureError(executionContext);
+			expect(error).toBeInstanceOf(NodeOperationError);
+			expect(error.message).toBe('Unsupported CalDAV resource or operation.');
+			expect((error as NodeOperationError).context.itemIndex).toBe(0);
+			expect(String(error)).not.toContain('private-expression-sentinel');
+			expect(mocks.getCalendarEventByResourceUrl).not.toHaveBeenCalled();
+			expect(mocks.resolveCalendarEventByUid).not.toHaveBeenCalled();
+
+			vi.mocked(executionContext.continueOnFail).mockReturnValue(true);
+			await expect(new CalDav().execute.call(executionContext)).resolves.toEqual([
+				[
+					{
+						json: { error: 'Unsupported CalDAV resource or operation.' },
+						pairedItem: { item: 0 },
+					},
+				],
+			]);
+		},
+	);
+
 	it.each([
 		['null locator', null],
 		['missing locator marker', { mode: 'url', value: 'https://calendar.example.test/work/' }],

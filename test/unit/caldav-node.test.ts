@@ -136,13 +136,33 @@ describe('CalDAV Calendar Get UI', () => {
 			outputs: ['main'],
 			credentials: [{ name: 'calDavApi', required: true, testedBy: 'testCalDavApiCredentials' }],
 		});
-		expect(node.description.properties).toEqual([
+		expect(node.description.properties.map(({ name }) => name)).toEqual([
+			'resource',
+			'operation',
+			'operation',
+			'returnAll',
+			'limit',
+			'calendar',
+			'identifierMode',
+			'resourceUrl',
+			'uid',
+		]);
+		const calendarProperties = node.description.properties.filter(
+			(property) =>
+				!['identifierMode', 'resourceUrl', 'uid'].includes(property.name) &&
+				(property.name !== 'operation' ||
+					property.displayOptions?.show?.resource?.includes('calendar')),
+		);
+		expect(calendarProperties).toEqual([
 			{
 				displayName: 'Resource',
 				name: 'resource',
 				type: 'options',
 				noDataExpression: true,
-				options: [{ name: 'Calendar', value: 'calendar' }],
+				options: [
+					{ name: 'Calendar', value: 'calendar' },
+					{ name: 'Event', value: 'event' },
+				],
 				default: 'calendar',
 			},
 			{
@@ -198,7 +218,9 @@ describe('CalDAV Calendar Get UI', () => {
 				type: 'resourceLocator',
 				required: true,
 				default: { mode: 'url', value: '' },
-				displayOptions: { show: { resource: ['calendar'], operation: ['get'] } },
+				displayOptions: {
+					show: { resource: ['calendar', 'event'], operation: ['get'] },
+				},
 				modes: [
 					{
 						displayName: 'From List',
@@ -223,7 +245,10 @@ describe('CalDAV Calendar Get UI', () => {
 
 	it('keeps the locator additive without exposing unrelated operations', () => {
 		const node = new CalDav();
-		const operation = node.description.properties.find(({ name }) => name === 'operation');
+		const operation = node.description.properties.find(
+			({ name, displayOptions }) =>
+				name === 'operation' && displayOptions?.show?.resource?.includes('calendar'),
+		);
 
 		expect(
 			operation?.options?.map((option) => ('value' in option ? option.value : undefined)),
