@@ -11,6 +11,7 @@ import {
 	type ICredentialTestFunctions,
 	type IExecuteFunctions,
 	type IHttpRequestOptions,
+	type ILoadOptionsFunctions,
 	type IN8nHttpFullResponse,
 } from 'n8n-workflow';
 
@@ -992,14 +993,14 @@ export function createCalDavTransport(
 }
 
 export function createN8nCalDavRequestHelperAdapter(
-	context: IExecuteFunctions,
+	context: IExecuteFunctions | ILoadOptionsFunctions,
 ): CalDavRequestHelperAdapter;
 export function createN8nCalDavRequestHelperAdapter(
 	context: ICredentialTestFunctions,
 	credentials: ICredentialDataDecryptedObject,
 ): CalDavRequestHelperAdapter;
 export function createN8nCalDavRequestHelperAdapter(
-	context: IExecuteFunctions | ICredentialTestFunctions,
+	context: IExecuteFunctions | ILoadOptionsFunctions | ICredentialTestFunctions,
 	credentials?: ICredentialDataDecryptedObject,
 ): CalDavRequestHelperAdapter {
 	if (credentials !== undefined) {
@@ -1046,11 +1047,11 @@ export function createN8nCalDavRequestHelperAdapter(
 		return adapter;
 	}
 
-	const executionContext = context as IExecuteFunctions;
+	const authenticatedContext = context as IExecuteFunctions | ILoadOptionsFunctions;
 	return {
 		request(options: N8nCalDavRequestOptions): Promise<IN8nHttpFullResponse> {
-			return executionContext.helpers.httpRequestWithAuthentication.call(
-				executionContext,
+			return authenticatedContext.helpers.httpRequestWithAuthentication.call(
+				authenticatedContext,
 				CALDAV_CREDENTIAL_TYPE,
 				options as IHttpRequestOptions,
 			);
@@ -1059,14 +1060,14 @@ export function createN8nCalDavRequestHelperAdapter(
 }
 
 export async function createN8nCalDavTransport(
-	context: IExecuteFunctions,
+	context: IExecuteFunctions | ILoadOptionsFunctions,
 ): Promise<CalDavTransport>;
 export async function createN8nCalDavTransport(
 	context: ICredentialTestFunctions,
 	credential: ICredentialsDecrypted<ICredentialDataDecryptedObject>,
 ): Promise<CalDavTransport>;
 export async function createN8nCalDavTransport(
-	context: IExecuteFunctions | ICredentialTestFunctions,
+	context: IExecuteFunctions | ILoadOptionsFunctions | ICredentialTestFunctions,
 	credential?: ICredentialsDecrypted<ICredentialDataDecryptedObject>,
 ): Promise<CalDavTransport> {
 	if (credential !== undefined) {
@@ -1088,10 +1089,10 @@ export async function createN8nCalDavTransport(
 		);
 	}
 
-	const executionContext = context as IExecuteFunctions;
+	const authenticatedContext = context as IExecuteFunctions | ILoadOptionsFunctions;
 	let credentials: ICredentialDataDecryptedObject;
 	try {
-		credentials = await executionContext.getCredentials(CALDAV_CREDENTIAL_TYPE);
+		credentials = await authenticatedContext.getCredentials(CALDAV_CREDENTIAL_TYPE);
 	} catch {
 		throw new CalDavAuthenticationError();
 	}
@@ -1105,5 +1106,8 @@ export async function createN8nCalDavTransport(
 	}
 
 	const serverUrl = validateCredentialServerUrl(credentials.serverUrl);
-	return createCalDavTransport(serverUrl, createN8nCalDavRequestHelperAdapter(executionContext));
+	return createCalDavTransport(
+		serverUrl,
+		createN8nCalDavRequestHelperAdapter(authenticatedContext),
+	);
 }

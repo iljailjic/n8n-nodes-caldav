@@ -1,7 +1,9 @@
 import type {
 	IDataObject,
 	IExecuteFunctions,
+	ILoadOptionsFunctions,
 	INodeExecutionData,
+	INodeListSearchResult,
 	INodeParameterResourceLocator,
 	INodeType,
 	INodeTypeDescription,
@@ -13,18 +15,11 @@ import {
 	CalendarCollectionGetFailureCode,
 	getCalendarCollection,
 } from './actions/calendar/get';
-import { discoverCalendarHome } from './discovery/calendarHome';
+import { discoverCalendarsForCurrentUser } from './discovery/calendarDiscovery';
 import {
 	CalDavCalendarCollectionDiscoveryError,
-	discoverCalendarCollections,
 	type CalendarCollection,
 } from './discovery/calendarCollections';
-import {
-	discoverCurrentUserPrincipal,
-	CurrentUserPrincipalDiscoveryKind,
-	type AuthenticatedCurrentUserPrincipalOutcome,
-	type CurrentUserPrincipalDiscoveryOutcome,
-} from './discovery/currentUserPrincipal';
 import { testCalDavApiCredentials } from './methods/credentialTest';
 import { defaultCalDavProviderRegistry } from './providers/registry';
 import type { CalDavProviderAdapter } from './providers/types';
@@ -49,6 +44,7 @@ const GET_MANY_OPERATION = 'getMany';
 const INVALID_LIMIT_MESSAGE = 'Limit must be an integer greater than or equal to 1.';
 const UNSUPPORTED_OPERATION_MESSAGE = 'Unsupported CalDAV resource or operation.';
 const GENERIC_GET_MANY_ERROR_MESSAGE = 'The Calendar Get Many operation failed.';
+const GENERIC_LIST_SEARCH_ERROR_MESSAGE = 'The calendar list could not be loaded.';
 
 const GET_MESSAGES = {
 	INVALID_CALENDAR_URL:
@@ -139,7 +135,7 @@ function calendarLocatorUrl(value: unknown): AbsoluteHttpUrl | undefined {
 		const locator = value as Partial<INodeParameterResourceLocator> & { readonly __rl?: unknown };
 		if (
 			locator.__rl !== true ||
-			locator.mode !== 'url' ||
+			(locator.mode !== 'url' && locator.mode !== 'list') ||
 			typeof locator.value !== 'string' ||
 			locator.value.length === 0
 		) {
@@ -206,18 +202,6 @@ const SAFE_DOMAIN_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.free
 		'The CalDAV server returned an ambiguous calendar-collection property.',
 });
 const SAFE_DOMAIN_ERROR_MESSAGE_SET = new Set(Object.values(SAFE_DOMAIN_ERROR_MESSAGES));
-
-function requireAuthenticatedPrincipal(
-	outcome: CurrentUserPrincipalDiscoveryOutcome,
-	node: ReturnType<IExecuteFunctions['getNode']>,
-	itemIndex: number,
-): AuthenticatedCurrentUserPrincipalOutcome {
-	if (outcome.kind !== CurrentUserPrincipalDiscoveryKind.AUTHENTICATED) {
-		const message = SAFE_DOMAIN_ERROR_MESSAGES[outcome.code] ?? GENERIC_GET_MANY_ERROR_MESSAGE;
-		throw new NodeApiError(node, { message }, { message, itemIndex });
-	}
-	return outcome;
-}
 
 function compareUnicodeScalarSequences(left: string, right: string): number {
 	const leftScalars = Array.from(left);
@@ -288,12 +272,90 @@ function safeErrorMessage(error: unknown): string {
 		: (SAFE_DOMAIN_ERROR_MESSAGES[code] ?? GENERIC_GET_MANY_ERROR_MESSAGE);
 }
 
+function safeListSearchErrorMessage(error: unknown): string {
+	if (error instanceof NodeApiError && SAFE_DOMAIN_ERROR_MESSAGE_SET.has(error.message)) {
+		return error.message;
+	}
+	const code = errorCode(error);
+	return code === undefined
+		? GENERIC_LIST_SEARCH_ERROR_MESSAGE
+		: (SAFE_DOMAIN_ERROR_MESSAGES[code] ?? GENERIC_LIST_SEARCH_ERROR_MESSAGE);
+}
+
+function capabilityValue(value: boolean | null): 'yes' | 'no' | 'unknown' {
+	return value === null ? 'unknown' : value ? 'yes' : 'no';
+}
+
+function calendarOptionDescription(collection: CalendarCollection): string {
+	return `Read: ${capabilityValue(collection.canRead)}; Write: ${capabilityValue(collection.canWrite)}`;
+}
+
+function calendarOptionLabels(
+	collections: readonly CalendarCollection[],
+): ReadonlyMap<CalendarCollection, string> {
+	const candidates = collections.map((collection) => collection.displayName || collection.url);
+	const counts = new Map<string, number>();
+	for (const candidate of candidates) {
+		counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+	}
+
+	const labels = new Map<CalendarCollection, string>();
+	collections.forEach((collection, index) => {
+		const candidate = candidates[index];
+		labels.set(
+			collection,
+			(counts.get(candidate) ?? 0) > 1 ? `${candidate} — ${collection.url}` : candidate,
+		);
+	});
+	return labels;
+}
+
+async function searchCalendars(
+	this: ILoadOptionsFunctions,
+	filter?: string,
+	paginationToken?: string,
+): Promise<INodeListSearchResult> {
+	void paginationToken;
+	try {
+		const transport = await createN8nCalDavTransport(this);
+		const collections = [...(await discoverCalendarsForCurrentUser(transport))].sort(
+			compareCalendarCollections,
+		);
+		const labels = calendarOptionLabels(collections);
+		const foldedFilter = filter?.toLowerCase();
+		const selected =
+			foldedFilter === undefined || foldedFilter.length === 0
+				? collections
+				: collections.filter((collection) => {
+						const label = labels.get(collection) ?? collection.url;
+						return (
+							label.toLowerCase().includes(foldedFilter) ||
+							collection.url.toLowerCase().includes(foldedFilter)
+						);
+					});
+
+		return {
+			results: selected.map((collection) => ({
+				name: labels.get(collection) ?? collection.url,
+				value: collection.url,
+				description: calendarOptionDescription(collection),
+			})),
+		};
+	} catch (error) {
+		const message = safeListSearchErrorMessage(error);
+		throw new NodeApiError(this.getNode(), {}, { message });
+	}
+}
+
 function asJson(collection: CalendarCollection): IDataObject {
 	return collection as unknown as IDataObject;
 }
 
 export class CalDav implements INodeType {
-	methods = { credentialTest: { testCalDavApiCredentials } };
+	methods = {
+		credentialTest: { testCalDavApiCredentials },
+		listSearch: { searchCalendars },
+	};
 
 	description: INodeTypeDescription = {
 		displayName: 'CalDAV',
@@ -374,6 +436,15 @@ export class CalDav implements INodeType {
 					show: { resource: [CALENDAR_RESOURCE], operation: [GET_OPERATION] },
 				},
 				modes: [
+					{
+						displayName: 'From List',
+						name: 'list',
+						type: 'list',
+						typeOptions: {
+							searchListMethod: 'searchCalendars',
+							searchable: true,
+						},
+					},
 					{
 						displayName: 'By URL',
 						name: 'url',
@@ -512,20 +583,7 @@ export class CalDav implements INodeType {
 					? undefined
 					: activeLimit(this.getNodeParameter('limit', itemIndex), itemIndex, this.getNode());
 				const transport = await createN8nCalDavTransport(this);
-				const principal = requireAuthenticatedPrincipal(
-					await discoverCurrentUserPrincipal(transport),
-					this.getNode(),
-					itemIndex,
-				);
-				const home = await discoverCalendarHome(transport, principal.principalUrl);
-				const provider = defaultCalDavProviderRegistry.select(
-					validateAbsoluteHttpUrl(transport.serverUrl),
-				);
-				const collections = await discoverCalendarCollections(
-					transport,
-					home.calendarHomeUrl,
-					provider,
-				);
+				const collections = await discoverCalendarsForCurrentUser(transport);
 				const selected = [...collections].sort(compareCalendarCollections);
 				const output = limit === undefined ? selected : selected.slice(0, limit);
 				for (const collection of output) {

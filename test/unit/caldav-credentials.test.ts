@@ -257,8 +257,8 @@ describe('CalDAV credentials', () => {
 		expect(node.description.credentials).toEqual([
 			{ name: 'calDavApi', required: true, testedBy: 'testCalDavApiCredentials' },
 		]);
-		expect(node.methods).toEqual({
-			credentialTest: { testCalDavApiCredentials: expect.any(Function) },
+		expect(node.methods.credentialTest).toEqual({
+			testCalDavApiCredentials: expect.any(Function),
 		});
 		expect(packageJson.n8n.credentials).toEqual(['dist/credentials/CalDavApi.credentials.js']);
 	});
