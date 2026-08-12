@@ -10,4 +10,14 @@ describe('CalDav source import', () => {
 	it('exports the CalDav node class', () => {
 		expect(CalDav).toBeTypeOf('function');
 	});
+
+	it('preserves the accepted node identity and single main input/output', () => {
+		const node = new CalDav();
+		expect(node.description).toMatchObject({
+			name: 'calDav',
+			version: 1,
+			inputs: ['main'],
+			outputs: ['main'],
+		});
+	});
 });

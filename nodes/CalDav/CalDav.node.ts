@@ -13,7 +13,18 @@ import {
 	CalendarCollectionGetFailureCode,
 	getCalendarCollection,
 } from './actions/calendar/get';
-import { CalDavCalendarCollectionDiscoveryError } from './discovery/calendarCollections';
+import { discoverCalendarHome } from './discovery/calendarHome';
+import {
+	CalDavCalendarCollectionDiscoveryError,
+	discoverCalendarCollections,
+	type CalendarCollection,
+} from './discovery/calendarCollections';
+import {
+	discoverCurrentUserPrincipal,
+	CurrentUserPrincipalDiscoveryKind,
+	type AuthenticatedCurrentUserPrincipalOutcome,
+	type CurrentUserPrincipalDiscoveryOutcome,
+} from './discovery/currentUserPrincipal';
 import { testCalDavApiCredentials } from './methods/credentialTest';
 import { defaultCalDavProviderRegistry } from './providers/registry';
 import type { CalDavProviderAdapter } from './providers/types';
@@ -32,8 +43,14 @@ import type { AbsoluteHttpUrl } from './transport/url';
 import { XmlBuildError } from './xml/errors';
 import { CalDavXmlParseError, CalDavXmlProtocolError } from './xml/parser';
 
-const NODE_MESSAGES = {
-	UNSUPPORTED: 'Unsupported CalDAV resource or operation.',
+const CALENDAR_RESOURCE = 'calendar';
+const GET_OPERATION = 'get';
+const GET_MANY_OPERATION = 'getMany';
+const INVALID_LIMIT_MESSAGE = 'Limit must be an integer greater than or equal to 1.';
+const UNSUPPORTED_OPERATION_MESSAGE = 'Unsupported CalDAV resource or operation.';
+const GENERIC_GET_MANY_ERROR_MESSAGE = 'The Calendar Get Many operation failed.';
+
+const GET_MESSAGES = {
 	INVALID_CALENDAR_URL:
 		'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
 	UNTRUSTED: 'The Calendar URL targets an untrusted endpoint.',
@@ -66,37 +83,37 @@ function apiFailure(message: string, error?: CalDavTransportError): SafeNodeFail
 function transportFailure(error: CalDavTransportError): SafeNodeFailure {
 	switch (error.code) {
 		case CalDavTransportErrorCode.AUTHENTICATION_FAILED:
-			return apiFailure(NODE_MESSAGES.AUTHENTICATION, error);
+			return apiFailure(GET_MESSAGES.AUTHENTICATION, error);
 		case CalDavTransportErrorCode.AUTHORIZATION_FAILED:
-			return apiFailure(NODE_MESSAGES.AUTHORIZATION, error);
+			return apiFailure(GET_MESSAGES.AUTHORIZATION, error);
 		case CalDavTransportErrorCode.NOT_FOUND:
-			return apiFailure(NODE_MESSAGES.NOT_FOUND, error);
+			return apiFailure(GET_MESSAGES.NOT_FOUND, error);
 		case CalDavTransportErrorCode.TLS_VALIDATION_FAILED:
-			return apiFailure(NODE_MESSAGES.TLS, error);
+			return apiFailure(GET_MESSAGES.TLS, error);
 		case CalDavTransportErrorCode.TIMEOUT:
-			return apiFailure(NODE_MESSAGES.TIMEOUT, error);
+			return apiFailure(GET_MESSAGES.TIMEOUT, error);
 		case CalDavTransportErrorCode.RESPONSE_LIMIT_EXCEEDED:
-			return apiFailure(NODE_MESSAGES.RESPONSE_LIMIT, error);
+			return apiFailure(GET_MESSAGES.RESPONSE_LIMIT, error);
 		case CalDavTransportErrorCode.UNTRUSTED_TARGET:
-			return apiFailure(NODE_MESSAGES.UNTRUSTED, error);
+			return apiFailure(GET_MESSAGES.UNTRUSTED, error);
 		case CalDavTransportErrorCode.INVALID_REDIRECT:
 		case CalDavTransportErrorCode.INSECURE_REDIRECT:
 		case CalDavTransportErrorCode.REDIRECT_LOOP:
 		case CalDavTransportErrorCode.REDIRECT_LIMIT_EXCEEDED:
-			return apiFailure(NODE_MESSAGES.REDIRECT, error);
+			return apiFailure(GET_MESSAGES.REDIRECT, error);
 		case CalDavTransportErrorCode.NETWORK_ERROR:
-			return apiFailure(NODE_MESSAGES.NETWORK, error);
+			return apiFailure(GET_MESSAGES.NETWORK, error);
 		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
-			return apiFailure(NODE_MESSAGES.INVALID_RESPONSE, error);
+			return apiFailure(GET_MESSAGES.INVALID_RESPONSE, error);
 	}
 }
 
-function safeFailure(error: unknown): SafeNodeFailure {
+function safeGetFailure(error: unknown): SafeNodeFailure {
 	if (error instanceof CalDavCalendarCollectionGetError) {
 		return apiFailure(
 			error.code === CalendarCollectionGetFailureCode.NOT_CALENDAR
-				? NODE_MESSAGES.NOT_CALENDAR
-				: NODE_MESSAGES.VEVENT_UNSUPPORTED,
+				? GET_MESSAGES.NOT_CALENDAR
+				: GET_MESSAGES.VEVENT_UNSUPPORTED,
 		);
 	}
 	if (error instanceof CalDavTransportError) {
@@ -109,9 +126,9 @@ function safeFailure(error: unknown): SafeNodeFailure {
 		error instanceof XmlBuildError ||
 		error instanceof CalDavUrlValidationError
 	) {
-		return apiFailure(NODE_MESSAGES.INVALID_RESPONSE);
+		return apiFailure(GET_MESSAGES.INVALID_RESPONSE);
 	}
-	return apiFailure(NODE_MESSAGES.GENERIC);
+	return apiFailure(GET_MESSAGES.GENERIC);
 }
 
 function calendarLocatorUrl(value: unknown): AbsoluteHttpUrl | undefined {
@@ -132,6 +149,147 @@ function calendarLocatorUrl(value: unknown): AbsoluteHttpUrl | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+const SAFE_DOMAIN_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+	AUTHENTICATION_FAILED: 'CalDAV authentication failed.',
+	AUTHORIZATION_FAILED: 'The CalDAV request is not authorized.',
+	NOT_FOUND: 'The requested CalDAV resource was not found.',
+	TLS_VALIDATION_FAILED: 'TLS certificate validation failed.',
+	TIMEOUT: 'The CalDAV request timed out after 30 seconds.',
+	RESPONSE_LIMIT_EXCEEDED: 'The CalDAV response exceeded the 10 MiB size limit.',
+	REMOTE_PROTOCOL_ERROR: 'The CalDAV server returned an unexpected response.',
+	NETWORK_ERROR: 'The CalDAV server could not be reached.',
+	INVALID_REDIRECT: 'The CalDAV server returned an invalid redirect.',
+	INSECURE_REDIRECT: 'The CalDAV redirect would use an insecure connection.',
+	UNTRUSTED_TARGET: 'The CalDAV request target is not trusted.',
+	REDIRECT_LOOP: 'The CalDAV request encountered a redirect loop.',
+	REDIRECT_LIMIT_EXCEEDED: 'The CalDAV request exceeded the 5-redirect limit.',
+	MALFORMED_URL: 'The URL is malformed.',
+	MALFORMED_PERCENT_ENCODING: 'The URL contains malformed percent-encoding.',
+	UNSUPPORTED_SCHEME: 'The URL scheme is not supported.',
+	USERINFO_NOT_ALLOWED: 'URL userinfo is not allowed.',
+	FRAGMENT_NOT_ALLOWED: 'URL fragments are not allowed.',
+	DOT_SEGMENT_NOT_ALLOWED: 'URL dot segments are not allowed.',
+	INSECURE_PROTOCOL_DOWNGRADE: 'An insecure protocol downgrade is not allowed.',
+	INVALID_RESOURCE_NAME: 'The calendar resource name is invalid.',
+	FORBIDDEN_DECLARATION: 'The XML document contains a forbidden declaration.',
+	MALFORMED_XML: 'The XML document is malformed.',
+	TRUNCATED_XML: 'The XML document ended unexpectedly.',
+	INVALID_CHARACTER_REFERENCE: 'The XML document contains an invalid character reference.',
+	UNSUPPORTED_ENTITY_REFERENCE: 'The XML document contains an unsupported entity reference.',
+	DUPLICATE_ATTRIBUTE: 'The XML document contains a duplicate attribute.',
+	INVALID_QUALIFIED_NAME: 'The XML document contains an invalid qualified name.',
+	INVALID_NAMESPACE_DECLARATION: 'The XML document contains an invalid namespace declaration.',
+	UNBOUND_NAMESPACE_PREFIX: 'The XML document uses an unbound namespace prefix.',
+	MAX_DEPTH_EXCEEDED: 'The XML document exceeds the maximum nesting depth.',
+	MAX_ELEMENT_COUNT_EXCEEDED: 'The XML document exceeds the maximum element count.',
+	INVALID_MULTISTATUS: 'The WebDAV multistatus response is invalid.',
+	INVALID_RESPONSE: 'A WebDAV response element is invalid.',
+	INVALID_PROPSTAT: 'A WebDAV propstat element is invalid.',
+	INVALID_STATUS: 'A WebDAV status element is invalid.',
+	CURRENT_USER_PRINCIPAL_UNAUTHENTICATED:
+		'The CalDAV server did not authenticate the current user.',
+	CURRENT_USER_PRINCIPAL_UNAVAILABLE: 'The CalDAV current-user principal is unavailable.',
+	INVALID_CURRENT_USER_PRINCIPAL_RESPONSE:
+		'The CalDAV server returned an invalid current-user principal response.',
+	AMBIGUOUS_CURRENT_USER_PRINCIPAL_RESPONSE:
+		'The CalDAV server returned an ambiguous current-user principal response.',
+	CALENDAR_HOME_MISSING: 'The CalDAV calendar-home property is unavailable.',
+	CALENDAR_HOME_FORBIDDEN: 'The CalDAV calendar-home property is forbidden.',
+	INVALID_CALENDAR_HOME_RESPONSE: 'The CalDAV server returned an invalid calendar-home response.',
+	AMBIGUOUS_CALENDAR_HOME_RESPONSE:
+		'The CalDAV server returned an ambiguous calendar-home response.',
+	INVALID_CALENDAR_COLLECTION_RESPONSE:
+		'The CalDAV server returned an invalid calendar-collection response.',
+	AMBIGUOUS_CALENDAR_COLLECTION_PROPERTY:
+		'The CalDAV server returned an ambiguous calendar-collection property.',
+});
+const SAFE_DOMAIN_ERROR_MESSAGE_SET = new Set(Object.values(SAFE_DOMAIN_ERROR_MESSAGES));
+
+function requireAuthenticatedPrincipal(
+	outcome: CurrentUserPrincipalDiscoveryOutcome,
+	node: ReturnType<IExecuteFunctions['getNode']>,
+	itemIndex: number,
+): AuthenticatedCurrentUserPrincipalOutcome {
+	if (outcome.kind !== CurrentUserPrincipalDiscoveryKind.AUTHENTICATED) {
+		const message = SAFE_DOMAIN_ERROR_MESSAGES[outcome.code] ?? GENERIC_GET_MANY_ERROR_MESSAGE;
+		throw new NodeApiError(node, { message }, { message, itemIndex });
+	}
+	return outcome;
+}
+
+function compareUnicodeScalarSequences(left: string, right: string): number {
+	const leftScalars = Array.from(left);
+	const rightScalars = Array.from(right);
+	const sharedLength = Math.min(leftScalars.length, rightScalars.length);
+
+	for (let index = 0; index < sharedLength; index++) {
+		const leftScalar = leftScalars[index].codePointAt(0);
+		const rightScalar = rightScalars[index].codePointAt(0);
+		if (leftScalar !== rightScalar) {
+			return (leftScalar ?? 0) < (rightScalar ?? 0) ? -1 : 1;
+		}
+	}
+
+	if (leftScalars.length === rightScalars.length) return 0;
+	return leftScalars.length < rightScalars.length ? -1 : 1;
+}
+
+function compareCalendarCollections(left: CalendarCollection, right: CalendarCollection): number {
+	const displayNameComparison = compareUnicodeScalarSequences(
+		left.displayName ?? '',
+		right.displayName ?? '',
+	);
+	return displayNameComparison !== 0
+		? displayNameComparison
+		: compareUnicodeScalarSequences(left.url, right.url);
+}
+
+function activeLimit(
+	value: unknown,
+	itemIndex: number,
+	node: ReturnType<IExecuteFunctions['getNode']>,
+): number {
+	if (
+		typeof value !== 'number' ||
+		!Number.isFinite(value) ||
+		!Number.isInteger(value) ||
+		value < 1
+	) {
+		throw new NodeOperationError(node, INVALID_LIMIT_MESSAGE, { itemIndex });
+	}
+	return value;
+}
+
+function errorCode(error: unknown): string | undefined {
+	if (typeof error !== 'object' || error === null) return undefined;
+	try {
+		const code = (error as { readonly code?: unknown }).code;
+		return typeof code === 'string' ? code : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function safeErrorMessage(error: unknown): string {
+	if (error instanceof NodeOperationError) {
+		return error.message === INVALID_LIMIT_MESSAGE ||
+			error.message === UNSUPPORTED_OPERATION_MESSAGE
+			? error.message
+			: GENERIC_GET_MANY_ERROR_MESSAGE;
+	}
+	if (error instanceof NodeApiError && SAFE_DOMAIN_ERROR_MESSAGE_SET.has(error.message)) {
+		return error.message;
+	}
+	const code = errorCode(error);
+	return code === undefined
+		? GENERIC_GET_MANY_ERROR_MESSAGE
+		: (SAFE_DOMAIN_ERROR_MESSAGES[code] ?? GENERIC_GET_MANY_ERROR_MESSAGE);
+}
+
+function asJson(collection: CalendarCollection): IDataObject {
+	return collection as unknown as IDataObject;
 }
 
 export class CalDav implements INodeType {
@@ -156,24 +314,55 @@ export class CalDav implements INodeType {
 				name: 'resource',
 				type: 'options',
 				noDataExpression: true,
-				options: [{ name: 'Calendar', value: 'calendar' }],
-				default: 'calendar',
+				options: [{ name: 'Calendar', value: CALENDAR_RESOURCE }],
+				default: CALENDAR_RESOURCE,
 			},
 			{
 				displayName: 'Operation',
 				name: 'operation',
 				type: 'options',
 				noDataExpression: true,
-				displayOptions: { show: { resource: ['calendar'] } },
+				displayOptions: { show: { resource: [CALENDAR_RESOURCE] } },
 				options: [
 					{
 						name: 'Get',
-						value: 'get',
+						value: GET_OPERATION,
 						description: 'Retrieve a calendar collection',
 						action: 'Retrieve a calendar collection',
 					},
+					{
+						name: 'Get Many',
+						value: GET_MANY_OPERATION,
+						description: 'Return accessible event calendars',
+						action: 'Get many calendars',
+					},
 				],
-				default: 'get',
+				default: GET_OPERATION,
+			},
+			{
+				displayName: 'Return All',
+				name: 'returnAll',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to return all results or only up to a given limit',
+				displayOptions: {
+					show: { resource: [CALENDAR_RESOURCE], operation: [GET_MANY_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Limit',
+				name: 'limit',
+				type: 'number',
+				typeOptions: { minValue: 1 },
+				default: 50,
+				description: 'Max number of results to return',
+				displayOptions: {
+					show: {
+						resource: [CALENDAR_RESOURCE],
+						operation: [GET_MANY_OPERATION],
+						returnAll: [false],
+					},
+				},
 			},
 			{
 				displayName: 'Calendar',
@@ -181,7 +370,9 @@ export class CalDav implements INodeType {
 				type: 'resourceLocator',
 				required: true,
 				default: { mode: 'url', value: '' },
-				displayOptions: { show: { resource: ['calendar'], operation: ['get'] } },
+				displayOptions: {
+					show: { resource: [CALENDAR_RESOURCE], operation: [GET_OPERATION] },
+				},
 				modes: [
 					{
 						displayName: 'By URL',
@@ -197,19 +388,17 @@ export class CalDav implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
-		let transport: CalDavTransport | undefined;
-		let provider: CalDavProviderAdapter | undefined;
+		let getTransport: CalDavTransport | undefined;
+		let getProvider: CalDavProviderAdapter | undefined;
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
 			let resource: unknown;
 			let operation: unknown;
-			let calendar: unknown;
 			try {
 				resource = this.getNodeParameter('resource', itemIndex);
 				operation = this.getNodeParameter('operation', itemIndex);
-				calendar = this.getNodeParameter('calendar', itemIndex);
 			} catch (error) {
-				const failure = safeFailure(error);
+				const failure = safeGetFailure(error);
 				if (this.continueOnFail()) {
 					returnData.push({
 						json: { error: failure.message },
@@ -228,57 +417,130 @@ export class CalDav implements INodeType {
 				);
 			}
 
-			const calendarUrl = calendarLocatorUrl(calendar);
-			const inputFailureMessage =
-				resource !== 'calendar' || operation !== 'get'
-					? NODE_MESSAGES.UNSUPPORTED
-					: calendarUrl === undefined
-						? NODE_MESSAGES.INVALID_CALENDAR_URL
-						: undefined;
-			if (inputFailureMessage !== undefined) {
+			if (
+				resource !== CALENDAR_RESOURCE ||
+				(operation !== GET_OPERATION && operation !== GET_MANY_OPERATION)
+			) {
 				if (this.continueOnFail()) {
 					returnData.push({
-						json: { error: inputFailureMessage },
+						json: { error: UNSUPPORTED_OPERATION_MESSAGE },
 						pairedItem: { item: itemIndex },
 					});
 					continue;
 				}
-				throw new NodeOperationError(this.getNode(), inputFailureMessage, { itemIndex });
+				throw new NodeOperationError(this.getNode(), UNSUPPORTED_OPERATION_MESSAGE, { itemIndex });
 			}
-			if (calendarUrl === undefined) {
+
+			if (operation === GET_OPERATION) {
+				let calendar: unknown;
+				try {
+					calendar = this.getNodeParameter('calendar', itemIndex);
+				} catch (error) {
+					const failure = safeGetFailure(error);
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: failure.message },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeApiError(
+						this.getNode(),
+						{},
+						{
+							message: failure.message,
+							itemIndex,
+							...(failure.httpCode === undefined ? {} : { httpCode: failure.httpCode }),
+						},
+					);
+				}
+
+				const calendarUrl = calendarLocatorUrl(calendar);
+				if (calendarUrl === undefined) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: GET_MESSAGES.INVALID_CALENDAR_URL },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), GET_MESSAGES.INVALID_CALENDAR_URL, {
+						itemIndex,
+					});
+				}
+
+				try {
+					if (getTransport === undefined) {
+						getTransport = await createN8nCalDavTransport(this);
+						getProvider = defaultCalDavProviderRegistry.select(
+							validateAbsoluteHttpUrl(getTransport.serverUrl),
+						);
+					}
+					const collection = await getCalendarCollection(getTransport, calendarUrl, getProvider);
+					returnData.push({ json: asJson(collection), pairedItem: { item: itemIndex } });
+				} catch (error) {
+					const failure = safeGetFailure(error);
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: failure.message },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeApiError(
+						this.getNode(),
+						{},
+						{
+							message: failure.message,
+							itemIndex,
+							...(failure.httpCode === undefined ? {} : { httpCode: failure.httpCode }),
+						},
+					);
+				}
 				continue;
 			}
 
 			try {
-				if (transport === undefined) {
-					transport = await createN8nCalDavTransport(this);
-					provider = defaultCalDavProviderRegistry.select(
-						validateAbsoluteHttpUrl(transport.serverUrl),
-					);
-				}
-				const collection = await getCalendarCollection(transport, calendarUrl, provider);
-				returnData.push({
-					json: collection as unknown as IDataObject,
-					pairedItem: { item: itemIndex },
-				});
-			} catch (error) {
-				const failure = safeFailure(error);
-				if (this.continueOnFail()) {
-					returnData.push({
-						json: { error: failure.message },
-						pairedItem: { item: itemIndex },
+				const returnAllValue = this.getNodeParameter('returnAll', itemIndex);
+				if (typeof returnAllValue !== 'boolean') {
+					throw new NodeOperationError(this.getNode(), UNSUPPORTED_OPERATION_MESSAGE, {
+						itemIndex,
 					});
+				}
+				const returnAll = returnAllValue;
+				const limit = returnAll
+					? undefined
+					: activeLimit(this.getNodeParameter('limit', itemIndex), itemIndex, this.getNode());
+				const transport = await createN8nCalDavTransport(this);
+				const principal = requireAuthenticatedPrincipal(
+					await discoverCurrentUserPrincipal(transport),
+					this.getNode(),
+					itemIndex,
+				);
+				const home = await discoverCalendarHome(transport, principal.principalUrl);
+				const provider = defaultCalDavProviderRegistry.select(
+					validateAbsoluteHttpUrl(transport.serverUrl),
+				);
+				const collections = await discoverCalendarCollections(
+					transport,
+					home.calendarHomeUrl,
+					provider,
+				);
+				const selected = [...collections].sort(compareCalendarCollections);
+				const output = limit === undefined ? selected : selected.slice(0, limit);
+				for (const collection of output) {
+					returnData.push({ json: asJson(collection), pairedItem: { item: itemIndex } });
+				}
+			} catch (error) {
+				const message = safeErrorMessage(error);
+				if (this.continueOnFail()) {
+					returnData.push({ json: { error: message }, pairedItem: { item: itemIndex } });
 					continue;
 				}
-				throw new NodeApiError(
-					this.getNode(),
-					{},
-					{
-						message: failure.message,
-						itemIndex,
-						...(failure.httpCode === undefined ? {} : { httpCode: failure.httpCode }),
-					},
-				);
+				if (error instanceof NodeOperationError) {
+					throw new NodeOperationError(this.getNode(), error, { itemIndex });
+				}
+				throw new NodeApiError(this.getNode(), { message }, { message, itemIndex });
 			}
 		}
 

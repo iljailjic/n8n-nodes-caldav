@@ -126,7 +126,7 @@ beforeEach(() => {
 });
 
 describe('CalDAV Calendar Get UI', () => {
-	it('exposes only Calendar/Get with one By URL resource locator', () => {
+	it('exposes Calendar/Get and Calendar/Get Many with operation-specific fields', () => {
 		const node = new CalDav();
 
 		expect(node.description).toMatchObject({
@@ -158,8 +158,39 @@ describe('CalDAV Calendar Get UI', () => {
 						description: expect.stringMatching(/retrieve.*calendar|get.*calendar/i),
 						action: expect.stringMatching(/calendar/i),
 					},
+					{
+						name: 'Get Many',
+						value: 'getMany',
+						description: expect.stringMatching(/accessible.*calendar|many.*calendar/i),
+						action: expect.stringMatching(/many.*calendar/i),
+					},
 				],
 				default: 'get',
+			},
+			{
+				displayName: 'Return All',
+				name: 'returnAll',
+				type: 'boolean',
+				default: false,
+				description: expect.any(String),
+				displayOptions: {
+					show: { resource: ['calendar'], operation: ['getMany'] },
+				},
+			},
+			{
+				displayName: 'Limit',
+				name: 'limit',
+				type: 'number',
+				typeOptions: { minValue: 1 },
+				default: 50,
+				description: expect.any(String),
+				displayOptions: {
+					show: {
+						resource: ['calendar'],
+						operation: ['getMany'],
+						returnAll: [false],
+					},
+				},
 			},
 			{
 				displayName: 'Calendar',
@@ -181,12 +212,16 @@ describe('CalDAV Calendar Get UI', () => {
 		expect('listSearch' in node.methods).toBe(false);
 	});
 
-	it('does not expose reserved listing or list-locator controls', () => {
-		const serialized = JSON.stringify(new CalDav().description.properties);
+	it('does not expose From List, list search, or unrelated operations', () => {
+		const node = new CalDav();
+		const serialized = JSON.stringify(node.description.properties);
+		const operation = node.description.properties.find(({ name }) => name === 'operation');
 
-		for (const reserved of ['Get Many', 'Return All', 'Limit', 'From List', 'listSearch']) {
+		for (const reserved of ['From List', 'listSearch']) {
 			expect(serialized).not.toContain(reserved);
 		}
+		expect(operation?.options?.map(({ value }) => value)).toEqual(['get', 'getMany']);
+		expect('listSearch' in node.methods).toBe(false);
 	});
 });
 
@@ -282,7 +317,7 @@ describe('CalDAV Calendar Get execution', () => {
 
 	it.each([
 		['unsupported resource', 'event', 'get'],
-		['unsupported operation', 'calendar', 'getMany'],
+		['unsupported operation', 'calendar', 'fromList'],
 	] as const)(
 		'rejects %s instead of passing input through',
 		async (_label, resource, operation) => {

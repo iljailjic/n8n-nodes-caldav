@@ -2,8 +2,10 @@
 // eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { Readable } from 'node:stream';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { IExecuteFunctions, IHttpRequestOptions, INode } from 'n8n-workflow';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { CalDav } from '../../nodes/CalDav/CalDav.node';
 import { getCalendarCollection } from '../../nodes/CalDav/actions/calendar/get';
 import { discoverCalendarHome } from '../../nodes/CalDav/discovery/calendarHome';
 import { discoverCalendarCollections } from '../../nodes/CalDav/discovery/calendarCollections';
@@ -119,17 +121,95 @@ async function authenticatedFetch(
 	url: string,
 	method = 'GET',
 	body?: string,
+	contentType = 'text/calendar; charset=utf-8',
 ): Promise<Response> {
 	return await fetch(url, {
 		method,
 		headers: {
 			Authorization: basicAuthorization(run),
-			...(body === undefined ? {} : { 'Content-Type': 'text/calendar; charset=utf-8' }),
+			...(body === undefined ? {} : { 'Content-Type': contentType }),
 		},
 		...(body === undefined ? {} : { body }),
 		redirect: 'manual',
 		signal: AbortSignal.timeout(10_000),
 	});
+}
+
+function mkCalendarBody(displayName: string, component: 'VEVENT' | 'VTODO' = 'VEVENT'): string {
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:set>
+    <d:prop>
+      <d:displayname>${displayName}</d:displayname>
+      <c:supported-calendar-component-set><c:comp name="${component}"/></c:supported-calendar-component-set>
+    </d:prop>
+  </d:set>
+</c:mkcalendar>`;
+}
+
+async function createSyntheticCalendar(
+	run: RadicaleRun,
+	suffix: string,
+	displayName: string,
+	component: 'VEVENT' | 'VTODO' = 'VEVENT',
+): Promise<string> {
+	const homeUrl = await discoverPrincipalAndHome(run);
+	const collectionUrl = new URL(
+		`get-many-${encodeURIComponent(run.identity)}-${encodeURIComponent(suffix)}/`,
+		homeUrl,
+	).href;
+	const response = await authenticatedFetch(
+		run,
+		collectionUrl,
+		'MKCALENDAR',
+		mkCalendarBody(displayName, component),
+		'application/xml; charset=utf-8',
+	);
+	expect([201, 204]).toContain(response.status);
+	return collectionUrl;
+}
+
+async function createSyntheticNonEventCollection(run: RadicaleRun): Promise<string> {
+	return await createSyntheticCalendar(run, 'non-event', 'Task Only', 'VTODO');
+}
+
+function workflowNode(): INode {
+	return {
+		id: 'radicale-calendar-get-many',
+		name: 'Radicale Calendar Get Many',
+		type: 'CUSTOM.calDav',
+		typeVersion: 1,
+		position: [0, 0],
+		parameters: {},
+	};
+}
+
+function calendarGetManyContext(run: RadicaleRun): IExecuteFunctions {
+	const adapter = requestAdapter(run);
+	const context = {
+		getInputData: vi.fn().mockReturnValue([{ json: { oracle: 'radicale' } }]),
+		getNodeParameter: vi.fn((name: string, itemIndex: number) => {
+			expect(itemIndex).toBe(0);
+			if (name === 'resource') return 'calendar';
+			if (name === 'operation') return 'getMany';
+			if (name === 'returnAll') return true;
+			throw new Error(`Unexpected active parameter read: ${name}.`);
+		}),
+		getCredentials: vi.fn().mockResolvedValue({
+			serverUrl: run.endpoint,
+			username: run.username,
+			password: run.password,
+			allowUnauthorizedCerts: false,
+		}),
+		continueOnFail: vi.fn().mockReturnValue(false),
+		getNode: vi.fn().mockReturnValue(workflowNode()),
+		helpers: {
+			async httpRequestWithAuthentication(_credentialType: string, options: IHttpRequestOptions) {
+				return await adapter.request(options as N8nCalDavRequestOptions);
+			},
+		},
+	};
+	return context as unknown as IExecuteFunctions;
 }
 
 async function createSyntheticEvent(run: RadicaleRun, calendarSuffix = 'default'): Promise<string> {
@@ -264,6 +344,48 @@ describe('Radicale authenticated discovery', () => {
 			).toBe(403);
 			const serialized = JSON.stringify({ collections, writableGet, readOnlyGet });
 			expect(serialized).not.toContain(run.password);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('executes Calendar Get Many for an empty home and filters/sorts writable, read-only, and non-event collections', async () => {
+		const run = await startRun();
+		try {
+			await expect(harness.waitForAuthenticatedReadiness(run)).resolves.toBeUndefined();
+			await expect(new CalDav().execute.call(calendarGetManyContext(run))).resolves.toEqual([[]]);
+
+			const writableUrl = await createSyntheticCalendar(run, 'writable', 'Zulu Writable');
+			const readOnlyUrl = await createSyntheticCalendar(run, 'read-only', 'Alpha Read Only');
+			const nonEventUrl = await createSyntheticNonEventCollection(run);
+			await harness.makeCalendarReadOnly(run, readOnlyUrl);
+
+			const [output] = await new CalDav().execute.call(calendarGetManyContext(run));
+			expect(output).toHaveLength(2);
+			expect(output).toEqual([
+				{
+					json: expect.objectContaining({
+						url: readOnlyUrl,
+						displayName: 'Alpha Read Only',
+						canRead: true,
+						canWrite: false,
+					}),
+					pairedItem: { item: 0 },
+				},
+				{
+					json: expect.objectContaining({
+						url: writableUrl,
+						displayName: 'Zulu Writable',
+						canRead: true,
+						canWrite: true,
+					}),
+					pairedItem: { item: 0 },
+				},
+			]);
+			const serialized = JSON.stringify(output);
+			expect(serialized).not.toContain(nonEventUrl);
+			expect(serialized).not.toContain(run.password);
+			expect(serialized).not.toContain(basicAuthorization(run));
 		} finally {
 			await teardownRun(run);
 		}
