@@ -2,7 +2,14 @@
 // eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { Readable } from 'node:stream';
 
-import type { IExecuteFunctions, IHttpRequestOptions, INode } from 'n8n-workflow';
+import type {
+	IExecuteFunctions,
+	IHttpRequestOptions,
+	ILoadOptionsFunctions,
+	INode,
+	INodeListSearchResult,
+	INodeType,
+} from 'n8n-workflow';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { CalDav } from '../../nodes/CalDav/CalDav.node';
@@ -212,6 +219,35 @@ function calendarGetManyContext(run: RadicaleRun): IExecuteFunctions {
 	return context as unknown as IExecuteFunctions;
 }
 
+function calendarListSearchContext(run: RadicaleRun): ILoadOptionsFunctions {
+	const adapter = requestAdapter(run);
+	return {
+		getCredentials: vi.fn().mockResolvedValue({
+			serverUrl: run.endpoint,
+			username: run.username,
+			password: run.password,
+			allowUnauthorizedCerts: false,
+		}),
+		getNode: vi.fn().mockReturnValue(workflowNode()),
+		helpers: {
+			async httpRequestWithAuthentication(_credentialType: string, options: IHttpRequestOptions) {
+				return await adapter.request(options as N8nCalDavRequestOptions);
+			},
+		},
+	} as unknown as ILoadOptionsFunctions;
+}
+
+async function searchRadicaleCalendars(
+	run: RadicaleRun,
+	filter?: string,
+	paginationToken?: string,
+): Promise<INodeListSearchResult> {
+	const method = (new CalDav() as INodeType).methods?.listSearch?.searchCalendars;
+	expect(method).toBeTypeOf('function');
+	if (method === undefined) throw new Error('Missing listSearch.searchCalendars method.');
+	return await method.call(calendarListSearchContext(run), filter, paginationToken);
+}
+
 async function createSyntheticEvent(run: RadicaleRun, calendarSuffix = 'default'): Promise<string> {
 	const homeUrl = await discoverPrincipalAndHome(run);
 	const collectionUrl = new URL(
@@ -384,6 +420,68 @@ describe('Radicale authenticated discovery', () => {
 			]);
 			const serialized = JSON.stringify(output);
 			expect(serialized).not.toContain(nonEventUrl);
+			expect(serialized).not.toContain(run.password);
+			expect(serialized).not.toContain(basicAuthorization(run));
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('loads duplicate, empty, writable, and read-only VEVENT calendars while excluding VTODO-only collections', async () => {
+		const run = await startRun();
+		try {
+			await expect(searchRadicaleCalendars(run, '', 'ignored-pagination-token')).resolves.toEqual({
+				results: [],
+			});
+
+			const duplicateAUrl = await createSyntheticCalendar(run, 'duplicate-a', 'Duplicate');
+			const duplicateZUrl = await createSyntheticCalendar(run, 'duplicate-z', 'Duplicate');
+			const emptyUrl = await createSyntheticCalendar(run, 'empty', '');
+			const readOnlyUrl = await createSyntheticCalendar(run, 'read-only-search', 'Read Only');
+			const todoOnlyUrl = await createSyntheticCalendar(
+				run,
+				'todo-only-search',
+				'Task Only',
+				'VTODO',
+			);
+			await harness.makeCalendarReadOnly(run, readOnlyUrl);
+
+			const all = await searchRadicaleCalendars(run);
+			expect(all).not.toHaveProperty('paginationToken');
+			expect(all.results.map(({ value }) => value)).toEqual([
+				emptyUrl,
+				duplicateAUrl,
+				duplicateZUrl,
+				readOnlyUrl,
+			]);
+			expect(all.results[0]).toEqual({
+				name: emptyUrl,
+				value: emptyUrl,
+				description: 'Read: yes; Write: yes',
+			});
+			for (const [index, url] of [
+				[1, duplicateAUrl],
+				[2, duplicateZUrl],
+			] as const) {
+				expect(all.results[index].name).toContain('Duplicate');
+				expect(all.results[index].name).toContain(url);
+				expect(all.results[index]).toMatchObject({
+					value: url,
+					description: 'Read: yes; Write: yes',
+				});
+			}
+			expect(all.results[1].name).not.toBe(all.results[2].name);
+			expect(all.results[3]).toEqual({
+				name: 'Read Only',
+				value: readOnlyUrl,
+				description: 'Read: yes; Write: no',
+			});
+			expect(all.results.every((option) => option.disabled !== true)).toBe(true);
+			expect(JSON.stringify(all)).not.toContain(todoOnlyUrl);
+
+			const filtered = await searchRadicaleCalendars(run, 'DUPLICATE');
+			expect(filtered.results.map(({ value }) => value)).toEqual([duplicateAUrl, duplicateZUrl]);
+			const serialized = JSON.stringify({ all, filtered });
 			expect(serialized).not.toContain(run.password);
 			expect(serialized).not.toContain(basicAuthorization(run));
 		} finally {

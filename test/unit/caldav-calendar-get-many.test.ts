@@ -212,10 +212,17 @@ describe('Calendar Get Many node description', () => {
 			required: true,
 			default: { mode: 'url', value: '' },
 			displayOptions: { show: { resource: ['calendar'], operation: ['get'] } },
-			modes: [{ displayName: 'By URL', name: 'url', type: 'string' }],
+			modes: [
+				{
+					displayName: 'From List',
+					name: 'list',
+					type: 'list',
+					typeOptions: { searchListMethod: 'searchCalendars', searchable: true },
+				},
+				{ displayName: 'By URL', name: 'url', type: 'string' },
+			],
 		});
-		expect(JSON.stringify(description)).not.toContain('From List');
-		expect('listSearch' in new CalDav().methods).toBe(false);
+		expect(new CalDav().methods).toHaveProperty('listSearch.searchCalendars', expect.any(Function));
 	});
 });
 

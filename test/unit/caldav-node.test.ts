@@ -201,6 +201,15 @@ describe('CalDAV Calendar Get UI', () => {
 				displayOptions: { show: { resource: ['calendar'], operation: ['get'] } },
 				modes: [
 					{
+						displayName: 'From List',
+						name: 'list',
+						type: 'list',
+						typeOptions: {
+							searchListMethod: 'searchCalendars',
+							searchable: true,
+						},
+					},
+					{
 						displayName: 'By URL',
 						name: 'url',
 						type: 'string',
@@ -209,19 +218,20 @@ describe('CalDAV Calendar Get UI', () => {
 				],
 			},
 		]);
-		expect('listSearch' in node.methods).toBe(false);
+		expect(node.methods).toHaveProperty('listSearch.searchCalendars', expect.any(Function));
 	});
 
-	it('does not expose From List, list search, or unrelated operations', () => {
+	it('keeps the locator additive without exposing unrelated operations', () => {
 		const node = new CalDav();
-		const serialized = JSON.stringify(node.description.properties);
 		const operation = node.description.properties.find(({ name }) => name === 'operation');
 
-		for (const reserved of ['From List', 'listSearch']) {
-			expect(serialized).not.toContain(reserved);
-		}
-		expect(operation?.options?.map(({ value }) => value)).toEqual(['get', 'getMany']);
-		expect('listSearch' in node.methods).toBe(false);
+		expect(
+			operation?.options?.map((option) => ('value' in option ? option.value : undefined)),
+		).toEqual(['get', 'getMany']);
+		expect(node.methods).toMatchObject({
+			credentialTest: { testCalDavApiCredentials: expect.any(Function) },
+			listSearch: { searchCalendars: expect.any(Function) },
+		});
 	});
 });
 
@@ -283,16 +293,53 @@ describe('CalDAV Calendar Get execution', () => {
 		expect(result[0].map(({ pairedItem }) => pairedItem)).toEqual([{ item: 0 }, { item: 1 }]);
 	});
 
+	it('treats list and URL locator values identically and ignores cached presentation fields', async () => {
+		mocks.getCalendarCollection.mockResolvedValue(CALENDARS[0]);
+		const canonicalValue = 'https://calendar.example.test/one';
+		const executionContext = context([
+			itemParameters(locator(canonicalValue)),
+			itemParameters(
+				locator(canonicalValue, {
+					mode: 'list',
+					cachedResultName: 'Private renamed calendar',
+					cachedResultUrl: 'https://calendar.example.test/private-cached-url/',
+				}),
+			),
+		]);
+
+		const result = await new CalDav().execute.call(executionContext);
+
+		expect(mocks.createN8nCalDavTransport).toHaveBeenCalledTimes(1);
+		expect(mocks.getCalendarCollection).toHaveBeenCalledTimes(2);
+		expect(mocks.getCalendarCollection.mock.calls.map((call) => call[1])).toEqual([
+			'https://calendar.example.test/one/',
+			'https://calendar.example.test/one/',
+		]);
+		expect(result).toEqual([
+			[
+				{ json: CALENDARS[0], pairedItem: { item: 0 } },
+				{ json: CALENDARS[0], pairedItem: { item: 1 } },
+			],
+		]);
+		expect(JSON.stringify(mocks.getCalendarCollection.mock.calls)).not.toMatch(
+			/Private renamed calendar|private-cached-url/,
+		);
+	});
+
 	it.each([
 		['null locator', null],
 		['array locator', []],
 		['missing resource-locator marker', { mode: 'url', value: 'https://calendar.example.test/' }],
 		['false resource-locator marker', locator('https://calendar.example.test/', { __rl: false })],
-		['list mode', locator('https://calendar.example.test/', { mode: 'list' })],
+		['missing mode', locator('https://calendar.example.test/', { mode: undefined })],
+		['unsupported mode', locator('https://calendar.example.test/', { mode: 'id' })],
 		['empty value', locator('')],
+		['empty list value', locator('', { mode: 'list' })],
 		['non-string value', locator(123)],
 		['relative URL', locator('/calendar/')],
+		['relative list URL', locator('/calendar/', { mode: 'list' })],
 		['non-HTTP URL', locator('ftp://calendar.example.test/')],
+		['userinfo list URL', locator('https://user:secret@calendar.example.test/', { mode: 'list' })],
 		['userinfo URL', locator('https://user:secret@calendar.example.test/')],
 		['fragment URL', locator('https://calendar.example.test/#private')],
 		['dot-segment URL', locator('https://calendar.example.test/a/../private/')],
@@ -336,6 +383,28 @@ describe('CalDAV Calendar Get execution', () => {
 });
 
 describe('CalDAV Calendar Get sanitized errors and continue-on-fail', () => {
+	it.each(['url', 'list'] as const)(
+		'preserves the same sanitized remote error for %s mode',
+		async (mode) => {
+			mocks.getCalendarCollection.mockRejectedValue(new CalDavAuthorizationError(403));
+			const error = await captureExecutionError(
+				context([
+					itemParameters(
+						locator('https://calendar.example.test/private/', {
+							mode,
+							cachedResultName: 'Private cached label',
+						}),
+					),
+				]),
+			);
+
+			expect(error).toBeInstanceOf(NodeApiError);
+			expect(error.message).toMatch(/authoriz|permission|forbidden/i);
+			expect((error as NodeApiError).context.itemIndex).toBe(0);
+			expect(String(error)).not.toMatch(/calendar\.example\.test|Private cached label/);
+		},
+	);
+
 	it.each([
 		[
 			new CalDavCalendarCollectionGetError(CalendarCollectionGetFailureCode.NOT_CALENDAR),
