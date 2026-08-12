@@ -214,7 +214,7 @@ describe('CalDAV Event Get metadata', () => {
 		});
 	});
 
-	it('exposes only Get for Event with the exact display contract', () => {
+	it('keeps Get first while exposing additive Get Many for Event', () => {
 		const operation = property(new CalDav().description.properties, 'operation', 'event');
 
 		expect(operation).toEqual({
@@ -230,12 +230,18 @@ describe('CalDAV Event Get metadata', () => {
 					description: 'Retrieve a calendar event',
 					action: 'Retrieve a calendar event',
 				},
+				{
+					name: 'Get Many',
+					value: 'getMany',
+					description: 'Retrieve events in a date range',
+					action: 'Get many events',
+				},
 			],
 			default: 'get',
 		});
 	});
 
-	it('reuses the exact required Calendar locator for Event Get', () => {
+	it('reuses the exact required Calendar locator for Event read operations', () => {
 		const calendar = property(new CalDav().description.properties, 'calendar');
 
 		expect(calendar).toMatchObject({
@@ -245,7 +251,11 @@ describe('CalDAV Event Get metadata', () => {
 			required: true,
 			default: { mode: 'url', value: '' },
 			displayOptions: {
-				show: { resource: expect.arrayContaining(['calendar', 'event']), operation: ['get'] },
+				show: {
+					resource: expect.arrayContaining(['calendar', 'event']),
+					operation: ['get', 'getMany'],
+				},
+				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
 			modes: [
 				{
@@ -513,7 +523,7 @@ describe('CalDAV Event Get configuration validation', () => {
 
 	it.each([
 		['unsupported resource', { resource: 'contact' }],
-		['unsupported operation', { operation: 'getMany' }],
+		['unsupported operation', { operation: 'delete' }],
 		['unsupported mode', { identifierMode: 'id' }],
 	] as const)('rejects %s before acquisition', async (_label, overrides) => {
 		const error = await captureError(

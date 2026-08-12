@@ -30,6 +30,7 @@ import {
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
 } from './events/resolveByUid';
+import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
 import { CalDavCalendarEventReadModelError } from './icalendar/eventReadModel';
 import type { CalendarEvent } from './icalendar/eventReadModel';
 import { CalDavICalendarParseError } from './icalendar/parser';
@@ -61,6 +62,8 @@ const INVALID_LIMIT_MESSAGE = 'Limit must be an integer greater than or equal to
 const UNSUPPORTED_OPERATION_MESSAGE = 'Unsupported CalDAV resource or operation.';
 const GENERIC_GET_MANY_ERROR_MESSAGE = 'The Calendar Get Many operation failed.';
 const GENERIC_LIST_SEARCH_ERROR_MESSAGE = 'The calendar list could not be loaded.';
+const ZONED_ISO_INSTANT_PATTERN =
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:([zZ])|([+-])(\d{2}):(\d{2}))$/;
 
 const GET_MESSAGES = {
 	INVALID_CALENDAR_URL:
@@ -101,6 +104,29 @@ const EVENT_GET_MESSAGES = {
 	UNSUPPORTED_EVENT: 'The calendar event uses an unsupported event representation.',
 	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event response.',
 	GENERIC: 'Event Get failed.',
+} as const;
+
+const EVENT_GET_MANY_MESSAGES = {
+	INVALID_CALENDAR_URL:
+		'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
+	INVALID_START: 'Start must be a valid date and time with whole-second precision.',
+	INVALID_END: 'End must be a valid date and time with whole-second precision.',
+	INVALID_RANGE: 'End must be later than Start.',
+	INVALID_RETURN_ALL: 'Return All must be true or false.',
+	INVALID_LIMIT: 'Limit must be an integer greater than or equal to 1.',
+	AUTHENTICATION: 'Event Get Many authentication failed.',
+	AUTHORIZATION: 'Event Get Many is not authorized.',
+	NOT_FOUND: 'The selected calendar was not found.',
+	TLS: 'TLS certificate validation failed.',
+	TIMEOUT: 'Event Get Many timed out.',
+	RESPONSE_LIMIT: 'The Event Get Many response exceeded the size limit.',
+	REDIRECT: 'The CalDAV server returned an unsafe or invalid redirect.',
+	UNTRUSTED: 'The Calendar URL targets an untrusted endpoint.',
+	NETWORK: 'The CalDAV server could not be reached.',
+	MALFORMED_ICALENDAR: 'The CalDAV server returned malformed iCalendar event data.',
+	UNSUPPORTED_EVENT: 'The calendar event uses an unsupported event representation.',
+	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event response.',
+	GENERIC: 'Event Get Many failed.',
 } as const;
 
 interface SafeNodeFailure {
@@ -290,6 +316,183 @@ function eventGetFailure(error: unknown): EventGetFailure {
 		return { message: EVENT_GET_MESSAGES.INVALID_RESPONSE, configuration: false };
 	}
 	return { message: EVENT_GET_MESSAGES.GENERIC, configuration: false };
+}
+
+function eventGetManyTransportFailure(error: CalDavTransportError): SafeNodeFailure {
+	switch (error.code) {
+		case CalDavTransportErrorCode.AUTHENTICATION_FAILED:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.AUTHENTICATION, error);
+		case CalDavTransportErrorCode.AUTHORIZATION_FAILED:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.AUTHORIZATION, error);
+		case CalDavTransportErrorCode.NOT_FOUND:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.NOT_FOUND, error);
+		case CalDavTransportErrorCode.TLS_VALIDATION_FAILED:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.TLS, error);
+		case CalDavTransportErrorCode.TIMEOUT:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.TIMEOUT, error);
+		case CalDavTransportErrorCode.RESPONSE_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.RESPONSE_LIMIT, error);
+		case CalDavTransportErrorCode.INVALID_REDIRECT:
+		case CalDavTransportErrorCode.INSECURE_REDIRECT:
+		case CalDavTransportErrorCode.REDIRECT_LOOP:
+		case CalDavTransportErrorCode.REDIRECT_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.REDIRECT, error);
+		case CalDavTransportErrorCode.UNTRUSTED_TARGET:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.UNTRUSTED, error);
+		case CalDavTransportErrorCode.NETWORK_ERROR:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.NETWORK, error);
+		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
+			return apiFailure(EVENT_GET_MANY_MESSAGES.INVALID_RESPONSE, error);
+	}
+}
+
+function eventGetManyFailure(error: unknown): SafeNodeFailure {
+	if (error instanceof CalDavTransportError) {
+		return eventGetManyTransportFailure(error);
+	}
+	if (error instanceof CalDavICalendarParseError) {
+		return apiFailure(EVENT_GET_MANY_MESSAGES.MALFORMED_ICALENDAR);
+	}
+	if (error instanceof CalDavCalendarEventReadModelError) {
+		return apiFailure(EVENT_GET_MANY_MESSAGES.UNSUPPORTED_EVENT);
+	}
+	if (
+		error instanceof CalDavXmlParseError ||
+		error instanceof CalDavXmlProtocolError ||
+		error instanceof CalDavUrlValidationError ||
+		error instanceof XmlBuildError
+	) {
+		return apiFailure(EVENT_GET_MANY_MESSAGES.INVALID_RESPONSE);
+	}
+	return apiFailure(EVENT_GET_MANY_MESSAGES.GENERIC);
+}
+
+function daysInGregorianMonth(year: number, month: number): number {
+	if (month === 2) {
+		return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+	}
+	return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
+function isValidWholeSecondInstant(value: Date): boolean {
+	const timestamp = value.getTime();
+	if (!Number.isFinite(timestamp) || timestamp % 1000 !== 0) return false;
+	const utcYear = value.getUTCFullYear();
+	return utcYear >= 0 && utcYear <= 9999;
+}
+
+function parseZonedIsoInstant(value: string): Date | undefined {
+	const match = ZONED_ISO_INSTANT_PATTERN.exec(value);
+	if (match === null) return undefined;
+
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	const hour = Number(match[4]);
+	const minute = Number(match[5]);
+	const second = Number(match[6]);
+	const fractionalSecond = match[7];
+	const offsetHour = match[8] === undefined ? Number(match[10]) : 0;
+	const offsetMinute = match[8] === undefined ? Number(match[11]) : 0;
+	if (
+		month < 1 ||
+		month > 12 ||
+		day < 1 ||
+		day > daysInGregorianMonth(year, month) ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59 ||
+		(fractionalSecond !== undefined && !/^0+$/.test(fractionalSecond)) ||
+		offsetHour > 23 ||
+		offsetMinute > 59
+	) {
+		return undefined;
+	}
+
+	const localInstant = new Date(0);
+	localInstant.setUTCFullYear(year, month - 1, day);
+	localInstant.setUTCHours(hour, minute, second, 0);
+	const offsetDirection = match[9] === '-' ? -1 : 1;
+	const offsetMilliseconds = offsetDirection * (offsetHour * 60 + offsetMinute) * 60 * 1000;
+	const instant = new Date(localInstant.getTime() - offsetMilliseconds);
+	return isValidWholeSecondInstant(instant) ? instant : undefined;
+}
+
+function parseDateTimeInstant(value: unknown): Date | undefined {
+	if (value instanceof Date) {
+		return isValidWholeSecondInstant(value) ? new Date(value.getTime()) : undefined;
+	}
+	if (typeof value === 'string') {
+		return parseZonedIsoInstant(value);
+	}
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+		return undefined;
+	}
+
+	try {
+		const dateTime = value as {
+			readonly isLuxonDateTime?: unknown;
+			readonly isValid?: unknown;
+			readonly toJSDate?: unknown;
+		};
+		if (
+			dateTime.isLuxonDateTime !== true ||
+			dateTime.isValid !== true ||
+			typeof dateTime.toJSDate !== 'function'
+		) {
+			return undefined;
+		}
+		const converted = dateTime.toJSDate.call(value) as unknown;
+		return converted instanceof Date && isValidWholeSecondInstant(converted)
+			? new Date(converted.getTime())
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+interface EventGetManyInput {
+	readonly calendarUrl: AbsoluteHttpUrl;
+	readonly start: Date;
+	readonly end: Date;
+	readonly limit?: number;
+}
+
+function nodeParameter(execution: IExecuteFunctions, name: string, itemIndex: number): unknown {
+	try {
+		return execution.getNodeParameter(name, itemIndex);
+	} catch {
+		return undefined;
+	}
+}
+
+function eventGetManyInput(
+	execution: IExecuteFunctions,
+	itemIndex: number,
+): EventGetManyInput | string {
+	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
+	if (calendarUrl === undefined) return EVENT_GET_MANY_MESSAGES.INVALID_CALENDAR_URL;
+
+	const start = parseDateTimeInstant(nodeParameter(execution, 'start', itemIndex));
+	if (start === undefined) return EVENT_GET_MANY_MESSAGES.INVALID_START;
+	const end = parseDateTimeInstant(nodeParameter(execution, 'end', itemIndex));
+	if (end === undefined) return EVENT_GET_MANY_MESSAGES.INVALID_END;
+	if (start.getTime() >= end.getTime()) return EVENT_GET_MANY_MESSAGES.INVALID_RANGE;
+
+	const returnAll = nodeParameter(execution, 'returnAll', itemIndex);
+	if (typeof returnAll !== 'boolean') return EVENT_GET_MANY_MESSAGES.INVALID_RETURN_ALL;
+	if (returnAll) return { calendarUrl, start, end };
+
+	const limit = nodeParameter(execution, 'limit', itemIndex);
+	if (
+		typeof limit !== 'number' ||
+		!Number.isFinite(limit) ||
+		!Number.isInteger(limit) ||
+		limit < 1
+	) {
+		return EVENT_GET_MANY_MESSAGES.INVALID_LIMIT;
+	}
+	return { calendarUrl, start, end, limit };
 }
 
 const SAFE_DOMAIN_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
@@ -562,6 +765,12 @@ export class CalDav implements INodeType {
 						description: 'Retrieve a calendar event',
 						action: 'Retrieve a calendar event',
 					},
+					{
+						name: 'Get Many',
+						value: GET_MANY_OPERATION,
+						description: 'Retrieve events in a date range',
+						action: 'Get many events',
+					},
 				],
 				default: GET_OPERATION,
 			},
@@ -599,7 +808,11 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: {
 						resource: [CALENDAR_RESOURCE, EVENT_RESOURCE],
-						operation: [GET_OPERATION],
+						operation: [GET_OPERATION, GET_MANY_OPERATION],
+					},
+					hide: {
+						resource: [CALENDAR_RESOURCE],
+						operation: [GET_MANY_OPERATION],
 					},
 				},
 				modes: [
@@ -619,6 +832,53 @@ export class CalDav implements INodeType {
 						hint: 'Enter an absolute calendar collection URL',
 					},
 				],
+			},
+			{
+				displayName: 'Start',
+				name: 'start',
+				type: 'dateTime',
+				required: true,
+				default: '',
+				description: 'Inclusive start of the date range',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [GET_MANY_OPERATION] },
+				},
+			},
+			{
+				displayName: 'End',
+				name: 'end',
+				type: 'dateTime',
+				required: true,
+				default: '',
+				description: 'Exclusive end of the date range',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [GET_MANY_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Return All',
+				name: 'returnAll',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to return all results or only up to a given limit',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [GET_MANY_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Limit',
+				name: 'limit',
+				type: 'number',
+				typeOptions: { minValue: 1 },
+				default: 50,
+				description: 'Max number of results to return',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [GET_MANY_OPERATION],
+						returnAll: [false],
+					},
+				},
 			},
 			{
 				displayName: 'Identifier Mode',
@@ -695,7 +955,8 @@ export class CalDav implements INodeType {
 				resource === CALENDAR_RESOURCE &&
 				(operation === GET_OPERATION || operation === GET_MANY_OPERATION);
 			const isEventGet = resource === EVENT_RESOURCE && operation === GET_OPERATION;
-			if (!isCalendarOperation && !isEventGet) {
+			const isEventGetMany = resource === EVENT_RESOURCE && operation === GET_MANY_OPERATION;
+			if (!isCalendarOperation && !isEventGet && !isEventGetMany) {
 				if (this.continueOnFail()) {
 					returnData.push({
 						json: { error: UNSUPPORTED_OPERATION_MESSAGE },
@@ -704,6 +965,52 @@ export class CalDav implements INodeType {
 					continue;
 				}
 				throw new NodeOperationError(this.getNode(), UNSUPPORTED_OPERATION_MESSAGE, { itemIndex });
+			}
+
+			if (isEventGetMany) {
+				const input = eventGetManyInput(this, itemIndex);
+				if (typeof input === 'string') {
+					if (this.continueOnFail()) {
+						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), input, { itemIndex });
+				}
+
+				try {
+					if (getTransport === undefined) {
+						getTransport = await createN8nCalDavTransport(this);
+					}
+					const results = await queryCalendarEventsByTimeRange(getTransport, input.calendarUrl, {
+						start: input.start,
+						end: input.end,
+					});
+					const selected = input.limit === undefined ? results : results.slice(0, input.limit);
+					const projected = selected.map((result) => ({
+						json: eventJson(result.event),
+						pairedItem: { item: itemIndex },
+					}));
+					returnData.push(...projected);
+				} catch (error) {
+					const failure = eventGetManyFailure(error);
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: failure.message },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeApiError(
+						this.getNode(),
+						{},
+						{
+							message: failure.message,
+							itemIndex,
+							...(failure.httpCode === undefined ? {} : { httpCode: failure.httpCode }),
+						},
+					);
+				}
+				continue;
 			}
 
 			if (isEventGet) {
