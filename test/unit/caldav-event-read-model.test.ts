@@ -839,6 +839,86 @@ describe('provider extension snapshots', () => {
 		}
 		expect(getter).not.toHaveBeenCalled();
 	});
+
+	it.each([
+		[
+			'getPrototypeOf',
+			(getter: ReturnType<typeof vi.fn>) =>
+				new Proxy(
+					{ synthetic: Object.defineProperty({}, 'secret', { enumerable: true, get: getter }) },
+					{
+						getPrototypeOf() {
+							throw new Error('PRIVATE-PROXY-SENTINEL:getPrototypeOf');
+						},
+					},
+				),
+		],
+		[
+			'ownKeys',
+			(getter: ReturnType<typeof vi.fn>) => ({
+				synthetic: {
+					value: new Proxy(Object.defineProperty({}, 'secret', { enumerable: true, get: getter }), {
+						ownKeys() {
+							throw new Error('PRIVATE-PROXY-SENTINEL:ownKeys');
+						},
+					}),
+				},
+			}),
+		],
+		[
+			'getOwnPropertyDescriptor',
+			(getter: ReturnType<typeof vi.fn>) => ({
+				synthetic: {
+					value: new Proxy(Object.defineProperty({}, 'secret', { enumerable: true, get: getter }), {
+						getOwnPropertyDescriptor() {
+							throw new Error('PRIVATE-PROXY-SENTINEL:getOwnPropertyDescriptor');
+						},
+					}),
+				},
+			}),
+		],
+	] as const)('sanitizes a throwing extension Proxy %s trap', (_trap, createExtensions) => {
+		const resource = parseEventResource(event('extension-proxy', ['DTSTART:20260812T090000Z']));
+		const getter = vi.fn(() => 'PRIVATE-ACCESSOR-SENTINEL');
+		const extensions = createExtensions(getter);
+
+		const error = expectMapError(resource, 'INVALID_EVENT_EXTENSIONS', {
+			extensions: extensions as unknown as CalendarEventExtensions,
+		});
+		const exposed = `${error.message}\n${error.stack ?? ''}\n${JSON.stringify(error)}`;
+		expect(exposed).not.toContain('PRIVATE-PROXY-SENTINEL');
+		expect(exposed).not.toContain('PRIVATE-ACCESSOR-SENTINEL');
+		expect(error).not.toHaveProperty('cause');
+		expect(getter).not.toHaveBeenCalled();
+	});
+
+	it('does not trust a public read-model error thrown by an extension Proxy', () => {
+		const resource = parseEventResource(
+			event('extension-public-error', ['DTSTART:20260812T090000Z']),
+		);
+		const hostileError = new CalDavCalendarEventReadModelError('NOT_VEVENT_RESOURCE');
+		hostileError.message = 'PRIVATE-PUBLIC-ERROR-MESSAGE';
+		hostileError.stack = 'PRIVATE-PUBLIC-ERROR-STACK';
+		Object.defineProperty(hostileError, 'cause', {
+			value: 'PRIVATE-PUBLIC-ERROR-CAUSE',
+			enumerable: true,
+		});
+		const extensions = new Proxy(
+			{},
+			{
+				getPrototypeOf() {
+					throw hostileError;
+				},
+			},
+		);
+
+		const error = expectMapError(resource, 'INVALID_EVENT_EXTENSIONS', {
+			extensions: extensions as CalendarEventExtensions,
+		});
+		const exposed = `${error.message}\n${error.stack ?? ''}\n${JSON.stringify(error)}`;
+		expect(exposed).not.toContain('PRIVATE-PUBLIC-ERROR');
+		expect(error).not.toHaveProperty('cause');
+	});
 });
 
 describe('determinism, immutability, and side-effect boundary', () => {
