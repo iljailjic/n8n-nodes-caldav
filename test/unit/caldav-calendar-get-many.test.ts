@@ -179,6 +179,10 @@ describe('Calendar Get Many node description', () => {
 			'returnAll',
 			'limit',
 			'calendar',
+			'start',
+			'end',
+			'returnAll',
+			'limit',
 			'identifierMode',
 			'resourceUrl',
 			'uid',
@@ -226,7 +230,10 @@ describe('Calendar Get Many node description', () => {
 			type: 'resourceLocator',
 			required: true,
 			default: { mode: 'url', value: '' },
-			displayOptions: { show: { resource: ['calendar', 'event'], operation: ['get'] } },
+			displayOptions: {
+				show: { resource: ['calendar', 'event'], operation: ['get', 'getMany'] },
+				hide: { resource: ['calendar'], operation: ['getMany'] },
+			},
 			modes: [
 				{
 					displayName: 'From List',

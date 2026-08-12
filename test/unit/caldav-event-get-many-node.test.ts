@@ -142,7 +142,10 @@ describe('CalDAV Event Get Many metadata', () => {
 		expect(property(properties, 'calendar')).toMatchObject({
 			required: true,
 			default: { mode: 'url', value: '' },
-			displayOptions: { show: { resource: ['calendar', 'event'], operation: ['get', 'getMany'] } },
+			displayOptions: {
+				show: { resource: ['calendar', 'event'], operation: ['get', 'getMany'] },
+				hide: { resource: ['calendar'], operation: ['getMany'] },
+			},
 		});
 		expect(property(properties, 'start')).toMatchObject({
 			displayName: 'Start',
@@ -273,7 +276,7 @@ describe('CalDAV Event Get Many validation and failures', () => {
 
 	it.each([
 		[0, 'Limit must be an integer greater than or equal to 1.'],
-		[true, 'Return All must be true or false.'],
+		['true', 'Return All must be true or false.'],
 		[undefined, 'End must be later than Start.'],
 	] as const)('rejects invalid active configuration before I/O', async (value, message) => {
 		const overrides =
