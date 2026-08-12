@@ -29,6 +29,7 @@ export interface RadicaleHarnessAdapter {
 	buildImage(): Promise<void>;
 	start(): Promise<RadicaleRun>;
 	waitForAuthenticatedReadiness(run: RadicaleRun): Promise<void>;
+	makeCalendarReadOnly(run: RadicaleRun, collectionUrl: string): Promise<void>;
 	resetStorage(run: RadicaleRun): Promise<void>;
 	stopService(run: RadicaleRun): Promise<void>;
 	teardown(run: RadicaleRun): Promise<void>;
@@ -47,6 +48,7 @@ function hasHarnessOperations(value: unknown): value is RadicaleHarnessAdapter {
 		'buildImage',
 		'start',
 		'waitForAuthenticatedReadiness',
+		'makeCalendarReadOnly',
 		'resetStorage',
 		'stopService',
 		'teardown',

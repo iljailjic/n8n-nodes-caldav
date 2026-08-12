@@ -90,6 +90,13 @@ describe('CalDAV XML namespaces', () => {
 				localName: 'current-user-principal',
 				qualifiedName: 'd:current-user-principal',
 			},
+			currentUserPrivilegeSet: {
+				namespace: 'dav',
+				namespaceUri: 'DAV:',
+				prefix: 'd',
+				localName: 'current-user-privilege-set',
+				qualifiedName: 'd:current-user-privilege-set',
+			},
 			resourceType: {
 				namespace: 'dav',
 				namespaceUri: 'DAV:',
@@ -124,6 +131,13 @@ describe('CalDAV XML namespaces', () => {
 				prefix: 'c',
 				localName: 'calendar-description',
 				qualifiedName: 'c:calendar-description',
+			},
+			calendarTimezone: {
+				namespace: 'caldav',
+				namespaceUri: 'urn:ietf:params:xml:ns:caldav',
+				prefix: 'c',
+				localName: 'calendar-timezone',
+				qualifiedName: 'c:calendar-timezone',
 			},
 			supportedCalendarComponentSet: {
 				namespace: 'caldav',
@@ -234,7 +248,9 @@ describe('CalDAV PROPFIND request builders', () => {
 			'resourceType',
 			'displayName',
 			'calendarDescription',
+			'calendarTimezone',
 			'supportedCalendarComponentSet',
+			'currentUserPrivilegeSet',
 		]);
 		expect(Object.isFrozen(CURRENT_USER_PRINCIPAL_PROPERTIES)).toBe(true);
 		expect(Object.isFrozen(CALENDAR_HOME_PROPERTIES)).toBe(true);
@@ -297,7 +313,9 @@ describe('CalDAV PROPFIND request builders', () => {
     <d:resourcetype/>
     <d:displayname/>
     <c:calendar-description/>
+    <c:calendar-timezone/>
     <c:supported-calendar-component-set/>
+    <d:current-user-privilege-set/>
   </d:prop>
 </d:propfind>`);
 	});

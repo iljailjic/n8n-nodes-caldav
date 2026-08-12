@@ -85,6 +85,33 @@ describe('Radicale harness public commands and test discovery', () => {
 });
 
 describe('Radicale image pinning and production separation', () => {
+	it('keeps read-only calendar rights run-scoped, first-match, and inside the harness', async () => {
+		const harness = await readRepositoryFile(
+			'test/integration/support/radicale-harness-adapter.ts',
+		);
+		const harnessContract = await readRepositoryFile(
+			'test/integration/support/radicale-harness-contract.ts',
+		);
+		const integrationTest = await readRepositoryFile(
+			'test/integration/radicale-harness.integration.test.ts',
+		);
+
+		expect(harnessContract).toContain(
+			'makeCalendarReadOnly(run: RadicaleRun, collectionUrl: string): Promise<void>',
+		);
+		expect(harness).toContain('[read-only-calendar]');
+		expect(harness).toContain('permissions = r');
+		expect(harness).toContain('[run-root]');
+		expect(harness).toContain('permissions = R');
+		expect(harness).toContain('[run-owner]');
+		expect(harness).toContain('permissions = RWrw');
+		expect(harness).toContain('type = from_file');
+		expect(harness).toContain('RIGHTS_PATH = `${CONFIG_DIRECTORY}/rights`');
+		expect(harness).toContain('the calendar URL is not an exact run-owned collection URL');
+		expect(integrationTest).toContain('harness.makeCalendarReadOnly');
+		expect(integrationTest).not.toMatch(/spawn\(|execFile\(|docker/);
+	});
+
 	it('keeps host access race-free and loopback-only without publishing the internal network', async () => {
 		const harness = await readRepositoryFile(
 			'test/integration/support/radicale-harness-adapter.ts',

@@ -38,6 +38,7 @@ const LOOPBACK_HOST = '127.0.0.1';
 const CONFIG_DIRECTORY = '/var/lib/radicale/.harness';
 const CONFIG_PATH = `${CONFIG_DIRECTORY}/config`;
 const USERS_PATH = `${CONFIG_DIRECTORY}/users`;
+const RIGHTS_PATH = `${CONFIG_DIRECTORY}/rights`;
 const STORAGE_PATH = '/var/lib/radicale/storage';
 const READINESS_TIMEOUT_MS = 30_000;
 const COMMAND_TIMEOUT_MS = 30_000;
@@ -105,6 +106,7 @@ type HarnessStage =
 	| 'image build'
 	| 'startup'
 	| 'authenticated readiness'
+	| 'rights update'
 	| 'storage reset'
 	| 'service stop'
 	| 'inspection'
@@ -134,6 +136,7 @@ interface InternalRun {
 	readonly networkIdentity: string;
 	endpoint?: string;
 	proxy?: LoopbackProxy;
+	readOnlyCalendarPath?: string;
 }
 
 interface LoopbackProxy {
@@ -410,7 +413,12 @@ function lookupRun(run: RadicaleRun): InternalRun {
 	return internal;
 }
 
-function radicaleConfiguration(): string {
+function radicaleConfiguration(run: InternalRun): string {
+	const rightsConfiguration =
+		run.readOnlyCalendarPath === undefined
+			? 'type = owner_only'
+			: `type = from_file\nfile = ${RIGHTS_PATH}`;
+
 	return `[server]
 hosts = 0.0.0.0:5232
 max_connections = 20
@@ -423,7 +431,7 @@ htpasswd_encryption = plain
 delay = 0
 
 [rights]
-type = owner_only
+${rightsConfiguration}
 
 [storage]
 type = multifilesystem
@@ -438,7 +446,37 @@ level = warning
 `;
 }
 
-async function writeContainerFile(run: InternalRun, path: string, contents: string): Promise<void> {
+function escapeRightsPattern(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function radicaleRights(run: InternalRun, readOnlyCalendarPath: string): string {
+	const user = escapeRightsPattern(run.username);
+	const calendar = escapeRightsPattern(readOnlyCalendarPath);
+
+	return `[read-only-calendar]
+user = ${user}
+collection = ${calendar}(?:/.*)?
+permissions = r
+
+[run-root]
+user = ${user}
+collection =
+permissions = R
+
+[run-owner]
+user = ${user}
+collection = ${user}(?:/.*)?
+permissions = RWrw
+`;
+}
+
+async function writeContainerFile(
+	run: InternalRun,
+	path: string,
+	contents: string,
+	stage: HarnessStage = 'startup',
+): Promise<void> {
 	await runDocker(
 		[
 			'exec',
@@ -448,20 +486,31 @@ async function writeContainerFile(run: InternalRun, path: string, contents: stri
 			'-c',
 			`umask 077; mkdir -p ${CONFIG_DIRECTORY}; cat > ${path}`,
 		],
-		'startup',
+		stage,
 		{ input: contents },
 	);
 }
 
-async function configureContainer(run: InternalRun): Promise<void> {
-	await writeContainerFile(run, CONFIG_PATH, radicaleConfiguration());
-	await writeContainerFile(run, USERS_PATH, `${run.username}:${run.password}\n`);
+async function configureContainer(
+	run: InternalRun,
+	stage: HarnessStage = 'startup',
+): Promise<void> {
+	await writeContainerFile(run, CONFIG_PATH, radicaleConfiguration(run), stage);
+	await writeContainerFile(run, USERS_PATH, `${run.username}:${run.password}\n`, stage);
+	if (run.readOnlyCalendarPath !== undefined) {
+		await writeContainerFile(
+			run,
+			RIGHTS_PATH,
+			radicaleRights(run, run.readOnlyCalendarPath),
+			stage,
+		);
+	}
 }
 
-async function launchService(run: InternalRun): Promise<void> {
+async function launchService(run: InternalRun, stage: HarnessStage = 'startup'): Promise<void> {
 	await runDocker(
 		['exec', '--detach', run.serviceIdentity, 'python', '-m', 'radicale', '--config', CONFIG_PATH],
-		'startup',
+		stage,
 	);
 }
 
@@ -642,6 +691,79 @@ async function closeLoopbackProxy(run: InternalRun): Promise<void> {
 
 function basicAuthorization(run: Pick<InternalRun, 'username' | 'password'>): string {
 	return `Basic ${Buffer.from(`${run.username}:${run.password}`, 'utf8').toString('base64')}`;
+}
+
+function runOwnedCalendarPath(run: InternalRun, collectionUrl: string): string {
+	if (run.endpoint === undefined) {
+		throw new HarnessStageError('rights update', 'the loopback endpoint is unavailable.');
+	}
+	let endpoint: URL;
+	let collection: URL;
+	try {
+		endpoint = new URL(run.endpoint);
+		collection = new URL(collectionUrl);
+	} catch {
+		throw new HarnessStageError('rights update', 'the calendar URL is invalid.');
+	}
+
+	const pathSegments = collection.pathname.split('/').filter((segment) => segment.length > 0);
+	let principal: string;
+	let calendarName: string;
+	try {
+		principal = decodeURIComponent(pathSegments[0] ?? '');
+		calendarName = decodeURIComponent(pathSegments[1] ?? '');
+	} catch {
+		throw new HarnessStageError('rights update', 'the calendar URL path is invalid.');
+	}
+
+	if (
+		collection.origin !== endpoint.origin ||
+		collection.username.length > 0 ||
+		collection.password.length > 0 ||
+		collection.search.length > 0 ||
+		collection.hash.length > 0 ||
+		!collection.pathname.endsWith('/') ||
+		pathSegments.length !== 2 ||
+		principal !== run.username ||
+		!/^[A-Za-z0-9][A-Za-z0-9._~-]*$/.test(calendarName) ||
+		collection.href !==
+			new URL(`${encodeURIComponent(run.username)}/${encodeURIComponent(calendarName)}/`, endpoint)
+				.href
+	) {
+		throw new HarnessStageError(
+			'rights update',
+			'the calendar URL is not an exact run-owned collection URL.',
+		);
+	}
+
+	return `${run.username}/${calendarName}`;
+}
+
+async function assertEventCalendarExists(run: InternalRun, collectionUrl: string): Promise<void> {
+	let response: Response;
+	try {
+		response = await fetch(collectionUrl, {
+			method: 'PROPFIND',
+			headers: {
+				Authorization: basicAuthorization(run),
+				Depth: '0',
+				'Content-Type': 'application/xml; charset=utf-8',
+			},
+			body: '<?xml version="1.0" encoding="UTF-8"?><propfind xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><prop><c:supported-calendar-component-set/></prop></propfind>',
+			redirect: 'manual',
+			signal: AbortSignal.timeout(5_000),
+		});
+	} catch {
+		throw new HarnessStageError('rights update', 'the calendar could not be inspected.');
+	}
+
+	const responseBody = await response.text();
+	if (response.status !== 207 || !/\bname\s*=\s*["']VEVENT["']/i.test(responseBody)) {
+		throw new HarnessStageError(
+			'rights update',
+			'the URL does not identify an existing VEVENT calendar owned by the run.',
+		);
+	}
 }
 
 async function waitForReadiness(run: InternalRun): Promise<void> {
@@ -858,6 +980,29 @@ async function waitForAuthenticatedReadiness(run: RadicaleRun): Promise<void> {
 	await waitForReadiness(lookupRun(run));
 }
 
+async function makeCalendarReadOnly(run: RadicaleRun, collectionUrl: string): Promise<void> {
+	const internal = lookupRun(run);
+	const calendarPath = runOwnedCalendarPath(internal, collectionUrl);
+	await assertEventCalendarExists(internal, collectionUrl);
+	internal.readOnlyCalendarPath = calendarPath;
+
+	try {
+		await runDocker(['stop', '--time', '3', internal.serviceIdentity], 'rights update');
+		await runDocker(['start', internal.serviceIdentity], 'rights update');
+		await configureContainer(internal, 'rights update');
+		await launchService(internal, 'rights update');
+		await waitForReadiness(internal);
+	} catch (primaryError) {
+		try {
+			await cleanupOwnedResources(internal);
+			runs.delete(internal.identity);
+		} catch (cleanupError) {
+			throw combinedFailure(primaryError, cleanupError);
+		}
+		throw primaryError;
+	}
+}
+
 async function stopService(run: RadicaleRun): Promise<void> {
 	const internal = lookupRun(run);
 	await runDocker(['stop', '--time', '3', internal.serviceIdentity], 'service stop');
@@ -892,6 +1037,7 @@ async function resetStorage(run: RadicaleRun): Promise<void> {
 		await runDocker(['stop', '--time', '3', internal.serviceIdentity], 'storage reset');
 		await clearStorage(internal);
 		await runDocker(['start', internal.serviceIdentity], 'storage reset');
+		internal.readOnlyCalendarPath = undefined;
 		await configureContainer(internal);
 		await launchService(internal);
 		await waitForReadiness(internal);
@@ -1086,6 +1232,7 @@ export const radicaleHarness: RadicaleHarnessAdapter = Object.freeze({
 	buildImage,
 	start,
 	waitForAuthenticatedReadiness,
+	makeCalendarReadOnly,
 	resetStorage,
 	stopService,
 	teardown,

@@ -9,8 +9,15 @@ export type PropfindPropertyName =
 	| 'resourceType'
 	| 'displayName'
 	| 'calendarDescription'
+	| 'calendarTimezone'
 	| 'supportedCalendarComponentSet'
+	| 'currentUserPrivilegeSet'
 	| 'getEtag';
+
+export interface PropfindExpandedPropertyName {
+	readonly namespaceUri: string;
+	readonly localName: string;
+}
 
 export interface CalendarUidQueryInput {
 	readonly uid: string;
@@ -33,12 +40,16 @@ export const CALENDAR_COLLECTION_PROPERTIES: readonly [
 	'resourceType',
 	'displayName',
 	'calendarDescription',
+	'calendarTimezone',
 	'supportedCalendarComponentSet',
+	'currentUserPrivilegeSet',
 ] = Object.freeze([
 	'resourceType',
 	'displayName',
 	'calendarDescription',
+	'calendarTimezone',
 	'supportedCalendarComponentSet',
+	'currentUserPrivilegeSet',
 ]);
 
 const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>';
@@ -69,9 +80,13 @@ const PROPFIND_PROPERTY_NAMES: Readonly<Record<PropfindPropertyName, XmlQualifie
 		resourceType: XML_QUALIFIED_NAMES.resourceType,
 		displayName: XML_QUALIFIED_NAMES.displayName,
 		calendarDescription: XML_QUALIFIED_NAMES.calendarDescription,
+		calendarTimezone: XML_QUALIFIED_NAMES.calendarTimezone,
 		supportedCalendarComponentSet: XML_QUALIFIED_NAMES.supportedCalendarComponentSet,
+		currentUserPrivilegeSet: XML_QUALIFIED_NAMES.currentUserPrivilegeSet,
 		getEtag: XML_QUALIFIED_NAMES.getEtag,
 	});
+
+const XML_LOCAL_NAME = /^[A-Za-z_][A-Za-z0-9._-]*$/;
 
 function hasPropfindPropertyName(value: unknown): value is PropfindPropertyName {
 	return (
@@ -297,8 +312,67 @@ export function buildCalendarHomeSetPropfind(): string {
 	return buildPropfindRequest(CALENDAR_HOME_PROPERTIES);
 }
 
-export function buildCalendarCollectionListingPropfind(): string {
-	return buildPropfindRequest(CALENDAR_COLLECTION_PROPERTIES);
+function additionalCollectionProperties(
+	properties: readonly PropfindExpandedPropertyName[],
+): readonly {
+	readonly prefix: string;
+	readonly namespaceUri: string;
+	readonly localName: string;
+}[] {
+	const result: { prefix: string; namespaceUri: string; localName: string }[] = [];
+	const seen = new Set<string>();
+
+	for (const property of properties) {
+		if (
+			typeof property !== 'object' ||
+			property === null ||
+			typeof property.namespaceUri !== 'string' ||
+			property.namespaceUri.length === 0 ||
+			typeof property.localName !== 'string' ||
+			!XML_LOCAL_NAME.test(property.localName)
+		) {
+			throw unknownPropertyError();
+		}
+
+		const key = `{${property.namespaceUri}}${property.localName}`;
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		result.push({
+			prefix: `x${result.length}`,
+			namespaceUri: property.namespaceUri,
+			localName: property.localName,
+		});
+	}
+
+	return result;
+}
+
+export function buildCalendarCollectionListingPropfind(
+	additionalProperties: readonly PropfindExpandedPropertyName[] = [],
+): string {
+	const properties = additionalCollectionProperties(additionalProperties);
+	if (properties.length === 0) {
+		return buildPropfindRequest(CALENDAR_COLLECTION_PROPERTIES);
+	}
+
+	const namespaceDeclarations = properties
+		.map(({ prefix, namespaceUri }) => `xmlns:${prefix}="${escapeXmlAttribute(namespaceUri)}"`)
+		.join(' ');
+	const standardProperties = CALENDAR_COLLECTION_PROPERTIES.map(
+		(property) => PROPFIND_PROPERTY_NAMES[property],
+	);
+
+	return [
+		XML_DECLARATION,
+		`<${XML_QUALIFIED_NAMES.propfind.qualifiedName} ${rootAttributes(true)} ${namespaceDeclarations}>`,
+		`  <${XML_QUALIFIED_NAMES.prop.qualifiedName}>`,
+		...standardProperties.map((property) => emptyElement(property, 2)),
+		...properties.map(({ prefix, localName }) => `    <${prefix}:${localName}/>`),
+		`  </${XML_QUALIFIED_NAMES.prop.qualifiedName}>`,
+		`</${XML_QUALIFIED_NAMES.propfind.qualifiedName}>`,
+	].join('\n');
 }
 
 export function buildCalendarUidQueryReport(input: CalendarUidQueryInput): string {
