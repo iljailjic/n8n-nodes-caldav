@@ -454,7 +454,7 @@ describe('event resource property selection and mapping', () => {
 		expect(error).toBeInstanceOf(CalDavUrlValidationError);
 		expect(error).toMatchObject({ name: 'CalDavUrlValidationError', code });
 		expect(String(error)).not.toContain('private-uid-sentinel');
-		expect(String(error)).not.toContain(href);
+		if (href !== '') expect(String(error)).not.toContain(href);
 	});
 
 	it('uses only successful requested properties and omits resources without successful calendar-data', async () => {
