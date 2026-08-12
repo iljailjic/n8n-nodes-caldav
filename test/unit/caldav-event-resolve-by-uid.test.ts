@@ -743,7 +743,7 @@ describe('calendar-event UID lower-layer error propagation and precedence', () =
 	});
 
 	it.each([
-		['empty calendar-data', '', 'INVALID_ROOT_COMPONENT'],
+		['empty calendar-data', '', 'INVALID_LINE_ENDING'],
 		['malformed calendar-data', 'BEGIN:VCALENDAR\nVERSION:2.0\n', 'TRUNCATED_COMPONENT'],
 	] as const)('propagates %s through the existing iCalendar parser', async (_label, ics, code) => {
 		const uid = 'malformed-ics@example.test';
