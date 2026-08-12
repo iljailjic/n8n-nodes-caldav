@@ -598,7 +598,9 @@ describe('Radicale calendar-event UID resolution', () => {
 				start: '2040-01-02T10:00:00Z',
 				end: '2040-01-02T10:30:00Z',
 			});
-			expect(result.context.resource.originalIcs).toContain(`UID:${uid}`);
+			expect(result.context.resource.originalIcs.replace(/\r?\n[ \t]/g, '')).toContain(
+				`UID:${uid}`,
+			);
 			expect(result.context.master.kind).toBe('component');
 			expect(result.context.exceptions).toEqual([]);
 
