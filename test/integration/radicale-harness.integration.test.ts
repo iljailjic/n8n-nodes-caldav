@@ -17,6 +17,7 @@ import { getCalendarCollection } from '../../nodes/CalDav/actions/calendar/get';
 import { discoverCalendarHome } from '../../nodes/CalDav/discovery/calendarHome';
 import { discoverCalendarCollections } from '../../nodes/CalDav/discovery/calendarCollections';
 import { discoverCurrentUserPrincipal } from '../../nodes/CalDav/discovery/currentUserPrincipal';
+import { getCalendarEventByResourceUrl } from '../../nodes/CalDav/events/getByResourceUrl';
 import { queryCalendarEventsByTimeRange } from '../../nodes/CalDav/events/timeRangeQuery';
 import {
 	CalendarEventUidResolutionFailureCode,
@@ -24,7 +25,9 @@ import {
 } from '../../nodes/CalDav/events/resolveByUid';
 import {
 	CalDavAuthenticationError,
+	CalDavAuthorizationError,
 	CalDavNetworkError,
+	CalDavNotFoundError,
 	createCalDavTransport,
 } from '../../nodes/CalDav/transport/http';
 import type {
@@ -668,7 +671,7 @@ describe('Radicale authenticated discovery', () => {
 });
 
 describe('Radicale calendar-event UID resolution', () => {
-	it('resolves a stored UID and returns stable not-found for a missing UID in the same calendar', async () => {
+	it('retrieves one stored event identically by exact resource URL and UID with live missing and forbidden boundaries', async () => {
 		const run = await startRun();
 		try {
 			const eventUrl = await createSyntheticEvent(run, 'uid-resolution');
@@ -679,8 +682,13 @@ describe('Radicale calendar-event UID resolution', () => {
 			expect(storedResponse.status).toBe(200);
 			expect(storedEtag).not.toBeNull();
 
-			const result = await resolveCalendarEventByUid(transport(run), calendarUrl, uid);
-			expect(result.event).toEqual({
+			const directResult = await getCalendarEventByResourceUrl(
+				transport(run),
+				calendarUrl,
+				validateAbsoluteHttpUrl(eventUrl),
+			);
+			const uidResult = await resolveCalendarEventByUid(transport(run), calendarUrl, uid);
+			const expectedEvent = {
 				calendarUrl,
 				resourceUrl: eventUrl,
 				etag: storedEtag,
@@ -688,12 +696,23 @@ describe('Radicale calendar-event UID resolution', () => {
 				summary: 'Synthetic harness oracle event',
 				start: '2040-01-02T10:00:00Z',
 				end: '2040-01-02T10:30:00Z',
-			});
-			expect(result.context.resource.originalIcs.replace(/\r?\n[ \t]/g, '')).toContain(
+			};
+			expect(directResult.event).toEqual(expectedEvent);
+			expect(uidResult.event).toEqual(expectedEvent);
+			expect(directResult.event).toEqual(uidResult.event);
+			expect(uidResult.context.resource.originalIcs.replace(/\r?\n[ \t]/g, '')).toContain(
 				`UID:${uid}`,
 			);
-			expect(result.context.master.kind).toBe('component');
-			expect(result.context.exceptions).toEqual([]);
+			expect(uidResult.context.master.kind).toBe('component');
+			expect(uidResult.context.exceptions).toEqual([]);
+
+			await expect(
+				getCalendarEventByResourceUrl(
+					transport(run),
+					calendarUrl,
+					validateAbsoluteHttpUrl(new URL('missing-resource', calendarUrl).href),
+				),
+			).rejects.toBeInstanceOf(CalDavNotFoundError);
 
 			const missingUid = `missing-${run.identity}@example.test`;
 			await expect(
@@ -703,7 +722,19 @@ describe('Radicale calendar-event UID resolution', () => {
 				code: CalendarEventUidResolutionFailureCode.NOT_FOUND,
 				message: 'No calendar event with the requested UID was found in the selected calendar.',
 			});
-			const serialized = JSON.stringify(result);
+
+			const forbiddenCalendarUrl = validateAbsoluteHttpUrl(
+				new URL('forbidden-principal/private/', run.endpoint).href,
+			);
+			await expect(
+				getCalendarEventByResourceUrl(
+					transport(run),
+					forbiddenCalendarUrl,
+					validateAbsoluteHttpUrl(new URL('event', forbiddenCalendarUrl).href),
+				),
+			).rejects.toBeInstanceOf(CalDavAuthorizationError);
+
+			const serialized = JSON.stringify({ directResult, uidResult });
 			expect(serialized).not.toContain(run.password);
 			expect(serialized).not.toContain(basicAuthorization(run));
 		} finally {
