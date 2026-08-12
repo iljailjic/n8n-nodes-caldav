@@ -17,6 +17,7 @@ import { getCalendarCollection } from '../../nodes/CalDav/actions/calendar/get';
 import { discoverCalendarHome } from '../../nodes/CalDav/discovery/calendarHome';
 import { discoverCalendarCollections } from '../../nodes/CalDav/discovery/calendarCollections';
 import { discoverCurrentUserPrincipal } from '../../nodes/CalDav/discovery/currentUserPrincipal';
+import { queryCalendarEventsByTimeRange } from '../../nodes/CalDav/events/timeRangeQuery';
 import {
 	CalDavAuthenticationError,
 	CalDavNetworkError,
@@ -329,6 +330,39 @@ async function createSyntheticEvent(run: RadicaleRun, calendarSuffix = 'default'
 	return eventUrl;
 }
 
+async function putSyntheticEventResource(
+	run: RadicaleRun,
+	collectionUrl: string,
+	resourceName: string,
+	uid: string,
+	start: string,
+	end: string,
+	extraLines: readonly string[] = [],
+): Promise<void> {
+	const body = [
+		'BEGIN:VCALENDAR',
+		'VERSION:2.0',
+		'PRODID:-//example.test//Radicale time range oracle//EN',
+		'BEGIN:VEVENT',
+		`UID:${uid}`,
+		'DTSTAMP:20400101T000000Z',
+		`DTSTART:${start}`,
+		`DTEND:${end}`,
+		...extraLines,
+		`SUMMARY:Synthetic boundary oracle ${uid}`,
+		'END:VEVENT',
+		'END:VCALENDAR',
+		'',
+	].join('\r\n');
+	const response = await authenticatedFetch(
+		run,
+		new URL(resourceName, collectionUrl).href,
+		'PUT',
+		body,
+	);
+	expect([201, 204]).toContain(response.status);
+}
+
 beforeAll(async () => {
 	harness = await loadRadicaleHarnessAdapter();
 	await harness.buildImage();
@@ -562,6 +596,63 @@ describe('Radicale authenticated discovery', () => {
 			const serialized = JSON.stringify({ all, filtered });
 			expect(serialized).not.toContain(run.password);
 			expect(serialized).not.toContain(basicAuthorization(run));
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('enforces [start,end) overlap boundaries and returns one recurring resource', async () => {
+		const run = await startRun();
+		try {
+			const collectionUrl = await createSyntheticCalendar(
+				run,
+				'time-range-boundaries',
+				'Time Range Boundaries',
+			);
+			const fixtures = [
+				['ends-at-start.ics', 'ends-at-start', '20400102T090000Z', '20400102T100000Z', []],
+				['starts-at-start.ics', 'starts-at-start', '20400102T100000Z', '20400102T101500Z', []],
+				['inside.ics', 'inside', '20400102T101500Z', '20400102T103000Z', []],
+				['spanning.ics', 'spanning', '20400102T093000Z', '20400102T113000Z', []],
+				['starts-at-end.ics', 'starts-at-end', '20400102T110000Z', '20400102T120000Z', []],
+				['before.ics', 'before', '20400102T080000Z', '20400102T090000Z', []],
+				['after.ics', 'after', '20400102T120000Z', '20400102T130000Z', []],
+				[
+					'recurring.ics',
+					'recurring-overlap',
+					'20400101T103000Z',
+					'20400101T104500Z',
+					['RRULE:FREQ=DAILY;COUNT=3'],
+				],
+			] as const;
+			await Promise.all(
+				fixtures.map(([resourceName, uid, start, end, extraLines]) =>
+					putSyntheticEventResource(run, collectionUrl, resourceName, uid, start, end, extraLines),
+				),
+			);
+
+			const result = await queryCalendarEventsByTimeRange(
+				transport(run),
+				validateAbsoluteHttpUrl(collectionUrl),
+				{
+					start: new Date('2040-01-02T10:00:00Z'),
+					end: new Date('2040-01-02T11:00:00Z'),
+				},
+			);
+
+			expect(result.map(({ event }) => event.uid)).toEqual([
+				'recurring-overlap',
+				'spanning',
+				'starts-at-start',
+				'inside',
+			]);
+			expect(result.filter(({ event }) => event.uid === 'recurring-overlap')).toHaveLength(1);
+			expect(result.find(({ event }) => event.uid === 'recurring-overlap')?.event.start).toBe(
+				'2040-01-01T10:30:00Z',
+			);
+			expect(Object.isFrozen(result)).toBe(true);
+			expect(JSON.stringify(result)).not.toContain(run.password);
+			expect(JSON.stringify(result)).not.toContain(basicAuthorization(run));
 		} finally {
 			await teardownRun(run);
 		}
