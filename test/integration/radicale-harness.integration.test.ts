@@ -133,13 +133,13 @@ async function authenticatedFetch(
 	});
 }
 
-function mkCalendarBody(displayName: string): string {
+function mkCalendarBody(displayName: string, component: 'VEVENT' | 'VTODO' = 'VEVENT'): string {
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
   <d:set>
     <d:prop>
       <d:displayname>${displayName}</d:displayname>
-      <c:supported-calendar-component-set><c:comp name="VEVENT"/></c:supported-calendar-component-set>
+      <c:supported-calendar-component-set><c:comp name="${component}"/></c:supported-calendar-component-set>
     </d:prop>
   </d:set>
 </c:mkcalendar>`;
@@ -149,6 +149,7 @@ async function createSyntheticCalendar(
 	run: RadicaleRun,
 	suffix: string,
 	displayName: string,
+	component: 'VEVENT' | 'VTODO' = 'VEVENT',
 ): Promise<string> {
 	const homeUrl = await discoverPrincipalAndHome(run);
 	const collectionUrl = new URL(
@@ -159,7 +160,7 @@ async function createSyntheticCalendar(
 		run,
 		collectionUrl,
 		'MKCALENDAR',
-		mkCalendarBody(displayName),
+		mkCalendarBody(displayName, component),
 		'application/xml; charset=utf-8',
 	);
 	expect([201, 204]).toContain(response.status);
@@ -167,12 +168,7 @@ async function createSyntheticCalendar(
 }
 
 async function createSyntheticNonEventCollection(run: RadicaleRun): Promise<string> {
-	const homeUrl = await discoverPrincipalAndHome(run);
-	const collectionUrl = new URL(`get-many-${encodeURIComponent(run.identity)}-non-event/`, homeUrl)
-		.href;
-	const response = await authenticatedFetch(run, collectionUrl, 'MKCOL');
-	expect([201, 204]).toContain(response.status);
-	return collectionUrl;
+	return await createSyntheticCalendar(run, 'non-event', 'Task Only', 'VTODO');
 }
 
 function workflowNode(): INode {
