@@ -190,7 +190,7 @@ describe('Calendar Get mapping and classification', () => {
 		const timezone = 'BEGIN:VCALENDAR\nBEGIN:VTIMEZONE\nEND:VTIMEZONE\nEND:VCALENDAR';
 		const xml = multistatus(
 			calendarResponse(
-				'../work',
+				'/calendars/work',
 				'<d:displayname>Work &amp; Travel</d:displayname>' +
 					'<c:calendar-description>  Read only\ncalendar  </c:calendar-description>' +
 					`<c:calendar-timezone>${timezone}</c:calendar-timezone>` +

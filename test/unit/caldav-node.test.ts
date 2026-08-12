@@ -173,7 +173,7 @@ describe('CalDAV Calendar Get UI', () => {
 						displayName: 'By URL',
 						name: 'url',
 						type: 'string',
-						description: expect.stringMatching(/absolute.*collection.*URL/i),
+						hint: expect.stringMatching(/absolute.*collection.*URL/i),
 					},
 				],
 			},
