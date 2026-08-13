@@ -3,6 +3,17 @@
 Changes from published releases and declared project milestones will be
 documented in this file.
 
+## [0.3.0] - 2026-08-13
+
+### Development checkpoint
+
+- Added bounded, preservation-first iCalendar parsing with explicit security limits (#26).
+- Added provider-neutral UTC event projection with URL, UID, and ETag identity plus internal preservation context (#27).
+- Added deterministic event resolution by UID (#28).
+- Added deterministic `[start, end)` calendar-query REPORT results with recurrence non-expansion (#29).
+- Added Event Get by Resource URL and UID (#30).
+- Added Event Get Many with Return All and Limit handling, item pairing, and Radicale boundary validation (#31).
+
 ## [0.2.0] - 2026-08-12
 
 ### Development checkpoint
