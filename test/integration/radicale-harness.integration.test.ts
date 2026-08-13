@@ -18,6 +18,12 @@ import { discoverCalendarHome } from '../../nodes/CalDav/discovery/calendarHome'
 import { discoverCalendarCollections } from '../../nodes/CalDav/discovery/calendarCollections';
 import { discoverCurrentUserPrincipal } from '../../nodes/CalDav/discovery/currentUserPrincipal';
 import { getCalendarEventByResourceUrl } from '../../nodes/CalDav/events/getByResourceUrl';
+import {
+	CalendarEventMutationFailureCode,
+	createCalendarEventResource,
+	deleteCalendarEventResource,
+	updateCalendarEventResource,
+} from '../../nodes/CalDav/events/mutations';
 import { queryCalendarEventsByTimeRange } from '../../nodes/CalDav/events/timeRangeQuery';
 import {
 	CalendarEventUidResolutionFailureCode,
@@ -33,6 +39,7 @@ import {
 import type {
 	CalDavRequestHelperAdapter,
 	CalDavTransport,
+	CalDavTransportRequest,
 	N8nCalDavRequestOptions,
 } from '../../nodes/CalDav/transport/http';
 import type { AbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
@@ -61,6 +68,13 @@ SUMMARY:Synthetic harness oracle event\r
 END:VEVENT\r
 END:VCALENDAR\r
 `;
+}
+
+function mutationEvent(run: RadicaleRun, summary: string): string {
+	return syntheticEvent(run).replace(
+		'SUMMARY:Synthetic harness oracle event',
+		`SUMMARY:${summary}`,
+	);
 }
 
 let harness: RadicaleHarnessAdapter;
@@ -737,6 +751,171 @@ describe('Radicale calendar-event UID resolution', () => {
 			const serialized = JSON.stringify({ directResult, uidResult });
 			expect(serialized).not.toContain(run.password);
 			expect(serialized).not.toContain(basicAuthorization(run));
+		} finally {
+			await teardownRun(run);
+		}
+	});
+});
+
+describe('Radicale conditional calendar-event mutations', () => {
+	it('creates once with If-None-Match and preserves the resource on create collision', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'mutation-create', 'Mutation Create'),
+			);
+			const resourceUrl = validateAbsoluteHttpUrl(
+				new URL('conditional-create.ics', calendarUrl).href,
+			);
+			const originalBody = mutationEvent(run, 'Original conditional create');
+			const conflictingBody = mutationEvent(run, 'Forbidden collision overwrite');
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+
+			const created = await createCalendarEventResource(
+				inspectedTransport,
+				calendarUrl,
+				resourceUrl,
+				originalBody,
+			);
+			expect(created.statusCode).toBe(201);
+			expect(created.resourceUrl).toBe(resourceUrl);
+			await expect(
+				createCalendarEventResource(inspectedTransport, calendarUrl, resourceUrl, conflictingBody),
+			).rejects.toMatchObject({
+				name: 'CalDavCalendarEventMutationError',
+				code: CalendarEventMutationFailureCode.CREATE_CONFLICT,
+				message: 'A calendar event already exists at the requested resource URL.',
+			});
+			expect(request).toHaveBeenCalledTimes(2);
+			for (const [input] of request.mock.calls) {
+				expect(input).toMatchObject({
+					method: 'PUT',
+					url: resourceUrl,
+					headers: {
+						'If-None-Match': '*',
+						'Content-Type': 'text/calendar; charset=utf-8',
+					},
+				});
+			}
+			expect(request.mock.calls[0][0].body).toBe(originalBody);
+			expect(request.mock.calls[1][0].body).toBe(conflictingBody);
+
+			const stored = await authenticatedFetch(run, resourceUrl);
+			const storedBody = await stored.text();
+			expect(stored.status).toBe(200);
+			expect(storedBody).toContain('SUMMARY:Original conditional create');
+			expect(storedBody).not.toContain('Forbidden collision overwrite');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('rejects supplied stale Update and Delete ETags and leaves the newer resource unchanged', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'mutation-stale', 'Mutation Stale'),
+			);
+			const resourceUrl = validateAbsoluteHttpUrl(new URL('stale-etag.ics', calendarUrl).href);
+			const initialBody = mutationEvent(run, 'Initial mutation version');
+			await createCalendarEventResource(transport(run), calendarUrl, resourceUrl, initialBody);
+			const initialRead = await authenticatedFetch(run, resourceUrl);
+			const staleEtag = initialRead.headers.get('etag');
+			expect(staleEtag).not.toBeNull();
+			if (staleEtag === null) {
+				throw new Error('Radicale did not return the mutation oracle ETag.');
+			}
+
+			const newerBody = mutationEvent(run, 'Newer concurrent version');
+			const concurrentWrite = await authenticatedFetch(run, resourceUrl, 'PUT', newerBody);
+			expect([201, 204]).toContain(concurrentWrite.status);
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+
+			await expect(
+				updateCalendarEventResource(
+					inspectedTransport,
+					calendarUrl,
+					resourceUrl,
+					mutationEvent(run, 'Forbidden stale update'),
+					staleEtag,
+				),
+			).rejects.toMatchObject({
+				code: CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT,
+			});
+			await expect(
+				deleteCalendarEventResource(inspectedTransport, calendarUrl, resourceUrl, staleEtag),
+			).rejects.toMatchObject({
+				code: CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT,
+			});
+			expect(request).toHaveBeenCalledTimes(2);
+			expect(request.mock.calls.map(([input]) => input.method)).toEqual(['PUT', 'DELETE']);
+			expect(request.mock.calls.map(([input]) => input.headers?.['If-Match'])).toEqual([
+				staleEtag,
+				staleEtag,
+			]);
+
+			const stored = await authenticatedFetch(run, resourceUrl);
+			const storedBody = await stored.text();
+			expect(stored.status).toBe(200);
+			expect(storedBody).toContain('SUMMARY:Newer concurrent version');
+			expect(storedBody).not.toContain('Forbidden stale update');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('maps a GET-to-Update race to one terminal conflict with the exact fetched ETag', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'mutation-race', 'Mutation Race'),
+			);
+			const resourceUrl = validateAbsoluteHttpUrl(new URL('race.ics', calendarUrl).href);
+			await createCalendarEventResource(
+				transport(run),
+				calendarUrl,
+				resourceUrl,
+				mutationEvent(run, 'Before race'),
+			);
+			const racedBody = mutationEvent(run, 'Race winner');
+			const liveTransport = transport(run);
+			let fetchedEtag: string | undefined;
+			const request = vi.fn(async (input: CalDavTransportRequest) => {
+				const result = await liveTransport.request(input);
+				if (input.method === 'GET') {
+					fetchedEtag = result.etag;
+					const raceWrite = await authenticatedFetch(run, resourceUrl, 'PUT', racedBody);
+					expect([201, 204]).toContain(raceWrite.status);
+				}
+				return result;
+			});
+			const racingTransport: CalDavTransport = { ...liveTransport, request };
+
+			await expect(
+				updateCalendarEventResource(
+					racingTransport,
+					calendarUrl,
+					resourceUrl,
+					mutationEvent(run, 'Forbidden race loser'),
+				),
+			).rejects.toMatchObject({
+				code: CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT,
+				message: 'The calendar event changed before the mutation could be applied.',
+			});
+			expect(fetchedEtag).toBeTypeOf('string');
+			expect(request).toHaveBeenCalledTimes(2);
+			expect(request.mock.calls.map(([input]) => input.method)).toEqual(['GET', 'PUT']);
+			expect(request.mock.calls[1][0].headers?.['If-Match']).toBe(fetchedEtag);
+
+			const stored = await authenticatedFetch(run, resourceUrl);
+			const storedBody = await stored.text();
+			expect(stored.status).toBe(200);
+			expect(storedBody).toContain('SUMMARY:Race winner');
+			expect(storedBody).not.toContain('Forbidden race loser');
 		} finally {
 			await teardownRun(run);
 		}
