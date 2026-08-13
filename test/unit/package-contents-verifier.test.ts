@@ -50,6 +50,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/icalendar/parser.d.ts',
 	'dist/nodes/CalDav/icalendar/parser.js',
 	'dist/nodes/CalDav/icalendar/parser.js.map',
+	'dist/nodes/CalDav/icalendar/serializer.d.ts',
+	'dist/nodes/CalDav/icalendar/serializer.js',
+	'dist/nodes/CalDav/icalendar/serializer.js.map',
 	'dist/nodes/CalDav/methods/credentialTest.d.ts',
 	'dist/nodes/CalDav/methods/credentialTest.js',
 	'dist/nodes/CalDav/methods/credentialTest.js.map',
@@ -90,6 +93,12 @@ const expectedPackageFiles = [
 	'package.json',
 ];
 
+const serializerArtifactPaths = [
+	'dist/nodes/CalDav/icalendar/serializer.d.ts',
+	'dist/nodes/CalDav/icalendar/serializer.js',
+	'dist/nodes/CalDav/icalendar/serializer.js.map',
+] as const;
+
 interface PackResultOverrides {
 	bundled?: unknown;
 	entryCount?: unknown;
@@ -115,7 +124,10 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(85);
+		expect(expectedPackageFiles).toHaveLength(88);
+		expect(expectedPackageFiles.filter((path) => path.includes('/icalendar/serializer.'))).toEqual(
+			serializerArtifactPaths,
+		);
 		expect(() => verifyPackOutput(packOutput)).not.toThrow();
 	});
 

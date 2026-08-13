@@ -29,6 +29,7 @@ import {
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
 } from '../../nodes/CalDav/events/resolveByUid';
+import { serializeBasicUtcEvent } from '../../nodes/CalDav/icalendar/serializer';
 import {
 	CalDavAuthenticationError,
 	CalDavAuthorizationError,
@@ -758,6 +759,73 @@ describe('Radicale calendar-event UID resolution', () => {
 });
 
 describe('Radicale conditional calendar-event mutations', () => {
+	it('accepts a serialized basic event through the mutation service and returns its read model', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'serializer-create', 'Serializer Create'),
+			);
+			const resourceUrl = validateAbsoluteHttpUrl(
+				new URL('serialized-basic-event.ics', calendarUrl).href,
+			);
+			const uid = syntheticEventUid(run);
+			const calendarData = serializeBasicUtcEvent({
+				uid,
+				dtstamp: new Date('2040-01-01T00:00:00.000Z'),
+				start: new Date('2040-01-02T10:00:00.000Z'),
+				end: new Date('2040-01-02T10:30:00.000Z'),
+				summary: 'Radicale serializer, oracle; 🚀',
+				description: 'Created through the merged mutation service',
+				location: 'Integration calendar',
+				url: 'urn:example:calendar:radicale-oracle',
+			});
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+
+			const created = await createCalendarEventResource(
+				inspectedTransport,
+				calendarUrl,
+				resourceUrl,
+				calendarData,
+			);
+			expect(created.statusCode).toBe(201);
+			expect(request).toHaveBeenCalledTimes(1);
+			expect(request.mock.calls[0][0]).toMatchObject({
+				method: 'PUT',
+				url: resourceUrl,
+				headers: {
+					'If-None-Match': '*',
+					'Content-Type': 'text/calendar; charset=utf-8',
+				},
+				body: calendarData,
+			});
+
+			const readBack = await getCalendarEventByResourceUrl(
+				liveTransport,
+				calendarUrl,
+				created.resourceUrl,
+			);
+			expect(readBack.event).toEqual({
+				calendarUrl,
+				resourceUrl: created.resourceUrl,
+				etag: expect.any(String),
+				uid,
+				summary: 'Radicale serializer, oracle; 🚀',
+				description: 'Created through the merged mutation service',
+				location: 'Integration calendar',
+				url: 'urn:example:calendar:radicale-oracle',
+				start: '2040-01-02T10:00:00Z',
+				end: '2040-01-02T10:30:00Z',
+			});
+			expect(readBack.context.resource.originalIcs).not.toMatch(
+				/(^|\r?\n)(?:X-|BEGIN:VTIMEZONE|BEGIN:VALARM)/,
+			);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
 	it('creates once with If-None-Match and preserves the resource on create collision', async () => {
 		const run = await startRun();
 		try {
