@@ -1096,6 +1096,49 @@ describe('HTTP, network, and malformed-response errors', () => {
 		expect(`${error.stack}${JSON.stringify(error)}`).not.toContain('private-precondition-response');
 	});
 
+	it.each([
+		['duplicate ETag values', { ETag: ['"first"', '"second"'] }],
+		['case-variant duplicate ETag fields', { ETag: '"first"', eTaG: '"second"' }],
+	] as const)('maps HTTP 412 before validating %s', async (_label, headers) => {
+		const error = await captureError(
+			createCalDavTransport(
+				'https://calendar.example.test/',
+				mockAdapter(async () =>
+					response(412, Buffer.from('private-precondition-response'), { ...headers }),
+				),
+			).request({ method: CalDavMethod.PUT }),
+		);
+
+		expect(error).toBeInstanceOf(CalDavPreconditionFailedError);
+		expect(error).toMatchObject({
+			name: 'CalDavPreconditionFailedError',
+			code: 'PRECONDITION_FAILED',
+			statusCode: 412,
+		});
+		expect(`${error.stack}${JSON.stringify(error)}`).not.toContain('private-precondition-response');
+	});
+
+	it('maps HTTP 412 before normalizing an unrelated malformed response header', async () => {
+		const error = await captureError(
+			createCalDavTransport(
+				'https://calendar.example.test/',
+				mockAdapter(async () =>
+					response(412, Buffer.from('private-precondition-response'), {
+						'X-Malformed': 42,
+					}),
+				),
+			).request({ method: CalDavMethod.PUT }),
+		);
+
+		expect(error).toBeInstanceOf(CalDavPreconditionFailedError);
+		expect(error).toMatchObject({
+			name: 'CalDavPreconditionFailedError',
+			code: 'PRECONDITION_FAILED',
+			statusCode: 412,
+		});
+		expect(`${error.stack}${JSON.stringify(error)}`).not.toContain('private-precondition-response');
+	});
+
 	it.each([300, 304, 305, 306])('does not follow an HTTP %s redirect', async (statusCode) => {
 		const adapter = mockAdapter(async () =>
 			response(statusCode, Buffer.from('private-redirect-body'), {

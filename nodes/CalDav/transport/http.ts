@@ -114,6 +114,7 @@ export const CalDavTransportErrorCode = {
 	AUTHENTICATION_FAILED: 'AUTHENTICATION_FAILED',
 	AUTHORIZATION_FAILED: 'AUTHORIZATION_FAILED',
 	NOT_FOUND: 'NOT_FOUND',
+	PRECONDITION_FAILED: 'PRECONDITION_FAILED',
 	TLS_VALIDATION_FAILED: 'TLS_VALIDATION_FAILED',
 	TIMEOUT: 'TIMEOUT',
 	RESPONSE_LIMIT_EXCEEDED: 'RESPONSE_LIMIT_EXCEEDED',
@@ -172,6 +173,16 @@ export class CalDavNotFoundError extends CalDavTransportError {
 		super(
 			CalDavTransportErrorCode.NOT_FOUND,
 			'The requested CalDAV resource was not found.',
+			statusCode,
+		);
+	}
+}
+
+export class CalDavPreconditionFailedError extends CalDavTransportError {
+	constructor(statusCode?: number) {
+		super(
+			CalDavTransportErrorCode.PRECONDITION_FAILED,
+			'The CalDAV request precondition failed.',
 			statusCode,
 		);
 	}
@@ -557,6 +568,9 @@ function mapHttpFailure(statusCode: number): CalDavTransportError {
 	if (statusCode === 404) {
 		return new CalDavNotFoundError(statusCode);
 	}
+	if (statusCode === 412) {
+		return new CalDavPreconditionFailedError(statusCode);
+	}
 	return new CalDavRemoteProtocolError(statusCode);
 }
 
@@ -573,7 +587,7 @@ function hasOversizedContentLength(headers: CalDavResponseHeaders): boolean {
 
 interface CalDavResponseEnvelope {
 	readonly statusCode: number;
-	readonly headers: CalDavResponseHeaders;
+	readonly getHeaders: () => CalDavResponseHeaders;
 	readonly body: Readable;
 }
 
@@ -618,17 +632,17 @@ function normalizeResponseEnvelope(
 			throw new CalDavRemoteProtocolError(statusCode);
 		}
 
-		let rawHeaders: unknown;
-		try {
-			rawHeaders = response.headers;
-		} catch {
-			throw new CalDavRemoteProtocolError(statusCode);
-		}
-
-		const headers = normalizeHeaders(rawHeaders, statusCode);
 		return {
 			statusCode,
-			headers,
+			getHeaders: () => {
+				let rawHeaders: unknown;
+				try {
+					rawHeaders = response.headers;
+				} catch {
+					throw new CalDavRemoteProtocolError(statusCode);
+				}
+				return normalizeHeaders(rawHeaders, statusCode);
+			},
 			body: stream,
 		};
 	} catch (error) {
@@ -646,15 +660,16 @@ async function consumeFinalResponse(
 	envelope: CalDavResponseEnvelope,
 	effectiveUrl: AbsoluteHttpUrl,
 ): Promise<CalDavTransportResponse> {
-	const { statusCode, headers, body: stream } = envelope;
+	const { statusCode, body: stream } = envelope;
 
 	try {
-		const etag = extractEtag(headers, statusCode);
-
 		if (statusCode < 200 || statusCode > 299) {
 			await consumeErrorExcerpt(stream, statusCode);
 			throw mapHttpFailure(statusCode);
 		}
+
+		const headers = envelope.getHeaders();
+		const etag = extractEtag(headers, statusCode);
 
 		if (hasOversizedContentLength(headers)) {
 			throw new CalDavResponseLimitError();
@@ -914,7 +929,7 @@ export function createCalDavTransport(
 					}
 
 					try {
-						const location = getRedirectLocation(envelope.headers, envelope.statusCode);
+						const location = getRedirectLocation(envelope.getHeaders(), envelope.statusCode);
 						const targetUrl = resolveRedirectTarget(
 							requestState.url,
 							location,

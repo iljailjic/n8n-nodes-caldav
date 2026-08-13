@@ -164,6 +164,7 @@ function transportFailure(error: CalDavTransportError): SafeNodeFailure {
 			return apiFailure(GET_MESSAGES.REDIRECT, error);
 		case CalDavTransportErrorCode.NETWORK_ERROR:
 			return apiFailure(GET_MESSAGES.NETWORK, error);
+		case CalDavTransportErrorCode.PRECONDITION_FAILED:
 		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
 			return apiFailure(GET_MESSAGES.INVALID_RESPONSE, error);
 	}
@@ -269,6 +270,7 @@ function eventTransportFailure(error: CalDavTransportError): SafeNodeFailure {
 			return apiFailure(EVENT_GET_MESSAGES.UNTRUSTED, error);
 		case CalDavTransportErrorCode.NETWORK_ERROR:
 			return apiFailure(EVENT_GET_MESSAGES.NETWORK, error);
+		case CalDavTransportErrorCode.PRECONDITION_FAILED:
 		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
 			return apiFailure(EVENT_GET_MESSAGES.INVALID_RESPONSE, error);
 	}
@@ -341,6 +343,7 @@ function eventGetManyTransportFailure(error: CalDavTransportError): SafeNodeFail
 			return apiFailure(EVENT_GET_MANY_MESSAGES.UNTRUSTED, error);
 		case CalDavTransportErrorCode.NETWORK_ERROR:
 			return apiFailure(EVENT_GET_MANY_MESSAGES.NETWORK, error);
+		case CalDavTransportErrorCode.PRECONDITION_FAILED:
 		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
 			return apiFailure(EVENT_GET_MANY_MESSAGES.INVALID_RESPONSE, error);
 	}

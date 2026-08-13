@@ -1,3 +1,8 @@
+// This Node built-in is required only for deterministic offline transport regression responses.
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
+import { Readable } from 'node:stream';
+
+import type { IN8nHttpFullResponse } from 'n8n-workflow';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import * as mutations from '../../nodes/CalDav/events/mutations';
@@ -15,8 +20,10 @@ import {
 	CalDavNetworkError,
 	CalDavNotFoundError,
 	CalDavPreconditionFailedError,
+	createCalDavTransport,
 } from '../../nodes/CalDav/transport/http';
 import type {
+	CalDavRequestHelperAdapter,
 	CalDavResponseHeaders,
 	CalDavTransport,
 	CalDavTransportRequest,
@@ -65,6 +72,22 @@ function mockTransport(
 	return {
 		serverUrl: 'https://configured.example.test/private-root/',
 		request: vi.fn(implementation),
+	};
+}
+
+function preconditionTransport(headers: unknown): {
+	readonly transport: CalDavTransport;
+	readonly request: ReturnType<typeof vi.fn>;
+} {
+	const request = vi.fn(async (): Promise<IN8nHttpFullResponse> => ({
+		statusCode: 412,
+		headers: headers as IN8nHttpFullResponse['headers'],
+		body: Readable.from([Buffer.from('private-precondition-response')]),
+	}));
+	const adapter: CalDavRequestHelperAdapter = { request };
+	return {
+		transport: createCalDavTransport('https://calendar.example.test/', adapter),
+		request,
 	};
 }
 
@@ -369,6 +392,35 @@ describe('calendar-event conditional create', () => {
 		});
 		expect(transport.request).toHaveBeenCalledTimes(1);
 	});
+
+	it('keeps CREATE_CONFLICT authoritative over duplicate case-variant response ETags', async () => {
+		const { transport, request } = preconditionTransport({
+			ETag: '"private-first"',
+			eTaG: '"private-second"',
+		});
+
+		await expect(
+			createCalendarEventResource(transport, CALENDAR_URL, RESOURCE_URL, CALENDAR_DATA),
+		).rejects.toMatchObject({
+			name: 'CalDavCalendarEventMutationError',
+			code: CalendarEventMutationFailureCode.CREATE_CONFLICT,
+			message: 'A calendar event already exists at the requested resource URL.',
+		});
+		expect(request).toHaveBeenCalledTimes(1);
+	});
+
+	it('keeps CREATE_CONFLICT authoritative over an unrelated malformed response header', async () => {
+		const { transport, request } = preconditionTransport({ 'X-Malformed': 42 });
+
+		await expect(
+			createCalendarEventResource(transport, CALENDAR_URL, RESOURCE_URL, CALENDAR_DATA),
+		).rejects.toMatchObject({
+			name: 'CalDavCalendarEventMutationError',
+			code: CalendarEventMutationFailureCode.CREATE_CONFLICT,
+			message: 'A calendar event already exists at the requested resource URL.',
+		});
+		expect(request).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe('calendar-event conditional update', () => {
@@ -435,6 +487,22 @@ describe('calendar-event conditional update', () => {
 		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: RESOURCE_URL });
 	});
 
+	it('maps a helper-GET 412 to CONCURRENCY_CONFLICT without attempting PUT', async () => {
+		const transport = mockTransport(async () => {
+			throw new CalDavPreconditionFailedError(412);
+		});
+
+		await expect(
+			updateCalendarEventResource(transport, CALENDAR_URL, RESOURCE_URL, CALENDAR_DATA),
+		).rejects.toMatchObject({
+			name: 'CalDavCalendarEventMutationError',
+			code: CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT,
+			message: 'The calendar event changed before the mutation could be applied.',
+		});
+		expect(transport.request).toHaveBeenCalledTimes(1);
+		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: RESOURCE_URL });
+	});
+
 	it('maps a read-to-write 412 to one terminal CONCURRENCY_CONFLICT', async () => {
 		const transport = mockTransport(async (input) => {
 			if (input.method === CalDavMethod.GET) {
@@ -451,6 +519,22 @@ describe('calendar-event conditional update', () => {
 		});
 		expect(transport.request).toHaveBeenCalledTimes(2);
 		expect(transport.request.mock.calls[1][0].headers?.['If-Match']).toBe('"stale-after-read"');
+	});
+
+	it('keeps CONCURRENCY_CONFLICT authoritative over duplicate case-variant response ETags', async () => {
+		const { transport, request } = preconditionTransport({
+			ETag: '"private-first"',
+			eTaG: '"private-second"',
+		});
+
+		await expect(
+			updateCalendarEventResource(transport, CALENDAR_URL, RESOURCE_URL, CALENDAR_DATA, '"stale"'),
+		).rejects.toMatchObject({
+			name: 'CalDavCalendarEventMutationError',
+			code: CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT,
+			message: 'The calendar event changed before the mutation could be applied.',
+		});
+		expect(request).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -500,6 +584,22 @@ describe('calendar-event conditional delete', () => {
 		await expect(
 			deleteCalendarEventResource(transport, CALENDAR_URL, RESOURCE_URL),
 		).rejects.toMatchObject({ code: CalendarEventMutationFailureCode.MISSING_ETAG });
+		expect(transport.request).toHaveBeenCalledTimes(1);
+		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: RESOURCE_URL });
+	});
+
+	it('maps a helper-GET 412 to CONCURRENCY_CONFLICT without attempting DELETE', async () => {
+		const transport = mockTransport(async () => {
+			throw new CalDavPreconditionFailedError(412);
+		});
+
+		await expect(
+			deleteCalendarEventResource(transport, CALENDAR_URL, RESOURCE_URL),
+		).rejects.toMatchObject({
+			name: 'CalDavCalendarEventMutationError',
+			code: CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT,
+			message: 'The calendar event changed before the mutation could be applied.',
+		});
 		expect(transport.request).toHaveBeenCalledTimes(1);
 		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: RESOURCE_URL });
 	});
