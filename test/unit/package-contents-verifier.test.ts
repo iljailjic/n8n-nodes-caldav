@@ -35,6 +35,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/events/getByResourceUrl.d.ts',
 	'dist/nodes/CalDav/events/getByResourceUrl.js',
 	'dist/nodes/CalDav/events/getByResourceUrl.js.map',
+	'dist/nodes/CalDav/events/mutations.d.ts',
+	'dist/nodes/CalDav/events/mutations.js',
+	'dist/nodes/CalDav/events/mutations.js.map',
 	'dist/nodes/CalDav/events/resolveByUid.d.ts',
 	'dist/nodes/CalDav/events/resolveByUid.js',
 	'dist/nodes/CalDav/events/resolveByUid.js.map',
@@ -112,7 +115,7 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(82);
+		expect(expectedPackageFiles).toHaveLength(85);
 		expect(() => verifyPackOutput(packOutput)).not.toThrow();
 	});
 

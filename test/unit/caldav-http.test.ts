@@ -30,6 +30,7 @@ import {
 	CalDavMethod,
 	CalDavNetworkError,
 	CalDavNotFoundError,
+	CalDavPreconditionFailedError,
 	CalDavRedirectLimitError,
 	CalDavRedirectLoopError,
 	CalDavRemoteProtocolError,
@@ -134,6 +135,7 @@ describe('CalDAV transport public contract', () => {
 				'CalDavMethod',
 				'CalDavNetworkError',
 				'CalDavNotFoundError',
+				'CalDavPreconditionFailedError',
 				'CalDavRedirectLimitError',
 				'CalDavRedirectLoopError',
 				'CalDavRemoteProtocolError',
@@ -165,6 +167,7 @@ describe('CalDAV transport public contract', () => {
 			AUTHENTICATION_FAILED: 'AUTHENTICATION_FAILED',
 			AUTHORIZATION_FAILED: 'AUTHORIZATION_FAILED',
 			NOT_FOUND: 'NOT_FOUND',
+			PRECONDITION_FAILED: 'PRECONDITION_FAILED',
 			TLS_VALIDATION_FAILED: 'TLS_VALIDATION_FAILED',
 			TIMEOUT: 'TIMEOUT',
 			RESPONSE_LIMIT_EXCEEDED: 'RESPONSE_LIMIT_EXCEEDED',
@@ -259,6 +262,26 @@ describe('CalDAV transport public contract', () => {
 		],
 	] as const)('provides stable %s metadata', (error, errorClass, code, message) => {
 		expectStableError(error, errorClass, code, message);
+	});
+
+	it('provides stable privacy-safe precondition-failure metadata without prescribing an unsourced message', () => {
+		const withoutStatus = new CalDavPreconditionFailedError();
+		const withStatus = new CalDavPreconditionFailedError(412);
+
+		expect(withoutStatus).toBeInstanceOf(CalDavTransportError);
+		expect(withStatus).toBeInstanceOf(CalDavPreconditionFailedError);
+		expect(withoutStatus).toMatchObject({
+			name: 'CalDavPreconditionFailedError',
+			code: 'PRECONDITION_FAILED',
+		});
+		expect(withStatus).toMatchObject({
+			name: 'CalDavPreconditionFailedError',
+			code: 'PRECONDITION_FAILED',
+			statusCode: 412,
+		});
+		expect(withoutStatus.message).toBe(withStatus.message);
+		expect(withoutStatus.message).not.toBe('');
+		expect(withoutStatus).not.toHaveProperty('cause');
 	});
 });
 
@@ -1053,6 +1076,24 @@ describe('HTTP, network, and malformed-response errors', () => {
 
 		expectStableError(error, errorClass, code, message, status);
 		expect(`${error.stack}${JSON.stringify(error)}`).not.toContain('private-response');
+	});
+
+	it('maps HTTP 412 to its more-specific sanitized precondition category', async () => {
+		const error = await captureError(
+			createCalDavTransport(
+				'https://calendar.example.test/',
+				mockAdapter(async () => response(412, Buffer.from('private-precondition-response'))),
+			).request({ method: CalDavMethod.PUT }),
+		);
+
+		expect(error).toBeInstanceOf(CalDavPreconditionFailedError);
+		expect(error).toMatchObject({
+			name: 'CalDavPreconditionFailedError',
+			code: 'PRECONDITION_FAILED',
+			statusCode: 412,
+		});
+		expect(error.message).toBe(new CalDavPreconditionFailedError().message);
+		expect(`${error.stack}${JSON.stringify(error)}`).not.toContain('private-precondition-response');
 	});
 
 	it.each([300, 304, 305, 306])('does not follow an HTTP %s redirect', async (statusCode) => {
