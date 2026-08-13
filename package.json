@@ -1,6 +1,6 @@
 {
 	"name": "@iljailjic/n8n-nodes-caldav",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "CalDAV community node for n8n with iCloud-first interoperability",
 	"license": "MIT",
 	"homepage": "https://github.com/iljailjic/n8n-nodes-caldav#readme",
