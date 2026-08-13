@@ -99,7 +99,7 @@ function createPackOutput(paths: string[], overrides: PackResultOverrides = {}) 
 	return JSON.stringify([
 		{
 			name: '@iljailjic/n8n-nodes-caldav',
-			version: '0.2.0',
+			version: '0.3.0',
 			files: paths.map((path) => ({ path })),
 			entryCount: paths.length,
 			bundled: [],
@@ -112,6 +112,7 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
+		expect(expectedPackageFiles).toHaveLength(82);
 		expect(() => verifyPackOutput(packOutput)).not.toThrow();
 	});
 
