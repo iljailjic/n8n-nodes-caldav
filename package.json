@@ -60,7 +60,7 @@
 		"prettier": "3.9.6",
 		"release-it": "^21.0.1",
 		"typescript": "5.9.2",
-		"vitest": "1.6.1"
+		"vitest": "4.1.10"
 	},
 	"peerDependencies": {
 		"n8n-workflow": "*"
