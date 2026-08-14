@@ -185,6 +185,8 @@ const DEFAULT_VALUE_TYPES: Readonly<Record<string, string>> = {
 };
 
 const UID_COMPONENT_NAMES = new Set(['VEVENT', 'VTODO', 'VJOURNAL', 'VFREEBUSY']);
+const PARSED_RESOURCE_PROVENANCE = new WeakSet<object>();
+const PARSED_RESOURCE_PROVENANCE_VERIFIER = '__isParserProducedICalendarResource';
 
 function decodeUtf8(input: Uint8Array): string {
 	try {
@@ -664,5 +666,15 @@ export function parseICalendarResource(input: Uint8Array): ICalendarResource {
 	validateCalendar(calendar);
 	freezeComponent(calendar);
 
-	return Object.freeze({ kind: 'resource', originalIcs, calendar });
+	const resource = Object.freeze({ kind: 'resource' as const, originalIcs, calendar });
+	PARSED_RESOURCE_PROVENANCE.add(resource);
+	return resource;
 }
+
+Object.defineProperty(parseICalendarResource, PARSED_RESOURCE_PROVENANCE_VERIFIER, {
+	value: (value: unknown): boolean =>
+		typeof value === 'object' && value !== null && PARSED_RESOURCE_PROVENANCE.has(value),
+	enumerable: false,
+	writable: false,
+	configurable: false,
+});
