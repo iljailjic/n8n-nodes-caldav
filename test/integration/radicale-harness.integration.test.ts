@@ -6,6 +6,7 @@ import type {
 	IExecuteFunctions,
 	IHttpRequestOptions,
 	ILoadOptionsFunctions,
+	IN8nHttpFullResponse,
 	INode,
 	INodeListSearchResult,
 	INodeType,
@@ -279,6 +280,15 @@ interface EventCreateIntegrationParameters {
 	readonly additionalFields: unknown;
 }
 
+interface EventUpdateIntegrationParameters {
+	readonly calendar: unknown;
+	readonly identifierMode: 'resourceUrl' | 'uid';
+	readonly resourceUrl?: string;
+	readonly uid?: string;
+	readonly etag?: unknown;
+	readonly fieldsToUpdate: unknown;
+}
+
 function eventCreateContext(
 	run: RadicaleRun,
 	parameters: EventCreateIntegrationParameters,
@@ -370,6 +380,59 @@ function eventDeleteContext(
 		},
 	};
 	return { context: context as unknown as IExecuteFunctions, requests };
+}
+
+function eventUpdateContext(
+	run: RadicaleRun,
+	parameters: EventUpdateIntegrationParameters,
+	beforeRequest?: (options: N8nCalDavRequestOptions) => Promise<void>,
+): {
+	readonly context: IExecuteFunctions;
+	readonly requests: ReturnType<typeof vi.fn>;
+	readonly responses: IN8nHttpFullResponse[];
+} {
+	const adapter = requestAdapter(run);
+	const responses: IN8nHttpFullResponse[] = [];
+	const requests = vi.fn(async (options: N8nCalDavRequestOptions) => {
+		await beforeRequest?.(options);
+		const response = await adapter.request(options);
+		responses.push(response);
+		return response;
+	});
+	const values: Readonly<Record<string, unknown>> = {
+		resource: 'event',
+		operation: 'update',
+		calendar: parameters.calendar,
+		identifierMode: parameters.identifierMode,
+		resourceUrl: parameters.resourceUrl,
+		uid: parameters.uid,
+		etag: parameters.etag,
+		fieldsToUpdate: parameters.fieldsToUpdate,
+	};
+	const context = {
+		getInputData: vi.fn().mockReturnValue([{ json: { oracle: 'event-update' } }]),
+		getNodeParameter: vi.fn((name: string, itemIndex: number) => {
+			expect(itemIndex).toBe(0);
+			if (!Object.hasOwn(values, name)) {
+				throw new Error(`Unexpected active parameter read: ${name}.`);
+			}
+			return values[name];
+		}),
+		getCredentials: vi.fn().mockResolvedValue({
+			serverUrl: run.endpoint,
+			username: run.username,
+			password: run.password,
+			allowUnauthorizedCerts: false,
+		}),
+		continueOnFail: vi.fn().mockReturnValue(false),
+		getNode: vi.fn().mockReturnValue(workflowNode()),
+		helpers: {
+			async httpRequestWithAuthentication(_credentialType: string, options: IHttpRequestOptions) {
+				return await requests(options as N8nCalDavRequestOptions);
+			},
+		},
+	};
+	return { context: context as unknown as IExecuteFunctions, requests, responses };
 }
 
 async function captureNodeExecutionError(context: IExecuteFunctions): Promise<Error> {
@@ -1246,6 +1309,213 @@ describe('Radicale conditional calendar-event mutations', () => {
 			expect(stored.status).toBe(200);
 			expect(storedBody).toContain('SUMMARY:Race winner');
 			expect(storedBody).not.toContain('Forbidden race loser');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+});
+
+describe('Radicale conditional Event Update operation', () => {
+	// Radicale serves these direct event URLs without a configurable canonical redirect. The
+	// coordinator unit oracle covers a canonical read-back URL while these live cases require the
+	// exact current ETag from Radicale's mandatory authoritative GET.
+	it('updates a direct Resource URL with the exact fetched and authoritative ETags while preserving unknown data', async () => {
+		const run = await startRun();
+		try {
+			const eventUrl = await createSyntheticEvent(run, 'node-update-resource-url');
+			const calendarUrl = new URL('./', eventUrl).href;
+			const preservationBody = mutationEvent(run, 'Before preservation update').replace(
+				'SUMMARY:Before preservation update',
+				[
+					'DESCRIPTION:Preserved description',
+					'X-UNKNOWN;X-PARAM=MiXeD:opaque-preservation-oracle',
+					'SUMMARY:Before preservation update',
+				].join('\r\n'),
+			);
+			expect((await authenticatedFetch(run, eventUrl, 'PUT', preservationBody)).status).toBe(204);
+			const before = await authenticatedFetch(run, eventUrl);
+			const fetchedEtag = before.headers.get('etag');
+			expect(fetchedEtag).not.toBeNull();
+			const { context, requests, responses } = eventUpdateContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				identifierMode: 'resourceUrl',
+				resourceUrl: eventUrl,
+				etag: '',
+				fieldsToUpdate: {
+					summary: 'After preservation update',
+					description: { change: { action: 'set', value: '' } },
+				},
+			});
+
+			const [output] = await new CalDav().execute.call(context);
+			const authoritativeEtag = responses[2]?.headers.etag;
+			expect(authoritativeEtag).toBeTypeOf('string');
+
+			expect(output).toEqual([
+				{
+					json: {
+						calendarUrl,
+						resourceUrl: eventUrl,
+						etag: authoritativeEtag,
+						uid: syntheticEventUid(run),
+						summary: 'After preservation update',
+						description: '',
+						start: '2040-01-02T10:00:00Z',
+						end: '2040-01-02T10:30:00Z',
+					},
+					pairedItem: { item: 0 },
+				},
+			]);
+			const observed = requests.mock.calls.map(([options]) => options as N8nCalDavRequestOptions);
+			expect(observed.map((options) => options.method)).toEqual(['GET', 'PUT', 'GET']);
+			expect(observed[1]).toMatchObject({
+				url: eventUrl,
+				headers: {
+					'If-Match': fetchedEtag,
+					'Content-Type': 'text/calendar; charset=utf-8',
+				},
+			});
+			const stored = await authenticatedFetch(run, eventUrl);
+			const storedBody = await stored.text();
+			expect(storedBody).toContain('SUMMARY:After preservation update');
+			expect(storedBody).toContain('X-UNKNOWN;X-PARAM=MiXeD:opaque-preservation-oracle');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('updates by UID with an exact caller ETag through REPORT -> PUT -> GET', async () => {
+		const run = await startRun();
+		try {
+			const eventUrl = await createSyntheticEvent(run, 'node-update-uid');
+			const calendarUrl = new URL('./', eventUrl).href;
+			const before = await authenticatedFetch(run, eventUrl);
+			const suppliedEtag = before.headers.get('etag');
+			expect(suppliedEtag).not.toBeNull();
+			const { context, requests, responses } = eventUpdateContext(run, {
+				calendar: { __rl: true, mode: 'list', value: calendarUrl },
+				identifierMode: 'uid',
+				uid: syntheticEventUid(run),
+				etag: suppliedEtag,
+				fieldsToUpdate: { location: { change: { action: 'set', value: 'UID oracle' } } },
+			});
+
+			const [output] = await new CalDav().execute.call(context);
+			const authoritativeEtag = responses[2]?.headers.etag;
+			expect(authoritativeEtag).toBeTypeOf('string');
+			expect(output[0]).toMatchObject({
+				json: {
+					calendarUrl,
+					resourceUrl: eventUrl,
+					etag: authoritativeEtag,
+					uid: syntheticEventUid(run),
+					location: 'UID oracle',
+				},
+				pairedItem: { item: 0 },
+			});
+			const observed = requests.mock.calls.map(([options]) => options as N8nCalDavRequestOptions);
+			expect(observed.map((options) => options.method)).toEqual(['REPORT', 'PUT', 'GET']);
+			expect(observed[1].headers?.['If-Match']).toBe(suppliedEtag);
+			expect(observed[1].url).toBe(eventUrl);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('maps a stale caller ETag to one terminal conflict with no read-back', async () => {
+		const run = await startRun();
+		try {
+			const eventUrl = await createSyntheticEvent(run, 'node-update-stale');
+			const calendarUrl = new URL('./', eventUrl).href;
+			const staleEtag = (await authenticatedFetch(run, eventUrl)).headers.get('etag');
+			expect(staleEtag).not.toBeNull();
+			const newerBody = mutationEvent(run, 'Newer resource retained after stale Update');
+			expect((await authenticatedFetch(run, eventUrl, 'PUT', newerBody)).status).toBe(204);
+			const { context, requests } = eventUpdateContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				identifierMode: 'resourceUrl',
+				resourceUrl: eventUrl,
+				etag: staleEtag,
+				fieldsToUpdate: { summary: 'Forbidden stale Update' },
+			});
+
+			const error = await captureNodeExecutionError(context);
+			expect(error).toMatchObject({
+				message: 'The calendar event changed before the mutation could be applied.',
+				context: { itemIndex: 0 },
+			});
+			const observed = requests.mock.calls.map(([options]) => options as N8nCalDavRequestOptions);
+			expect(observed.map((options) => options.method)).toEqual(['GET', 'PUT']);
+			expect(observed[1].headers?.['If-Match']).toBe(staleEtag);
+			const retained = await authenticatedFetch(run, eventUrl);
+			expect(await retained.text()).toContain('SUMMARY:Newer resource retained after stale Update');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('maps a preservation-read-to-PUT race using the exact fetched ETag and no retry', async () => {
+		const run = await startRun();
+		try {
+			const eventUrl = await createSyntheticEvent(run, 'node-update-race');
+			const calendarUrl = new URL('./', eventUrl).href;
+			const winnerBody = mutationEvent(run, 'Race winner retained');
+			let raced = false;
+			const { context, requests, responses } = eventUpdateContext(
+				run,
+				{
+					calendar: { __rl: true, mode: 'url', value: calendarUrl },
+					identifierMode: 'resourceUrl',
+					resourceUrl: eventUrl,
+					etag: '',
+					fieldsToUpdate: { summary: 'Forbidden race loser' },
+				},
+				async (options) => {
+					if (options.method !== 'PUT' || raced) return;
+					raced = true;
+					expect((await authenticatedFetch(run, eventUrl, 'PUT', winnerBody)).status).toBe(204);
+				},
+			);
+
+			const error = await captureNodeExecutionError(context);
+			expect(error.message).toBe(
+				'The calendar event changed before the mutation could be applied.',
+			);
+			const observed = requests.mock.calls.map(([options]) => options as N8nCalDavRequestOptions);
+			expect(observed.map((options) => options.method)).toEqual(['GET', 'PUT']);
+			const preservationReadEtag = responses[0]?.headers.etag;
+			expect(preservationReadEtag).toBeTypeOf('string');
+			expect(observed[1].headers?.['If-Match']).toBe(preservationReadEtag);
+			const retained = await authenticatedFetch(run, eventUrl);
+			expect(await retained.text()).toContain('SUMMARY:Race winner retained');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('maps read-only denial, performs no read-back, and retains the event', async () => {
+		const run = await startRun();
+		try {
+			const eventUrl = await createSyntheticEvent(run, 'node-update-read-only');
+			const calendarUrl = new URL('./', eventUrl).href;
+			await harness.makeCalendarReadOnly(run, calendarUrl);
+			const { context, requests } = eventUpdateContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				identifierMode: 'resourceUrl',
+				resourceUrl: eventUrl,
+				etag: '',
+				fieldsToUpdate: { summary: 'Forbidden read-only Update' },
+			});
+
+			const error = await captureNodeExecutionError(context);
+			expect(error).toMatchObject({
+				message: 'Event Update is not authorized.',
+				context: { itemIndex: 0, httpCode: '403' },
+			});
+			const observed = requests.mock.calls.map(([options]) => options as N8nCalDavRequestOptions);
+			expect(observed.map((options) => options.method)).toEqual(['GET', 'PUT']);
+			expect(observed[1].headers?.['If-Match']).toEqual(expect.any(String));
+			expect((await authenticatedFetch(run, eventUrl)).status).toBe(200);
 		} finally {
 			await teardownRun(run);
 		}

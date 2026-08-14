@@ -150,6 +150,12 @@ describe('CalDAV Event Get Many metadata', () => {
 					action: 'Get many events',
 				},
 				{
+					name: 'Update',
+					value: 'update',
+					description: 'Update a calendar event',
+					action: 'Update a calendar event',
+				},
+				{
 					name: 'Delete',
 					value: 'delete',
 					description: 'Delete a calendar event',
@@ -163,7 +169,7 @@ describe('CalDAV Event Get Many metadata', () => {
 			displayOptions: {
 				show: {
 					resource: ['calendar', 'event'],
-					operation: ['create', 'get', 'getMany', 'delete'],
+					operation: ['create', 'get', 'getMany', 'update', 'delete'],
 				},
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
