@@ -137,13 +137,19 @@ describe('CalDAV Event Get Many metadata', () => {
 					description: 'Retrieve events in a date range',
 					action: 'Get many events',
 				},
+				{
+					name: 'Delete',
+					value: 'delete',
+					description: 'Delete a calendar event',
+					action: 'Delete a calendar event',
+				},
 			],
 		});
 		expect(property(properties, 'calendar')).toMatchObject({
 			required: true,
 			default: { mode: 'url', value: '' },
 			displayOptions: {
-				show: { resource: ['calendar', 'event'], operation: ['get', 'getMany'] },
+				show: { resource: ['calendar', 'event'], operation: ['get', 'getMany', 'delete'] },
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
 		});

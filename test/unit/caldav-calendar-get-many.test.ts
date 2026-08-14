@@ -186,6 +186,7 @@ describe('Calendar Get Many node description', () => {
 			'identifierMode',
 			'resourceUrl',
 			'uid',
+			'etag',
 		]);
 
 		expect(property(description, 'resource')).toMatchObject({
@@ -231,7 +232,7 @@ describe('Calendar Get Many node description', () => {
 			required: true,
 			default: { mode: 'url', value: '' },
 			displayOptions: {
-				show: { resource: ['calendar', 'event'], operation: ['get', 'getMany'] },
+				show: { resource: ['calendar', 'event'], operation: ['get', 'getMany', 'delete'] },
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
 			modes: [

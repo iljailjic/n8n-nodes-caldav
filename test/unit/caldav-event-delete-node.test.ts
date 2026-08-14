@@ -305,6 +305,7 @@ describe('CalDAV Event Delete exact resolution, validator, and output', () => {
 				TRANSPORT,
 				'https://calendar.example.test/calendars/work/',
 				requestedResourceUrl,
+				{ allowMissingEtag: true },
 			);
 			expect(mocks.deleteCalendarEventResource).toHaveBeenCalledWith(
 				TRANSPORT,
@@ -340,6 +341,7 @@ describe('CalDAV Event Delete exact resolution, validator, and output', () => {
 			TRANSPORT,
 			'https://calendar.example.test/calendars/work/',
 			uid,
+			{ allowMissingEtag: true },
 		);
 		expect(mocks.deleteCalendarEventResource).toHaveBeenCalledWith(
 			TRANSPORT,
@@ -557,6 +559,24 @@ describe('CalDAV Event Delete configuration validation', () => {
 });
 
 describe('CalDAV Event Delete sanitized errors and continuation', () => {
+	it('maps an outside-calendar mutation target to a sanitized domain invalid-response error', async () => {
+		const event = resolvedEvent('outside-calendar@example.test');
+		mocks.getCalendarEventByResourceUrl.mockResolvedValue(event);
+		mocks.deleteCalendarEventResource.mockRejectedValue(
+			new CalDavCalendarEventMutationError(CalendarEventMutationFailureCode.OUTSIDE_CALENDAR),
+		);
+
+		const error = await captureError(context([parameters('resourceUrl', event.event.resourceUrl)]));
+
+		expect(error).toBeInstanceOf(NodeApiError);
+		expect(error).not.toBeInstanceOf(NodeOperationError);
+		expect(error.message).toBe(
+			'The CalDAV server returned an invalid calendar-event mutation response.',
+		);
+		expect((error as NodeApiError).context.itemIndex).toBe(0);
+		expect(String(error)).not.toMatch(/outside|calendar\.example\.test|outside-calendar/);
+	});
+
 	it('maps Resource URL resolution 404 to not-found and stops before DELETE', async () => {
 		mocks.getCalendarEventByResourceUrl.mockRejectedValue(new CalDavNotFoundError(404));
 
