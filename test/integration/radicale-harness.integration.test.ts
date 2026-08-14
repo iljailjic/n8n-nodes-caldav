@@ -1389,6 +1389,11 @@ describe('Radicale conditional Event Update operation', () => {
 		try {
 			const eventUrl = await createSyntheticEvent(run, 'node-update-uid');
 			const calendarUrl = new URL('./', eventUrl).href;
+			const seededBody = mutationEvent(run, 'Before UID update').replace(
+				'SUMMARY:Before UID update',
+				['LOCATION:Before UID oracle', 'SUMMARY:Before UID update'].join('\r\n'),
+			);
+			expect((await authenticatedFetch(run, eventUrl, 'PUT', seededBody)).status).toBe(204);
 			const before = await authenticatedFetch(run, eventUrl);
 			const suppliedEtag = before.headers.get('etag');
 			expect(suppliedEtag).not.toBeNull();
