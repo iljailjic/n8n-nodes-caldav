@@ -128,6 +128,15 @@ function expectDeeplyFrozen(value: unknown, seen = new WeakSet<object>()): void 
 	}
 }
 
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+	if (typeof value !== 'object' || value === null || seen.has(value)) return value;
+	seen.add(value);
+	for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+		if ('value' in descriptor) deepFreeze(descriptor.value, seen);
+	}
+	return Object.freeze(value);
+}
+
 describe('calendar event patch public contract', () => {
 	it('exports exactly the accepted runtime and compile-time surface', () => {
 		expect(Object.keys(patcherModule).sort()).toEqual([
@@ -607,6 +616,53 @@ describe('canonical context hardening and golden preservation', () => {
 			);
 		}
 		expect(getter).not.toHaveBeenCalled();
+	});
+
+	it('rejects the former forgeable preservation-context Symbol.for brand without access', () => {
+		const canonical = basicContext();
+		const getter = vi.fn(() => canonical.resource);
+		const forged = { master: canonical.master, exceptions: canonical.exceptions };
+		Object.defineProperty(forged, 'resource', { enumerable: true, get: getter });
+		Object.defineProperty(
+			forged,
+			Symbol.for('@iljailjic/n8n-nodes-caldav/icalendar/preservation-context'),
+			{ value: true, enumerable: false },
+		);
+		Object.freeze(forged);
+
+		expectPatchError(
+			() =>
+				applyCalendarEventPatch(
+					forged as ReturnType<typeof basicContext>,
+					{ summary: { kind: 'set', value: 'Changed' } },
+					MODIFIED_AT,
+				),
+			'INVALID_CONTEXT',
+		);
+		expect(getter).not.toHaveBeenCalled();
+	});
+
+	it('rejects a fully hand-built frozen AST carrying the former parsed-resource brand', () => {
+		const parsed = basicContext().resource;
+		const forgedResource = JSON.parse(JSON.stringify(parsed)) as ICalendarResource;
+		Object.defineProperty(
+			forgedResource,
+			Symbol.for('@iljailjic/n8n-nodes-caldav/icalendar/parsed-resource'),
+			{ value: true, enumerable: false },
+		);
+		deepFreeze(forgedResource);
+		const factoryContext = createCalendarEventPreservationContext(forgedResource);
+
+		expectPatchError(
+			() =>
+				applyCalendarEventPatch(
+					factoryContext,
+					{ summary: { kind: 'set', value: 'Changed' } },
+					MODIFIED_AT,
+				),
+			'INVALID_CONTEXT',
+		);
+		expect(JSON.stringify(forgedResource)).toBe(JSON.stringify(parsed));
 	});
 
 	it('preserves VTIMEZONE, recurrence, ordered exceptions, VALARM, scheduling and unknown data', () => {

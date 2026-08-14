@@ -1,6 +1,8 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The accepted protocol-layer contract requires transport-independent typed errors, outside the n8n UI boundary. */
 
+import { createCalendarEventPreservationContext } from './eventReadModel';
 import type { CalendarEventPreservationContext } from './eventReadModel';
+import { parseICalendarResource } from './parser';
 import type {
 	ICalendarComponent,
 	ICalendarEntry,
@@ -121,10 +123,8 @@ const IMMUTABLE_KEY_FORMS = new Set(['UID', 'RECURRENCEID', 'RECURRENCE-ID']);
 const UTC_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
 const SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*$/;
 const HEX_PATTERN = /^[0-9A-Fa-f]$/;
-const PRESERVATION_CONTEXT_BRAND = Symbol.for(
-	'@iljailjic/n8n-nodes-caldav/icalendar/preservation-context',
-);
-const PARSED_RESOURCE_BRAND = Symbol.for('@iljailjic/n8n-nodes-caldav/icalendar/parsed-resource');
+const PRESERVATION_CONTEXT_PROVENANCE_VERIFIER = '__isCanonicalCalendarEventPreservationContext';
+const PARSED_RESOURCE_PROVENANCE_VERIFIER = '__isParserProducedICalendarResource';
 const INTERNAL_ERRORS = new WeakSet<object>();
 
 function fail(code: CalendarEventPatchErrorCode, field?: CalendarEventPatchField): never {
@@ -198,37 +198,33 @@ function exactEnumerableRecord(
 	return descriptors;
 }
 
+function hasProvenance(owner: object, verifierName: string, value: unknown): boolean {
+	const descriptor = Object.getOwnPropertyDescriptor(owner, verifierName);
+	return (
+		descriptor !== undefined &&
+		'value' in descriptor &&
+		typeof descriptor.value === 'function' &&
+		descriptor.value(value) === true
+	);
+}
+
 function validateFrozenDataGraph(root: object): boolean {
 	const visited = new WeakSet<object>();
 	const active = new WeakSet<object>();
 
-	const visit = (value: object, role: 'context' | 'resource' | 'node'): boolean => {
+	const visit = (value: object): boolean => {
 		if (active.has(value)) return false;
 		if (visited.has(value)) return true;
 		if (!Object.isFrozen(value) || !hasOnlyDataProperties(value)) return false;
 		if (!Array.isArray(value) && !isPlainRecordPrototype(value)) return false;
-
-		const symbols = Object.getOwnPropertySymbols(value);
-		const permittedSymbol =
-			role === 'context'
-				? PRESERVATION_CONTEXT_BRAND
-				: role === 'resource'
-					? PARSED_RESOURCE_BRAND
-					: undefined;
-		if (
-			symbols.length !== (permittedSymbol === undefined ? 0 : 1) ||
-			(permittedSymbol !== undefined && symbols[0] !== permittedSymbol)
-		) {
-			return false;
-		}
+		if (Object.getOwnPropertySymbols(value).length !== 0) return false;
 
 		active.add(value);
 		for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
 			if (Array.isArray(value) && key === 'length') continue;
 			if (!descriptor.enumerable || !('value' in descriptor)) return false;
 			if (typeof descriptor.value === 'object' && descriptor.value !== null) {
-				const childRole = role === 'context' && key === 'resource' ? 'resource' : 'node';
-				if (!visit(descriptor.value, childRole)) return false;
+				if (!visit(descriptor.value)) return false;
 			}
 		}
 		active.delete(value);
@@ -236,11 +232,20 @@ function validateFrozenDataGraph(root: object): boolean {
 		return true;
 	};
 
-	return visit(root, 'context');
+	return visit(root);
 }
 
 function snapshotCanonicalContext(value: unknown): CalendarEventPreservationContext {
 	if (typeof value !== 'object' || value === null || Array.isArray(value)) fail('INVALID_CONTEXT');
+	if (
+		!hasProvenance(
+			createCalendarEventPreservationContext,
+			PRESERVATION_CONTEXT_PROVENANCE_VERIFIER,
+			value,
+		)
+	) {
+		fail('INVALID_CONTEXT');
+	}
 	let descriptors: Readonly<Record<PropertyKey, PropertyDescriptor>>;
 	try {
 		descriptors = descriptorsOf(value);
@@ -256,8 +261,7 @@ function snapshotCanonicalContext(value: unknown): CalendarEventPreservationCont
 			const descriptor = ownDataDescriptor(descriptors, key);
 			return descriptor !== undefined && descriptor.enumerable;
 		}) ||
-		Object.getOwnPropertySymbols(value).length !== 1 ||
-		ownDataDescriptor(descriptors, PRESERVATION_CONTEXT_BRAND)?.value !== true
+		Object.getOwnPropertySymbols(value).length !== 0
 	) {
 		fail('INVALID_CONTEXT');
 	}
@@ -267,8 +271,7 @@ function snapshotCanonicalContext(value: unknown): CalendarEventPreservationCont
 	const master = ownDataDescriptor(descriptors, 'master')!.value as ICalendarComponent;
 	const exceptions = ownDataDescriptor(descriptors, 'exceptions')!
 		.value as readonly ICalendarComponent[];
-	const resourceDescriptors = descriptorsOf(resource as unknown as object);
-	if (ownDataDescriptor(resourceDescriptors, PARSED_RESOURCE_BRAND)?.value !== true) {
+	if (!hasProvenance(parseICalendarResource, PARSED_RESOURCE_PROVENANCE_VERIFIER, resource)) {
 		fail('INVALID_CONTEXT');
 	}
 	if (!Array.isArray(exceptions)) fail('INVALID_CONTEXT');

@@ -111,9 +111,8 @@ const PARSER_KINDS = new Set([
 const UTC_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
 const DATE_PATTERN = /^(\d{4})(\d{2})(\d{2})$/;
 const LOCAL_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/;
-const PRESERVATION_CONTEXT_BRAND = Symbol.for(
-	'@iljailjic/n8n-nodes-caldav/icalendar/preservation-context',
-);
+const PRESERVATION_CONTEXT_PROVENANCE = new WeakSet<object>();
+const PRESERVATION_CONTEXT_PROVENANCE_VERIFIER = '__isCanonicalCalendarEventPreservationContext';
 
 function fail(code: CalendarEventReadModelErrorCode): never {
 	throw new CalDavCalendarEventReadModelError(code);
@@ -309,14 +308,22 @@ export function createCalendarEventPreservationContext(
 		master,
 		exceptions: Object.freeze([...exceptions]),
 	};
-	Object.defineProperty(context, PRESERVATION_CONTEXT_BRAND, {
-		value: true,
+	const frozenContext = Object.freeze(context);
+	PRESERVATION_CONTEXT_PROVENANCE.add(frozenContext);
+	return frozenContext;
+}
+
+Object.defineProperty(
+	createCalendarEventPreservationContext,
+	PRESERVATION_CONTEXT_PROVENANCE_VERIFIER,
+	{
+		value: (value: unknown): boolean =>
+			typeof value === 'object' && value !== null && PRESERVATION_CONTEXT_PROVENANCE.has(value),
 		enumerable: false,
 		writable: false,
 		configurable: false,
-	});
-	return Object.freeze(context);
-}
+	},
+);
 
 function validateMasterSingletons(master: ICalendarComponent): void {
 	for (const name of PROJECTED_SINGLETONS) {
