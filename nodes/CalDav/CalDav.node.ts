@@ -26,6 +26,12 @@ import {
 	getCalendarEventByResourceUrl,
 } from './events/getByResourceUrl';
 import {
+	CalDavCalendarEventCreateError,
+	CalendarEventCreateFailureCode,
+	createCalendarEvent,
+} from './events/create';
+import type { CalendarEventCreateInput } from './events/create';
+import {
 	CalDavCalendarEventMutationError,
 	CalendarEventMutationFailureCode,
 	deleteCalendarEventResource,
@@ -39,6 +45,11 @@ import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
 import { CalDavCalendarEventReadModelError } from './icalendar/eventReadModel';
 import type { CalendarEvent } from './icalendar/eventReadModel';
 import { CalDavICalendarParseError } from './icalendar/parser';
+import {
+	CalDavICalendarSerializeError,
+	CalDavICalendarSerializeErrorCode,
+	serializeBasicUtcEvent,
+} from './icalendar/serializer';
 import { testCalDavApiCredentials } from './methods/credentialTest';
 import { defaultCalDavProviderRegistry } from './providers/registry';
 import type { CalDavProviderAdapter } from './providers/types';
@@ -61,6 +72,7 @@ const CALENDAR_RESOURCE = 'calendar';
 const EVENT_RESOURCE = 'event';
 const GET_OPERATION = 'get';
 const GET_MANY_OPERATION = 'getMany';
+const CREATE_OPERATION = 'create';
 const DELETE_OPERATION = 'delete';
 const RESOURCE_URL_IDENTIFIER_MODE = 'resourceUrl';
 const UID_IDENTIFIER_MODE = 'uid';
@@ -159,6 +171,35 @@ const EVENT_DELETE_MESSAGES = {
 	UNSUPPORTED_EVENT: 'The calendar event uses an unsupported event representation.',
 	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event mutation response.',
 	GENERIC: 'Event Delete failed.',
+} as const;
+
+const EVENT_CREATE_MESSAGES = {
+	INVALID_CALENDAR_URL:
+		'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
+	INVALID_UID: 'UID must be a non-empty valid iCalendar text value.',
+	RESOURCE_NAME_TOO_LONG: 'UID is too long to create a safe event resource name.',
+	INVALID_START: 'Start must be a valid date and time with whole-second precision.',
+	INVALID_END: 'End must be a valid date and time with whole-second precision.',
+	INVALID_RANGE: 'End must be later than Start.',
+	INVALID_SUMMARY: 'Summary must be a valid iCalendar text value.',
+	INVALID_DESCRIPTION: 'Description must be a valid iCalendar text value.',
+	INVALID_LOCATION: 'Location must be a valid iCalendar text value.',
+	INVALID_URL: 'URL must be a valid absolute URI without a fragment.',
+	INVALID_ADDITIONAL_FIELDS: 'Additional Fields must be an object.',
+	RESOURCE_LIMIT: 'The calendar event exceeds the supported size limit.',
+	AUTHENTICATION: 'Event Create authentication failed.',
+	AUTHORIZATION: 'Event Create is not authorized for the selected calendar.',
+	NOT_FOUND: 'The selected calendar was not found.',
+	CONFLICT: 'A calendar event already exists for this UID in the selected calendar.',
+	TLS: 'TLS certificate validation failed.',
+	TIMEOUT: 'Event Create timed out.',
+	RESPONSE_LIMIT: 'The Event Create response exceeded the size limit.',
+	REDIRECT: 'The CalDAV server returned an unsafe or invalid redirect.',
+	UNTRUSTED: 'The Event Create target is not trusted.',
+	NETWORK: 'The CalDAV server could not be reached.',
+	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event creation response.',
+	PARTIAL_SUCCESS: 'The event was created, but its required ETag could not be retrieved.',
+	GENERIC: 'Event Create failed.',
 } as const;
 
 interface SafeNodeFailure {
@@ -443,6 +484,115 @@ function eventDeleteFailure(error: unknown): EventDeleteFailure {
 	return { message: EVENT_DELETE_MESSAGES.GENERIC, configuration: false };
 }
 
+function eventCreateTransportFailure(error: CalDavTransportError): SafeNodeFailure {
+	switch (error.code) {
+		case CalDavTransportErrorCode.AUTHENTICATION_FAILED:
+			return apiFailure(EVENT_CREATE_MESSAGES.AUTHENTICATION, error);
+		case CalDavTransportErrorCode.AUTHORIZATION_FAILED:
+			return apiFailure(EVENT_CREATE_MESSAGES.AUTHORIZATION, error);
+		case CalDavTransportErrorCode.NOT_FOUND:
+			return apiFailure(EVENT_CREATE_MESSAGES.NOT_FOUND, error);
+		case CalDavTransportErrorCode.TLS_VALIDATION_FAILED:
+			return apiFailure(EVENT_CREATE_MESSAGES.TLS, error);
+		case CalDavTransportErrorCode.TIMEOUT:
+			return apiFailure(EVENT_CREATE_MESSAGES.TIMEOUT, error);
+		case CalDavTransportErrorCode.RESPONSE_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_CREATE_MESSAGES.RESPONSE_LIMIT, error);
+		case CalDavTransportErrorCode.INVALID_REDIRECT:
+		case CalDavTransportErrorCode.INSECURE_REDIRECT:
+		case CalDavTransportErrorCode.REDIRECT_LOOP:
+		case CalDavTransportErrorCode.REDIRECT_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_CREATE_MESSAGES.REDIRECT, error);
+		case CalDavTransportErrorCode.UNTRUSTED_TARGET:
+			return apiFailure(EVENT_CREATE_MESSAGES.UNTRUSTED, error);
+		case CalDavTransportErrorCode.NETWORK_ERROR:
+			return apiFailure(EVENT_CREATE_MESSAGES.NETWORK, error);
+		case CalDavTransportErrorCode.PRECONDITION_FAILED:
+		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
+			return apiFailure(EVENT_CREATE_MESSAGES.INVALID_RESPONSE, error);
+	}
+}
+
+interface EventCreateFailure extends SafeNodeFailure {
+	readonly configuration: boolean;
+}
+
+function eventCreateSerializationFailure(error: CalDavICalendarSerializeError): EventCreateFailure {
+	if (error.code === CalDavICalendarSerializeErrorCode.RESOURCE_LIMIT_EXCEEDED) {
+		return { message: EVENT_CREATE_MESSAGES.RESOURCE_LIMIT, configuration: true };
+	}
+	if (error.code === CalDavICalendarSerializeErrorCode.INVALID_TIME_RANGE) {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_RANGE, configuration: true };
+	}
+	if (error.field === 'uid') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_UID, configuration: true };
+	}
+	if (error.field === 'start') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_START, configuration: true };
+	}
+	if (error.field === 'end') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_END, configuration: true };
+	}
+	if (error.field === 'summary') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_SUMMARY, configuration: true };
+	}
+	if (error.field === 'description') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_DESCRIPTION, configuration: true };
+	}
+	if (error.field === 'location') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_LOCATION, configuration: true };
+	}
+	if (error.field === 'url') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_URL, configuration: true };
+	}
+	return { message: EVENT_CREATE_MESSAGES.GENERIC, configuration: false };
+}
+
+function eventCreateFailure(error: unknown): EventCreateFailure {
+	if (error instanceof CalDavCalendarEventCreateError) {
+		switch (error.code) {
+			case CalendarEventCreateFailureCode.RESOURCE_NAME_TOO_LONG:
+				return { message: EVENT_CREATE_MESSAGES.RESOURCE_NAME_TOO_LONG, configuration: true };
+			case CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED:
+				return {
+					message: EVENT_CREATE_MESSAGES.PARTIAL_SUCCESS,
+					configuration: false,
+					...(error.statusCode === undefined ? {} : { httpCode: String(error.statusCode) }),
+				};
+			case CalendarEventCreateFailureCode.NORMALIZATION_FAILED:
+				return { message: EVENT_CREATE_MESSAGES.INVALID_RESPONSE, configuration: false };
+			case CalendarEventCreateFailureCode.INVALID_CLOCK:
+				return { message: EVENT_CREATE_MESSAGES.GENERIC, configuration: false };
+		}
+	}
+	if (error instanceof CalDavICalendarSerializeError) {
+		return eventCreateSerializationFailure(error);
+	}
+	if (error instanceof CalDavCalendarEventMutationError) {
+		switch (error.code) {
+			case CalendarEventMutationFailureCode.CREATE_CONFLICT:
+				return { message: EVENT_CREATE_MESSAGES.CONFLICT, configuration: false };
+			case CalendarEventMutationFailureCode.OUTSIDE_CALENDAR:
+			case CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT:
+			case CalendarEventMutationFailureCode.MISSING_ETAG:
+			case CalendarEventMutationFailureCode.INVALID_LOCATION:
+			case CalendarEventMutationFailureCode.INVALID_RESPONSE:
+				return { message: EVENT_CREATE_MESSAGES.INVALID_RESPONSE, configuration: false };
+		}
+	}
+	if (error instanceof CalDavTransportError) {
+		return { ...eventCreateTransportFailure(error), configuration: false };
+	}
+	if (
+		error instanceof CalDavICalendarParseError ||
+		error instanceof CalDavCalendarEventReadModelError ||
+		error instanceof CalDavUrlValidationError
+	) {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_RESPONSE, configuration: false };
+	}
+	return { message: EVENT_CREATE_MESSAGES.GENERIC, configuration: false };
+}
+
 function eventDeleteValidator(
 	uiEtag: string | undefined,
 	serverEtag: string | undefined,
@@ -605,6 +755,155 @@ function parseDateTimeInstant(value: unknown): Date | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+function isValidICalendarText(value: string): boolean {
+	for (let index = 0; index < value.length; index += 1) {
+		const codeUnit = value.charCodeAt(index);
+		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+			const next = value.charCodeAt(index + 1);
+			if (next < 0xdc00 || next > 0xdfff) return false;
+			index += 1;
+			continue;
+		}
+		if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) return false;
+		if (codeUnit === 0x09 || codeUnit === 0x0a) continue;
+		if (codeUnit < 0x20 || codeUnit === 0x7f) return false;
+	}
+	return true;
+}
+
+function createResourceNameFits(uid: string): boolean {
+	const byteLength = Buffer.byteLength(uid, 'utf8');
+	const padding = byteLength % 3 === 0 ? 0 : 3 - (byteLength % 3);
+	const unpaddedBase64Length = Math.ceil(byteLength / 3) * 4 - padding;
+	return unpaddedBase64Length + '.ics'.length <= 255;
+}
+
+const CREATE_VALIDATION_DTSTAMP = new Date('2040-01-01T00:00:00Z');
+const CREATE_VALIDATION_START = new Date('2040-01-01T01:00:00Z');
+const CREATE_VALIDATION_END = new Date('2040-01-01T02:00:00Z');
+
+function isValidCreateUrl(value: string): boolean {
+	try {
+		serializeBasicUtcEvent({
+			uid: 'validation@example.test',
+			dtstamp: CREATE_VALIDATION_DTSTAMP,
+			start: CREATE_VALIDATION_START,
+			end: CREATE_VALIDATION_END,
+			summary: '',
+			url: value,
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function createDateTimeInstant(value: unknown): Date | undefined {
+	try {
+		const instant = parseDateTimeInstant(value);
+		if (instant === undefined) return undefined;
+		const year = instant.getUTCFullYear();
+		return year >= 1 && year <= 9999 ? instant : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function ownAdditionalField(
+	additionalFields: Record<PropertyKey, unknown>,
+	name: 'description' | 'location' | 'url',
+	present: boolean,
+): { readonly present: boolean; readonly value?: unknown } {
+	if (!present) return { present: false };
+	try {
+		return { present: true, value: Reflect.get(additionalFields, name) };
+	} catch {
+		return { present: true };
+	}
+}
+
+function eventCreateInput(
+	execution: IExecuteFunctions,
+	itemIndex: number,
+): CalendarEventCreateInput | string {
+	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
+	if (calendarUrl === undefined) return EVENT_CREATE_MESSAGES.INVALID_CALENDAR_URL;
+
+	const uidValue = nodeParameter(execution, 'uid', itemIndex);
+	if (typeof uidValue !== 'string' || uidValue.length === 0 || !isValidICalendarText(uidValue)) {
+		return EVENT_CREATE_MESSAGES.INVALID_UID;
+	}
+	if (!createResourceNameFits(uidValue)) return EVENT_CREATE_MESSAGES.RESOURCE_NAME_TOO_LONG;
+
+	const start = createDateTimeInstant(nodeParameter(execution, 'start', itemIndex));
+	if (start === undefined) return EVENT_CREATE_MESSAGES.INVALID_START;
+	const end = createDateTimeInstant(nodeParameter(execution, 'end', itemIndex));
+	if (end === undefined) return EVENT_CREATE_MESSAGES.INVALID_END;
+
+	const summary = nodeParameter(execution, 'summary', itemIndex);
+	if (typeof summary !== 'string' || !isValidICalendarText(summary)) {
+		return EVENT_CREATE_MESSAGES.INVALID_SUMMARY;
+	}
+
+	const additionalFieldsValue = nodeParameter(execution, 'additionalFields', itemIndex);
+	if (
+		typeof additionalFieldsValue !== 'object' ||
+		additionalFieldsValue === null ||
+		Array.isArray(additionalFieldsValue)
+	) {
+		return EVENT_CREATE_MESSAGES.INVALID_ADDITIONAL_FIELDS;
+	}
+	let keys: readonly PropertyKey[];
+	try {
+		keys = Reflect.ownKeys(additionalFieldsValue);
+	} catch {
+		return EVENT_CREATE_MESSAGES.INVALID_ADDITIONAL_FIELDS;
+	}
+	if (
+		keys.some((key) => typeof key !== 'string' || !['description', 'location', 'url'].includes(key))
+	) {
+		return EVENT_CREATE_MESSAGES.INVALID_ADDITIONAL_FIELDS;
+	}
+	const additionalFields = additionalFieldsValue as Record<PropertyKey, unknown>;
+	const descriptionField = ownAdditionalField(
+		additionalFields,
+		'description',
+		keys.includes('description'),
+	);
+	if (
+		descriptionField.present &&
+		(typeof descriptionField.value !== 'string' || !isValidICalendarText(descriptionField.value))
+	) {
+		return EVENT_CREATE_MESSAGES.INVALID_DESCRIPTION;
+	}
+	const locationField = ownAdditionalField(additionalFields, 'location', keys.includes('location'));
+	if (
+		locationField.present &&
+		(typeof locationField.value !== 'string' || !isValidICalendarText(locationField.value))
+	) {
+		return EVENT_CREATE_MESSAGES.INVALID_LOCATION;
+	}
+	const urlField = ownAdditionalField(additionalFields, 'url', keys.includes('url'));
+	if (
+		urlField.present &&
+		(typeof urlField.value !== 'string' || !isValidCreateUrl(urlField.value))
+	) {
+		return EVENT_CREATE_MESSAGES.INVALID_URL;
+	}
+
+	if (end.getTime() <= start.getTime()) return EVENT_CREATE_MESSAGES.INVALID_RANGE;
+	return Object.freeze({
+		calendarUrl,
+		uid: uidValue,
+		start,
+		end,
+		summary,
+		...(descriptionField.present ? { description: descriptionField.value as string } : {}),
+		...(locationField.present ? { location: locationField.value as string } : {}),
+		...(urlField.present ? { url: urlField.value as string } : {}),
+	});
 }
 
 interface EventGetManyInput {
@@ -916,6 +1215,12 @@ export class CalDav implements INodeType {
 				displayOptions: { show: { resource: [EVENT_RESOURCE] } },
 				options: [
 					{
+						name: 'Create',
+						value: CREATE_OPERATION,
+						description: 'Create a calendar event',
+						action: 'Create a calendar event',
+					},
+					{
 						name: 'Get',
 						value: GET_OPERATION,
 						description: 'Retrieve a calendar event',
@@ -970,7 +1275,7 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: {
 						resource: [CALENDAR_RESOURCE, EVENT_RESOURCE],
-						operation: [GET_OPERATION, GET_MANY_OPERATION, DELETE_OPERATION],
+						operation: [CREATE_OPERATION, GET_OPERATION, GET_MANY_OPERATION, DELETE_OPERATION],
 					},
 					hide: {
 						resource: [CALENDAR_RESOURCE],
@@ -992,6 +1297,77 @@ export class CalDav implements INodeType {
 						name: 'url',
 						type: 'string',
 						hint: 'Enter an absolute calendar collection URL',
+					},
+				],
+			},
+			{
+				displayName: 'UID',
+				name: 'uid',
+				type: 'string',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Start',
+				name: 'start',
+				type: 'dateTime',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+				},
+			},
+			{
+				displayName: 'End',
+				name: 'end',
+				type: 'dateTime',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Summary',
+				name: 'summary',
+				type: 'string',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Additional Fields',
+				name: 'additionalFields',
+				type: 'collection',
+				placeholder: 'Add Field',
+				default: {},
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+				},
+				options: [
+					{
+						displayName: 'Description',
+						name: 'description',
+						type: 'string',
+						typeOptions: { rows: 4 },
+						default: '',
+					},
+					{
+						displayName: 'Location',
+						name: 'location',
+						type: 'string',
+						default: '',
+					},
+					{
+						displayName: 'URL',
+						name: 'url',
+						type: 'string',
+						default: '',
 					},
 				],
 			},
@@ -1128,10 +1504,17 @@ export class CalDav implements INodeType {
 			const isCalendarOperation =
 				resource === CALENDAR_RESOURCE &&
 				(operation === GET_OPERATION || operation === GET_MANY_OPERATION);
+			const isEventCreate = resource === EVENT_RESOURCE && operation === CREATE_OPERATION;
 			const isEventGet = resource === EVENT_RESOURCE && operation === GET_OPERATION;
 			const isEventGetMany = resource === EVENT_RESOURCE && operation === GET_MANY_OPERATION;
 			const isEventDelete = resource === EVENT_RESOURCE && operation === DELETE_OPERATION;
-			if (!isCalendarOperation && !isEventGet && !isEventGetMany && !isEventDelete) {
+			if (
+				!isCalendarOperation &&
+				!isEventCreate &&
+				!isEventGet &&
+				!isEventGetMany &&
+				!isEventDelete
+			) {
 				if (this.continueOnFail()) {
 					returnData.push({
 						json: { error: UNSUPPORTED_OPERATION_MESSAGE },
@@ -1140,6 +1523,39 @@ export class CalDav implements INodeType {
 					continue;
 				}
 				throw new NodeOperationError(this.getNode(), UNSUPPORTED_OPERATION_MESSAGE, { itemIndex });
+			}
+
+			if (isEventCreate) {
+				const input = eventCreateInput(this, itemIndex);
+				if (typeof input === 'string') {
+					if (this.continueOnFail()) {
+						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), input, { itemIndex });
+				}
+
+				try {
+					if (getTransport === undefined) {
+						getTransport = await createN8nCalDavTransport(this);
+					}
+					const created = await createCalendarEvent(getTransport, input, () => new Date());
+					returnData.push({ json: eventJson(created), pairedItem: { item: itemIndex } });
+				} catch (error) {
+					const failure = eventCreateFailure(error);
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: failure.message },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					if (failure.configuration) {
+						throw new NodeOperationError(this.getNode(), failure.message, { itemIndex });
+					}
+					throw eventDeleteApiError(this.getNode(), failure, itemIndex);
+				}
+				continue;
 			}
 
 			if (isEventGetMany) {

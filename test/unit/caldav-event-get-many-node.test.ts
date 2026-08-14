@@ -95,11 +95,17 @@ function event(uid: string, overrides: Partial<CalendarEventReadResult['event']>
 	} as unknown as CalendarEventReadResult;
 }
 
-function property(properties: readonly INodeProperties[], name: string, resource?: string) {
+function property(
+	properties: readonly INodeProperties[],
+	name: string,
+	resource?: string,
+	operation?: string,
+) {
 	const matches = properties.filter(
 		(candidate) =>
 			candidate.name === name &&
-			(resource === undefined || candidate.displayOptions?.show?.resource?.includes(resource)),
+			(resource === undefined || candidate.displayOptions?.show?.resource?.includes(resource)) &&
+			(operation === undefined || candidate.displayOptions?.show?.operation?.includes(operation)),
 	);
 	expect(matches).toHaveLength(1);
 	return matches[0];
@@ -130,6 +136,12 @@ describe('CalDAV Event Get Many metadata', () => {
 		expect(property(properties, 'operation', 'event')).toMatchObject({
 			default: 'get',
 			options: [
+				{
+					name: 'Create',
+					value: 'create',
+					description: 'Create a calendar event',
+					action: 'Create a calendar event',
+				},
 				{ name: 'Get', value: 'get', description: 'Retrieve a calendar event' },
 				{
 					name: 'Get Many',
@@ -149,18 +161,21 @@ describe('CalDAV Event Get Many metadata', () => {
 			required: true,
 			default: { mode: 'url', value: '' },
 			displayOptions: {
-				show: { resource: ['calendar', 'event'], operation: ['get', 'getMany', 'delete'] },
+				show: {
+					resource: ['calendar', 'event'],
+					operation: ['create', 'get', 'getMany', 'delete'],
+				},
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
 		});
-		expect(property(properties, 'start')).toMatchObject({
+		expect(property(properties, 'start', 'event', 'getMany')).toMatchObject({
 			displayName: 'Start',
 			type: 'dateTime',
 			required: true,
 			default: '',
 			displayOptions: { show: { resource: ['event'], operation: ['getMany'] } },
 		});
-		expect(property(properties, 'end')).toMatchObject({
+		expect(property(properties, 'end', 'event', 'getMany')).toMatchObject({
 			displayName: 'End',
 			type: 'dateTime',
 			required: true,

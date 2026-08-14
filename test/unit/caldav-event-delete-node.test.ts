@@ -145,11 +145,17 @@ function resolvedEvent(
 	} as unknown as CalendarEventReadResult;
 }
 
-function property(properties: readonly INodeProperties[], name: string, resource?: string) {
+function property(
+	properties: readonly INodeProperties[],
+	name: string,
+	resource?: string,
+	operation?: string,
+) {
 	const matches = properties.filter(
 		(candidate) =>
 			candidate.name === name &&
-			(resource === undefined || candidate.displayOptions?.show?.resource?.includes(resource)),
+			(resource === undefined || candidate.displayOptions?.show?.resource?.includes(resource)) &&
+			(operation === undefined || candidate.displayOptions?.show?.operation?.includes(operation)),
 	);
 	expect(matches).toHaveLength(1);
 	return matches[0];
@@ -188,6 +194,12 @@ describe('CalDAV Event Delete metadata', () => {
 			noDataExpression: true,
 			displayOptions: { show: { resource: ['event'] } },
 			options: [
+				{
+					name: 'Create',
+					value: 'create',
+					description: 'Create a calendar event',
+					action: 'Create a calendar event',
+				},
 				{
 					name: 'Get',
 					value: 'get',
@@ -247,7 +259,7 @@ describe('CalDAV Event Delete metadata', () => {
 				},
 			},
 		});
-		expect(property(properties, 'uid')).toMatchObject({
+		expect(property(properties, 'uid', 'event', 'delete')).toMatchObject({
 			type: 'string',
 			required: true,
 			default: '',

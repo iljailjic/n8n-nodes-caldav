@@ -32,6 +32,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/discovery/currentUserPrincipal.d.ts',
 	'dist/nodes/CalDav/discovery/currentUserPrincipal.js',
 	'dist/nodes/CalDav/discovery/currentUserPrincipal.js.map',
+	'dist/nodes/CalDav/events/create.d.ts',
+	'dist/nodes/CalDav/events/create.js',
+	'dist/nodes/CalDav/events/create.js.map',
 	'dist/nodes/CalDav/events/getByResourceUrl.d.ts',
 	'dist/nodes/CalDav/events/getByResourceUrl.js',
 	'dist/nodes/CalDav/events/getByResourceUrl.js.map',
@@ -99,6 +102,12 @@ const serializerArtifactPaths = [
 	'dist/nodes/CalDav/icalendar/serializer.js.map',
 ] as const;
 
+const createArtifactPaths = [
+	'dist/nodes/CalDav/events/create.d.ts',
+	'dist/nodes/CalDav/events/create.js',
+	'dist/nodes/CalDav/events/create.js.map',
+] as const;
+
 interface PackResultOverrides {
 	bundled?: unknown;
 	entryCount?: unknown;
@@ -124,7 +133,10 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(88);
+		expect(expectedPackageFiles).toHaveLength(91);
+		expect(expectedPackageFiles.filter((path) => path.includes('/events/create.'))).toEqual(
+			createArtifactPaths,
+		);
 		expect(expectedPackageFiles.filter((path) => path.includes('/icalendar/serializer.'))).toEqual(
 			serializerArtifactPaths,
 		);

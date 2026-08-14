@@ -162,11 +162,17 @@ function result(
 	});
 }
 
-function property(properties: readonly INodeProperties[], name: string, resource?: string) {
+function property(
+	properties: readonly INodeProperties[],
+	name: string,
+	resource?: string,
+	operation?: string,
+) {
 	const matches = properties.filter(
 		(candidate) =>
 			candidate.name === name &&
-			(resource === undefined || candidate.displayOptions?.show?.resource?.includes(resource)),
+			(resource === undefined || candidate.displayOptions?.show?.resource?.includes(resource)) &&
+			(operation === undefined || candidate.displayOptions?.show?.operation?.includes(operation)),
 	);
 	expect(matches).toHaveLength(1);
 	return matches[0];
@@ -225,6 +231,12 @@ describe('CalDAV Event Get metadata', () => {
 			displayOptions: { show: { resource: ['event'] } },
 			options: [
 				{
+					name: 'Create',
+					value: 'create',
+					description: 'Create a calendar event',
+					action: 'Create a calendar event',
+				},
+				{
 					name: 'Get',
 					value: 'get',
 					description: 'Retrieve a calendar event',
@@ -259,7 +271,7 @@ describe('CalDAV Event Get metadata', () => {
 			displayOptions: {
 				show: {
 					resource: expect.arrayContaining(['calendar', 'event']),
-					operation: ['get', 'getMany', 'delete'],
+					operation: ['create', 'get', 'getMany', 'delete'],
 				},
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
@@ -312,7 +324,7 @@ describe('CalDAV Event Get metadata', () => {
 			},
 		});
 		expect(resourceUrl.noDataExpression).toBeUndefined();
-		const uid = property(properties, 'uid');
+		const uid = property(properties, 'uid', 'event', 'get');
 		expect(uid).toMatchObject({
 			displayName: 'UID',
 			name: 'uid',

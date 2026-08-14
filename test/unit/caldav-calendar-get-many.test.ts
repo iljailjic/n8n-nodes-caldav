@@ -179,6 +179,11 @@ describe('Calendar Get Many node description', () => {
 			'returnAll',
 			'limit',
 			'calendar',
+			'uid',
+			'start',
+			'end',
+			'summary',
+			'additionalFields',
 			'start',
 			'end',
 			'returnAll',
@@ -232,7 +237,10 @@ describe('Calendar Get Many node description', () => {
 			required: true,
 			default: { mode: 'url', value: '' },
 			displayOptions: {
-				show: { resource: ['calendar', 'event'], operation: ['get', 'getMany', 'delete'] },
+				show: {
+					resource: ['calendar', 'event'],
+					operation: ['create', 'get', 'getMany', 'delete'],
+				},
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
 			modes: [
