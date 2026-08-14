@@ -56,10 +56,15 @@ function isDirectCalendarChild(
 	}
 }
 
+export interface CalendarEventResourceGetOptions {
+	readonly allowMissingEtag?: boolean;
+}
+
 export async function getCalendarEventByResourceUrl(
 	transport: CalDavTransport,
 	calendarUrl: AbsoluteHttpUrl,
 	resourceUrl: AbsoluteHttpUrl,
+	options: CalendarEventResourceGetOptions = {},
 ): Promise<CalendarEventReadResult> {
 	let normalizedCalendarUrl: AbsoluteHttpUrl;
 	let canonicalResourceUrl: AbsoluteHttpUrl;
@@ -75,7 +80,10 @@ export async function getCalendarEventByResourceUrl(
 	}
 
 	const response = await transport.request({ method: CalDavMethod.GET, url: resourceUrl });
-	if (response.statusCode !== 200 || response.etag === undefined) {
+	if (
+		response.statusCode !== 200 ||
+		(response.etag === undefined && options.allowMissingEtag !== true)
+	) {
 		return fail(CalendarEventResourceGetFailureCode.INVALID_RESPONSE);
 	}
 
@@ -90,7 +98,7 @@ export async function getCalendarEventByResourceUrl(
 	return mapCalendarEventResource({
 		calendarUrl: normalizedCalendarUrl,
 		resourceUrl: effectiveResourceUrl,
-		etag: response.etag,
+		...(response.etag === undefined ? {} : { etag: response.etag }),
 		resource,
 	});
 }

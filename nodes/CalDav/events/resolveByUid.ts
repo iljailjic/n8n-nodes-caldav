@@ -41,12 +41,12 @@ const DAV_NAMESPACE = 'DAV:';
 const CALDAV_NAMESPACE = 'urn:ietf:params:xml:ns:caldav';
 
 interface RequestedProperties {
-	readonly etag: string;
+	readonly etag?: string;
 	readonly calendarData: string;
 }
 
 interface CanonicalResource {
-	readonly etag: string;
+	readonly etag?: string;
 	readonly calendarData: string;
 }
 
@@ -77,7 +77,10 @@ function readCharacterText(property: DavProperty, allowAttributes: boolean): str
 	return value;
 }
 
-function requestedProperties(response: DavPropertyResponse): RequestedProperties {
+function requestedProperties(
+	response: DavPropertyResponse,
+	allowMissingEtag: boolean,
+): RequestedProperties {
 	const etags: DavProperty[] = [];
 	const calendarDataValues: DavProperty[] = [];
 
@@ -95,20 +98,29 @@ function requestedProperties(response: DavPropertyResponse): RequestedProperties
 		}
 	}
 
-	if (etags.length !== 1 || calendarDataValues.length !== 1) {
+	if (
+		etags.length > 1 ||
+		(etags.length === 0 && !allowMissingEtag) ||
+		calendarDataValues.length !== 1
+	) {
 		return invalidResponse();
 	}
 
 	return {
-		etag: readCharacterText(etags[0], false),
+		...(etags.length === 0 ? {} : { etag: readCharacterText(etags[0], false) }),
 		calendarData: readCharacterText(calendarDataValues[0], true),
 	};
+}
+
+export interface CalendarEventUidResolutionOptions {
+	readonly allowMissingEtag?: boolean;
 }
 
 export async function resolveCalendarEventByUid(
 	transport: CalDavTransport,
 	calendarUrl: AbsoluteHttpUrl,
 	uid: string,
+	options: CalendarEventUidResolutionOptions = {},
 ): Promise<CalendarEventReadResult> {
 	const body = buildCalendarUidQueryReport({ uid });
 	const response = await transport.request({
@@ -134,13 +146,13 @@ export async function resolveCalendarEventByUid(
 			return invalidResponse();
 		}
 
-		const properties = requestedProperties(davResponse);
+		const properties = requestedProperties(davResponse, options.allowMissingEtag === true);
 		const resourceUrl = resolveCalDavHref(response.effectiveUrl, davResponse.hrefs[0]);
 		const resource = parseICalendarResource(Buffer.from(properties.calendarData, 'utf8'));
 		const result = mapCalendarEventResource({
 			calendarUrl,
 			resourceUrl,
-			etag: properties.etag,
+			...(properties.etag === undefined ? {} : { etag: properties.etag }),
 			resource,
 		});
 
@@ -153,7 +165,7 @@ export async function resolveCalendarEventByUid(
 		}
 
 		canonicalResources.set(resourceUrl, {
-			etag: properties.etag,
+			...(properties.etag === undefined ? {} : { etag: properties.etag }),
 			calendarData: properties.calendarData,
 		});
 		if (result.event.uid === uid) {

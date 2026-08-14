@@ -26,6 +26,11 @@ import {
 	getCalendarEventByResourceUrl,
 } from './events/getByResourceUrl';
 import {
+	CalDavCalendarEventMutationError,
+	CalendarEventMutationFailureCode,
+	deleteCalendarEventResource,
+} from './events/mutations';
+import {
 	CalDavCalendarEventUidResolutionError,
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
@@ -56,6 +61,7 @@ const CALENDAR_RESOURCE = 'calendar';
 const EVENT_RESOURCE = 'event';
 const GET_OPERATION = 'get';
 const GET_MANY_OPERATION = 'getMany';
+const DELETE_OPERATION = 'delete';
 const RESOURCE_URL_IDENTIFIER_MODE = 'resourceUrl';
 const UID_IDENTIFIER_MODE = 'uid';
 const INVALID_LIMIT_MESSAGE = 'Limit must be an integer greater than or equal to 1.';
@@ -127,6 +133,32 @@ const EVENT_GET_MANY_MESSAGES = {
 	UNSUPPORTED_EVENT: 'The calendar event uses an unsupported event representation.',
 	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event response.',
 	GENERIC: 'Event Get Many failed.',
+} as const;
+
+const EVENT_DELETE_MESSAGES = {
+	INVALID_CALENDAR_URL:
+		'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
+	INVALID_RESOURCE_URL:
+		'The Event Resource URL is invalid or does not belong to the selected calendar.',
+	INVALID_UID: 'UID must be a non-empty valid iCalendar text value.',
+	INVALID_ETAG: 'ETag must be a string.',
+	AUTHENTICATION: 'Event Delete authentication failed.',
+	AUTHORIZATION: 'Event Delete is not authorized.',
+	NOT_FOUND: 'The calendar event was not found.',
+	AMBIGUOUS:
+		'More than one calendar event with the requested UID was found in the selected calendar.',
+	MISSING_ETAG: 'The calendar event does not provide an ETag required for a safe mutation.',
+	CONCURRENCY: 'The calendar event changed before the mutation could be applied.',
+	TLS: 'TLS certificate validation failed.',
+	TIMEOUT: 'Event Delete timed out.',
+	RESPONSE_LIMIT: 'The Event Delete response exceeded the size limit.',
+	REDIRECT: 'The CalDAV server returned an unsafe or invalid redirect.',
+	UNTRUSTED: 'The Event Resource URL targets an untrusted endpoint.',
+	NETWORK: 'The CalDAV server could not be reached.',
+	MALFORMED_ICALENDAR: 'The CalDAV server returned malformed iCalendar event data.',
+	UNSUPPORTED_EVENT: 'The calendar event uses an unsupported event representation.',
+	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event mutation response.',
+	GENERIC: 'Event Delete failed.',
 } as const;
 
 interface SafeNodeFailure {
@@ -318,6 +350,127 @@ function eventGetFailure(error: unknown): EventGetFailure {
 		return { message: EVENT_GET_MESSAGES.INVALID_RESPONSE, configuration: false };
 	}
 	return { message: EVENT_GET_MESSAGES.GENERIC, configuration: false };
+}
+
+function eventDeleteTransportFailure(error: CalDavTransportError): SafeNodeFailure {
+	switch (error.code) {
+		case CalDavTransportErrorCode.AUTHENTICATION_FAILED:
+			return apiFailure(EVENT_DELETE_MESSAGES.AUTHENTICATION, error);
+		case CalDavTransportErrorCode.AUTHORIZATION_FAILED:
+			return apiFailure(EVENT_DELETE_MESSAGES.AUTHORIZATION, error);
+		case CalDavTransportErrorCode.NOT_FOUND:
+			return apiFailure(EVENT_DELETE_MESSAGES.NOT_FOUND, error);
+		case CalDavTransportErrorCode.PRECONDITION_FAILED:
+			return apiFailure(EVENT_DELETE_MESSAGES.CONCURRENCY, error);
+		case CalDavTransportErrorCode.TLS_VALIDATION_FAILED:
+			return apiFailure(EVENT_DELETE_MESSAGES.TLS, error);
+		case CalDavTransportErrorCode.TIMEOUT:
+			return apiFailure(EVENT_DELETE_MESSAGES.TIMEOUT, error);
+		case CalDavTransportErrorCode.RESPONSE_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_DELETE_MESSAGES.RESPONSE_LIMIT, error);
+		case CalDavTransportErrorCode.INVALID_REDIRECT:
+		case CalDavTransportErrorCode.INSECURE_REDIRECT:
+		case CalDavTransportErrorCode.REDIRECT_LOOP:
+		case CalDavTransportErrorCode.REDIRECT_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_DELETE_MESSAGES.REDIRECT, error);
+		case CalDavTransportErrorCode.UNTRUSTED_TARGET:
+			return apiFailure(EVENT_DELETE_MESSAGES.UNTRUSTED, error);
+		case CalDavTransportErrorCode.NETWORK_ERROR:
+			return apiFailure(EVENT_DELETE_MESSAGES.NETWORK, error);
+		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
+			return apiFailure(EVENT_DELETE_MESSAGES.INVALID_RESPONSE, error);
+	}
+}
+
+interface EventDeleteFailure extends SafeNodeFailure {
+	readonly configuration: boolean;
+}
+
+function eventDeleteFailure(error: unknown): EventDeleteFailure {
+	if (error instanceof NodeApiError && error.message === EVENT_DELETE_MESSAGES.MISSING_ETAG) {
+		return { message: EVENT_DELETE_MESSAGES.MISSING_ETAG, configuration: false };
+	}
+	if (
+		error instanceof CalDavCalendarEventResourceGetError &&
+		error.code === CalendarEventResourceGetFailureCode.OUTSIDE_CALENDAR
+	) {
+		return { message: EVENT_DELETE_MESSAGES.INVALID_RESOURCE_URL, configuration: true };
+	}
+	if (error instanceof XmlBuildError && error.code === 'INVALID_UID') {
+		return { message: EVENT_DELETE_MESSAGES.INVALID_UID, configuration: true };
+	}
+	if (error instanceof CalDavTransportError) {
+		return { ...eventDeleteTransportFailure(error), configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventUidResolutionError) {
+		if (error.code === CalendarEventUidResolutionFailureCode.NOT_FOUND) {
+			return { message: EVENT_DELETE_MESSAGES.NOT_FOUND, configuration: false };
+		}
+		if (error.code === CalendarEventUidResolutionFailureCode.AMBIGUOUS) {
+			return { message: EVENT_DELETE_MESSAGES.AMBIGUOUS, configuration: false };
+		}
+		return { message: EVENT_DELETE_MESSAGES.INVALID_RESPONSE, configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventMutationError) {
+		switch (error.code) {
+			case CalendarEventMutationFailureCode.OUTSIDE_CALENDAR:
+				return { message: EVENT_DELETE_MESSAGES.INVALID_RESPONSE, configuration: false };
+			case CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT:
+				return { message: EVENT_DELETE_MESSAGES.CONCURRENCY, configuration: false };
+			case CalendarEventMutationFailureCode.MISSING_ETAG:
+				return { message: EVENT_DELETE_MESSAGES.MISSING_ETAG, configuration: false };
+			case CalendarEventMutationFailureCode.CREATE_CONFLICT:
+			case CalendarEventMutationFailureCode.INVALID_LOCATION:
+			case CalendarEventMutationFailureCode.INVALID_RESPONSE:
+				return { message: EVENT_DELETE_MESSAGES.INVALID_RESPONSE, configuration: false };
+		}
+	}
+	if (error instanceof CalDavICalendarParseError) {
+		return { message: EVENT_DELETE_MESSAGES.MALFORMED_ICALENDAR, configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventReadModelError) {
+		return { message: EVENT_DELETE_MESSAGES.UNSUPPORTED_EVENT, configuration: false };
+	}
+	if (
+		error instanceof CalDavCalendarEventResourceGetError ||
+		error instanceof CalDavXmlParseError ||
+		error instanceof CalDavXmlProtocolError ||
+		error instanceof CalDavUrlValidationError ||
+		error instanceof XmlBuildError
+	) {
+		return { message: EVENT_DELETE_MESSAGES.INVALID_RESPONSE, configuration: false };
+	}
+	return { message: EVENT_DELETE_MESSAGES.GENERIC, configuration: false };
+}
+
+function eventDeleteValidator(
+	uiEtag: string | undefined,
+	serverEtag: string | undefined,
+): string | undefined {
+	if (uiEtag !== undefined && uiEtag.length > 0) {
+		return uiEtag;
+	}
+	return serverEtag;
+}
+
+function eventDeleteApiError(
+	node: ReturnType<IExecuteFunctions['getNode']>,
+	failure: SafeNodeFailure,
+	itemIndex: number,
+): NodeApiError {
+	const error = new NodeApiError(
+		node,
+		{},
+		{
+			message: failure.message,
+			itemIndex,
+			...(failure.httpCode === undefined ? {} : { httpCode: failure.httpCode }),
+		},
+	);
+	if (failure.httpCode !== undefined) {
+		error.context.httpCode = failure.httpCode;
+	}
+	return error;
 }
 
 function eventGetManyTransportFailure(error: CalDavTransportError): SafeNodeFailure {
@@ -774,6 +927,12 @@ export class CalDav implements INodeType {
 						description: 'Retrieve events in a date range',
 						action: 'Get many events',
 					},
+					{
+						name: 'Delete',
+						value: DELETE_OPERATION,
+						description: 'Delete a calendar event',
+						action: 'Delete a calendar event',
+					},
 				],
 				default: GET_OPERATION,
 			},
@@ -811,7 +970,7 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: {
 						resource: [CALENDAR_RESOURCE, EVENT_RESOURCE],
-						operation: [GET_OPERATION, GET_MANY_OPERATION],
+						operation: [GET_OPERATION, GET_MANY_OPERATION, DELETE_OPERATION],
 					},
 					hide: {
 						resource: [CALENDAR_RESOURCE],
@@ -895,7 +1054,10 @@ export class CalDav implements INodeType {
 				],
 				default: RESOURCE_URL_IDENTIFIER_MODE,
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [GET_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [GET_OPERATION, DELETE_OPERATION],
+					},
 				},
 			},
 			{
@@ -907,7 +1069,7 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: {
 						resource: [EVENT_RESOURCE],
-						operation: [GET_OPERATION],
+						operation: [GET_OPERATION, DELETE_OPERATION],
 						identifierMode: [RESOURCE_URL_IDENTIFIER_MODE],
 					},
 				},
@@ -921,9 +1083,18 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: {
 						resource: [EVENT_RESOURCE],
-						operation: [GET_OPERATION],
+						operation: [GET_OPERATION, DELETE_OPERATION],
 						identifierMode: [UID_IDENTIFIER_MODE],
 					},
+				},
+			},
+			{
+				displayName: 'ETag',
+				name: 'etag',
+				type: 'string',
+				default: '',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [DELETE_OPERATION] },
 				},
 			},
 		],
@@ -959,7 +1130,8 @@ export class CalDav implements INodeType {
 				(operation === GET_OPERATION || operation === GET_MANY_OPERATION);
 			const isEventGet = resource === EVENT_RESOURCE && operation === GET_OPERATION;
 			const isEventGetMany = resource === EVENT_RESOURCE && operation === GET_MANY_OPERATION;
-			if (!isCalendarOperation && !isEventGet && !isEventGetMany) {
+			const isEventDelete = resource === EVENT_RESOURCE && operation === DELETE_OPERATION;
+			if (!isCalendarOperation && !isEventGet && !isEventGetMany && !isEventDelete) {
 				if (this.continueOnFail()) {
 					returnData.push({
 						json: { error: UNSUPPORTED_OPERATION_MESSAGE },
@@ -1012,6 +1184,175 @@ export class CalDav implements INodeType {
 							...(failure.httpCode === undefined ? {} : { httpCode: failure.httpCode }),
 						},
 					);
+				}
+				continue;
+			}
+
+			if (isEventDelete) {
+				const calendar = nodeParameter(this, 'calendar', itemIndex);
+				const identifierMode = nodeParameter(this, 'identifierMode', itemIndex);
+
+				const calendarUrl = calendarLocatorUrl(calendar);
+				if (calendarUrl === undefined) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: EVENT_DELETE_MESSAGES.INVALID_CALENDAR_URL },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), EVENT_DELETE_MESSAGES.INVALID_CALENDAR_URL, {
+						itemIndex,
+					});
+				}
+
+				if (
+					identifierMode !== RESOURCE_URL_IDENTIFIER_MODE &&
+					identifierMode !== UID_IDENTIFIER_MODE
+				) {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: UNSUPPORTED_OPERATION_MESSAGE },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), UNSUPPORTED_OPERATION_MESSAGE, {
+						itemIndex,
+					});
+				}
+
+				let identifier: unknown;
+				try {
+					identifier = this.getNodeParameter(identifierMode, itemIndex);
+				} catch {
+					identifier = undefined;
+				}
+
+				let resourceUrl: AbsoluteHttpUrl | undefined;
+				let uid: string | undefined;
+				if (identifierMode === RESOURCE_URL_IDENTIFIER_MODE) {
+					try {
+						resourceUrl =
+							typeof identifier === 'string' && identifier.length > 0
+								? validateAbsoluteHttpUrl(identifier)
+								: undefined;
+					} catch {
+						resourceUrl = undefined;
+					}
+					if (resourceUrl === undefined) {
+						if (this.continueOnFail()) {
+							returnData.push({
+								json: { error: EVENT_DELETE_MESSAGES.INVALID_RESOURCE_URL },
+								pairedItem: { item: itemIndex },
+							});
+							continue;
+						}
+						throw new NodeOperationError(
+							this.getNode(),
+							EVENT_DELETE_MESSAGES.INVALID_RESOURCE_URL,
+							{ itemIndex },
+						);
+					}
+				} else {
+					uid =
+						typeof identifier === 'string' && identifier.length > 0 && isValidXmlText(identifier)
+							? identifier
+							: undefined;
+					if (uid === undefined) {
+						if (this.continueOnFail()) {
+							returnData.push({
+								json: { error: EVENT_DELETE_MESSAGES.INVALID_UID },
+								pairedItem: { item: itemIndex },
+							});
+							continue;
+						}
+						throw new NodeOperationError(this.getNode(), EVENT_DELETE_MESSAGES.INVALID_UID, {
+							itemIndex,
+						});
+					}
+				}
+
+				let uiEtag: unknown;
+				try {
+					uiEtag = this.getNodeParameter('etag', itemIndex);
+				} catch {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: EVENT_DELETE_MESSAGES.INVALID_ETAG },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), EVENT_DELETE_MESSAGES.INVALID_ETAG, {
+						itemIndex,
+					});
+				}
+				if (uiEtag !== undefined && typeof uiEtag !== 'string') {
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: EVENT_DELETE_MESSAGES.INVALID_ETAG },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), EVENT_DELETE_MESSAGES.INVALID_ETAG, {
+						itemIndex,
+					});
+				}
+
+				try {
+					if (getTransport === undefined) {
+						getTransport = await createN8nCalDavTransport(this);
+					}
+					const result =
+						resourceUrl === undefined
+							? await resolveCalendarEventByUid(getTransport, calendarUrl, uid!, {
+									allowMissingEtag: true,
+								})
+							: await getCalendarEventByResourceUrl(getTransport, calendarUrl, resourceUrl, {
+									allowMissingEtag: true,
+								});
+					const validator = eventDeleteValidator(uiEtag, result.event.etag);
+					if (validator === undefined) {
+						const failure = { message: EVENT_DELETE_MESSAGES.MISSING_ETAG };
+						if (this.continueOnFail()) {
+							returnData.push({
+								json: { error: failure.message },
+								pairedItem: { item: itemIndex },
+							});
+							continue;
+						}
+						throw eventDeleteApiError(this.getNode(), failure, itemIndex);
+					}
+					await deleteCalendarEventResource(
+						getTransport,
+						result.event.calendarUrl,
+						result.event.resourceUrl,
+						validator,
+					);
+					returnData.push({
+						json: {
+							calendarUrl: result.event.calendarUrl,
+							resourceUrl: result.event.resourceUrl,
+							uid: result.event.uid,
+							deleted: true,
+						},
+						pairedItem: { item: itemIndex },
+					});
+				} catch (error) {
+					const failure = eventDeleteFailure(error);
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: failure.message },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					if (failure.configuration) {
+						throw new NodeOperationError(this.getNode(), failure.message, { itemIndex });
+					}
+					throw eventDeleteApiError(this.getNode(), failure, itemIndex);
 				}
 				continue;
 			}

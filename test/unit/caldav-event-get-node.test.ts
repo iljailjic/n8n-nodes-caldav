@@ -214,7 +214,7 @@ describe('CalDAV Event Get metadata', () => {
 		});
 	});
 
-	it('keeps Get first while exposing additive Get Many for Event', () => {
+	it('keeps Get first while exposing additive Event operations', () => {
 		const operation = property(new CalDav().description.properties, 'operation', 'event');
 
 		expect(operation).toEqual({
@@ -236,6 +236,12 @@ describe('CalDAV Event Get metadata', () => {
 					description: 'Retrieve events in a date range',
 					action: 'Get many events',
 				},
+				{
+					name: 'Delete',
+					value: 'delete',
+					description: 'Delete a calendar event',
+					action: 'Delete a calendar event',
+				},
 			],
 			default: 'get',
 		});
@@ -253,7 +259,7 @@ describe('CalDAV Event Get metadata', () => {
 			displayOptions: {
 				show: {
 					resource: expect.arrayContaining(['calendar', 'event']),
-					operation: ['get', 'getMany'],
+					operation: ['get', 'getMany', 'delete'],
 				},
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
@@ -288,7 +294,7 @@ describe('CalDAV Event Get metadata', () => {
 				{ name: 'UID', value: 'uid' },
 			],
 			default: 'resourceUrl',
-			displayOptions: { show: { resource: ['event'], operation: ['get'] } },
+			displayOptions: { show: { resource: ['event'], operation: ['get', 'delete'] } },
 		});
 		const resourceUrl = property(properties, 'resourceUrl');
 		expect(resourceUrl).toMatchObject({
@@ -298,7 +304,11 @@ describe('CalDAV Event Get metadata', () => {
 			required: true,
 			default: '',
 			displayOptions: {
-				show: { resource: ['event'], operation: ['get'], identifierMode: ['resourceUrl'] },
+				show: {
+					resource: ['event'],
+					operation: ['get', 'delete'],
+					identifierMode: ['resourceUrl'],
+				},
 			},
 		});
 		expect(resourceUrl.noDataExpression).toBeUndefined();
@@ -310,7 +320,11 @@ describe('CalDAV Event Get metadata', () => {
 			required: true,
 			default: '',
 			displayOptions: {
-				show: { resource: ['event'], operation: ['get'], identifierMode: ['uid'] },
+				show: {
+					resource: ['event'],
+					operation: ['get', 'delete'],
+					identifierMode: ['uid'],
+				},
 			},
 		});
 		expect(uid.noDataExpression).toBeUndefined();
@@ -523,7 +537,7 @@ describe('CalDAV Event Get configuration validation', () => {
 
 	it.each([
 		['unsupported resource', { resource: 'contact' }],
-		['unsupported operation', { operation: 'delete' }],
+		['unsupported operation', { operation: 'archive' }],
 		['unsupported mode', { identifierMode: 'id' }],
 	] as const)('rejects %s before acquisition', async (_label, overrides) => {
 		const error = await captureError(
