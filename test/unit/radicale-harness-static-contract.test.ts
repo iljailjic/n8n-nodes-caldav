@@ -48,6 +48,31 @@ async function findFilesNamed(directory: string, name: string): Promise<string[]
 }
 
 describe('Radicale harness public commands and test discovery', () => {
+	it('pre-seeds the UID Update field before reading its exact caller ETag', async () => {
+		const integrationTest = await readRepositoryFile(
+			'test/integration/radicale-harness.integration.test.ts',
+		);
+		const scenarioStart = integrationTest.indexOf(
+			"it('updates by UID with an exact caller ETag through REPORT -> PUT -> GET'",
+		);
+		const scenarioEnd = integrationTest.indexOf(
+			"it('maps a stale caller ETag to one terminal conflict with no read-back'",
+			scenarioStart,
+		);
+		const scenario = integrationTest.slice(scenarioStart, scenarioEnd);
+		const seedPutIndex = scenario.indexOf("authenticatedFetch(run, eventUrl, 'PUT', seededBody)");
+		const etagCaptureIndex = scenario.indexOf("const suppliedEtag = before.headers.get('etag')");
+
+		expect(scenarioStart).toBeGreaterThanOrEqual(0);
+		expect(scenarioEnd).toBeGreaterThan(scenarioStart);
+		expect(scenario).toContain("'LOCATION:Before UID oracle'");
+		expect(scenario).toContain("value: 'UID oracle'");
+		expect(seedPutIndex).toBeGreaterThanOrEqual(0);
+		expect(etagCaptureIndex).toBeGreaterThanOrEqual(0);
+		expect(seedPutIndex).toBeLessThan(etagCaptureIndex);
+		expect(scenario).toContain("toEqual(['REPORT', 'PUT', 'GET'])");
+	});
+
 	it('keeps npm test as the aggregate unit-plus-integration CI entry point', async () => {
 		const scripts = (await readPackageManifest()).scripts ?? {};
 

@@ -249,6 +249,12 @@ describe('CalDAV Event Get metadata', () => {
 					action: 'Get many events',
 				},
 				{
+					name: 'Update',
+					value: 'update',
+					description: 'Update a calendar event',
+					action: 'Update a calendar event',
+				},
+				{
 					name: 'Delete',
 					value: 'delete',
 					description: 'Delete a calendar event',
@@ -271,7 +277,7 @@ describe('CalDAV Event Get metadata', () => {
 			displayOptions: {
 				show: {
 					resource: expect.arrayContaining(['calendar', 'event']),
-					operation: ['create', 'get', 'getMany', 'delete'],
+					operation: ['create', 'get', 'getMany', 'update', 'delete'],
 				},
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
@@ -306,7 +312,9 @@ describe('CalDAV Event Get metadata', () => {
 				{ name: 'UID', value: 'uid' },
 			],
 			default: 'resourceUrl',
-			displayOptions: { show: { resource: ['event'], operation: ['get', 'delete'] } },
+			displayOptions: {
+				show: { resource: ['event'], operation: ['get', 'update', 'delete'] },
+			},
 		});
 		const resourceUrl = property(properties, 'resourceUrl');
 		expect(resourceUrl).toMatchObject({
@@ -318,7 +326,7 @@ describe('CalDAV Event Get metadata', () => {
 			displayOptions: {
 				show: {
 					resource: ['event'],
-					operation: ['get', 'delete'],
+					operation: ['get', 'update', 'delete'],
 					identifierMode: ['resourceUrl'],
 				},
 			},
@@ -334,7 +342,7 @@ describe('CalDAV Event Get metadata', () => {
 			displayOptions: {
 				show: {
 					resource: ['event'],
-					operation: ['get', 'delete'],
+					operation: ['get', 'update', 'delete'],
 					identifierMode: ['uid'],
 				},
 			},

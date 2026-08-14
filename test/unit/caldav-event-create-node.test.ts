@@ -180,6 +180,12 @@ describe('CalDAV Event Create metadata', () => {
 					action: 'Get many events',
 				},
 				{
+					name: 'Update',
+					value: 'update',
+					description: 'Update a calendar event',
+					action: 'Update a calendar event',
+				},
+				{
 					name: 'Delete',
 					value: 'delete',
 					description: 'Delete a calendar event',

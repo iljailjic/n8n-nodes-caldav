@@ -192,6 +192,7 @@ describe('Calendar Get Many node description', () => {
 			'resourceUrl',
 			'uid',
 			'etag',
+			'fieldsToUpdate',
 		]);
 
 		expect(property(description, 'resource')).toMatchObject({
@@ -239,7 +240,7 @@ describe('Calendar Get Many node description', () => {
 			displayOptions: {
 				show: {
 					resource: ['calendar', 'event'],
-					operation: ['create', 'get', 'getMany', 'delete'],
+					operation: ['create', 'get', 'getMany', 'update', 'delete'],
 				},
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},

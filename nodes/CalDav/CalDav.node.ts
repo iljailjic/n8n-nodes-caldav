@@ -41,10 +41,18 @@ import {
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
 } from './events/resolveByUid';
+import {
+	CalDavCalendarEventUpdateError,
+	CalendarEventUpdateFailureCode,
+	updateCalendarEvent,
+} from './events/update';
+import type { CalendarEventUpdateInput } from './events/update';
 import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
 import { CalDavCalendarEventReadModelError } from './icalendar/eventReadModel';
 import type { CalendarEvent } from './icalendar/eventReadModel';
 import { CalDavICalendarParseError } from './icalendar/parser';
+import { CalDavCalendarEventPatchError, CalendarEventPatchErrorCode } from './icalendar/patcher';
+import type { CalendarEventPatch, OptionalFieldPatch } from './icalendar/patcher';
 import {
 	CalDavICalendarSerializeError,
 	CalDavICalendarSerializeErrorCode,
@@ -73,6 +81,7 @@ const EVENT_RESOURCE = 'event';
 const GET_OPERATION = 'get';
 const GET_MANY_OPERATION = 'getMany';
 const CREATE_OPERATION = 'create';
+const UPDATE_OPERATION = 'update';
 const DELETE_OPERATION = 'delete';
 const RESOURCE_URL_IDENTIFIER_MODE = 'resourceUrl';
 const UID_IDENTIFIER_MODE = 'uid';
@@ -200,6 +209,47 @@ const EVENT_CREATE_MESSAGES = {
 	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event creation response.',
 	PARTIAL_SUCCESS: 'The event was created, but its required ETag could not be retrieved.',
 	GENERIC: 'Event Create failed.',
+} as const;
+
+const EVENT_UPDATE_MESSAGES = {
+	INVALID_CALENDAR_URL:
+		'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
+	INVALID_RESOURCE_URL:
+		'The Event Resource URL is invalid or does not belong to the selected calendar.',
+	INVALID_UID: 'UID must be a non-empty valid iCalendar text value.',
+	INVALID_ETAG: 'ETag must be a string.',
+	INVALID_FIELDS: 'Fields to Update must be an object.',
+	NO_CHANGES: 'The calendar event patch does not contain any changes.',
+	INVALID_START: 'Start must be a valid date and time with whole-second precision.',
+	INVALID_END: 'End must be a valid date and time with whole-second precision.',
+	INVALID_RANGE: 'End must be later than Start.',
+	INVALID_SUMMARY: 'Summary must be a valid iCalendar text value.',
+	INVALID_DESCRIPTION: 'Description must be a valid iCalendar text value.',
+	INVALID_LOCATION: 'Location must be a valid iCalendar text value.',
+	INVALID_URL: 'URL must be a valid absolute URI without a fragment.',
+	UNSUPPORTED_TIME: 'The calendar event uses an unsupported time representation for this patch.',
+	INCOMPATIBLE_PARAMETERS:
+		'The calendar event property parameters are incompatible with this patch.',
+	AMBIGUOUS_PROPERTY: 'The calendar event contains an ambiguous property.',
+	INVALID_METADATA: 'The calendar event revision metadata is invalid.',
+	AUTHENTICATION: 'Event Update authentication failed.',
+	AUTHORIZATION: 'Event Update is not authorized.',
+	NOT_FOUND: 'The calendar event was not found.',
+	AMBIGUOUS:
+		'More than one calendar event with the requested UID was found in the selected calendar.',
+	MISSING_ETAG: 'The calendar event does not provide an ETag required for a safe mutation.',
+	CONCURRENCY: 'The calendar event changed before the mutation could be applied.',
+	TLS: 'TLS certificate validation failed.',
+	TIMEOUT: 'Event Update timed out.',
+	RESPONSE_LIMIT: 'The Event Update response exceeded the size limit.',
+	REDIRECT: 'The CalDAV server returned an unsafe or invalid redirect.',
+	UNTRUSTED: 'The Event Resource URL targets an untrusted endpoint.',
+	NETWORK: 'The CalDAV server could not be reached.',
+	MALFORMED_ICALENDAR: 'The CalDAV server returned malformed iCalendar event data.',
+	UNSUPPORTED_EVENT: 'The calendar event uses an unsupported event representation.',
+	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event update response.',
+	CONFIRMATION: 'The event was updated, but its current state could not be verified.',
+	GENERIC: 'Event Update failed.',
 } as const;
 
 interface SafeNodeFailure {
@@ -593,6 +643,149 @@ function eventCreateFailure(error: unknown): EventCreateFailure {
 	return { message: EVENT_CREATE_MESSAGES.GENERIC, configuration: false };
 }
 
+function eventUpdateTransportFailure(error: CalDavTransportError): SafeNodeFailure {
+	switch (error.code) {
+		case CalDavTransportErrorCode.AUTHENTICATION_FAILED:
+			return apiFailure(EVENT_UPDATE_MESSAGES.AUTHENTICATION, error);
+		case CalDavTransportErrorCode.AUTHORIZATION_FAILED:
+			return apiFailure(EVENT_UPDATE_MESSAGES.AUTHORIZATION, error);
+		case CalDavTransportErrorCode.NOT_FOUND:
+			return apiFailure(EVENT_UPDATE_MESSAGES.NOT_FOUND, error);
+		case CalDavTransportErrorCode.PRECONDITION_FAILED:
+			return apiFailure(EVENT_UPDATE_MESSAGES.CONCURRENCY, error);
+		case CalDavTransportErrorCode.TLS_VALIDATION_FAILED:
+			return apiFailure(EVENT_UPDATE_MESSAGES.TLS, error);
+		case CalDavTransportErrorCode.TIMEOUT:
+			return apiFailure(EVENT_UPDATE_MESSAGES.TIMEOUT, error);
+		case CalDavTransportErrorCode.RESPONSE_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_UPDATE_MESSAGES.RESPONSE_LIMIT, error);
+		case CalDavTransportErrorCode.INVALID_REDIRECT:
+		case CalDavTransportErrorCode.INSECURE_REDIRECT:
+		case CalDavTransportErrorCode.REDIRECT_LOOP:
+		case CalDavTransportErrorCode.REDIRECT_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_UPDATE_MESSAGES.REDIRECT, error);
+		case CalDavTransportErrorCode.UNTRUSTED_TARGET:
+			return apiFailure(EVENT_UPDATE_MESSAGES.UNTRUSTED, error);
+		case CalDavTransportErrorCode.NETWORK_ERROR:
+			return apiFailure(EVENT_UPDATE_MESSAGES.NETWORK, error);
+		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
+			return apiFailure(EVENT_UPDATE_MESSAGES.INVALID_RESPONSE, error);
+	}
+}
+
+interface EventUpdateFailure extends SafeNodeFailure {
+	readonly configuration: boolean;
+}
+
+function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpdateFailure {
+	switch (error.code) {
+		case CalendarEventPatchErrorCode.NO_CHANGES:
+			return { message: EVENT_UPDATE_MESSAGES.NO_CHANGES, configuration: true };
+		case CalendarEventPatchErrorCode.INVALID_TIME_RANGE:
+			return { message: EVENT_UPDATE_MESSAGES.INVALID_RANGE, configuration: true };
+		case CalendarEventPatchErrorCode.INVALID_DATE:
+			return {
+				message:
+					error.field === 'start'
+						? EVENT_UPDATE_MESSAGES.INVALID_START
+						: error.field === 'end'
+							? EVENT_UPDATE_MESSAGES.INVALID_END
+							: EVENT_UPDATE_MESSAGES.GENERIC,
+				configuration: error.field === 'start' || error.field === 'end',
+			};
+		case CalendarEventPatchErrorCode.INVALID_TEXT:
+			return {
+				message:
+					error.field === 'summary'
+						? EVENT_UPDATE_MESSAGES.INVALID_SUMMARY
+						: error.field === 'description'
+							? EVENT_UPDATE_MESSAGES.INVALID_DESCRIPTION
+							: EVENT_UPDATE_MESSAGES.INVALID_LOCATION,
+				configuration: true,
+			};
+		case CalendarEventPatchErrorCode.INVALID_URI:
+			return { message: EVENT_UPDATE_MESSAGES.INVALID_URL, configuration: true };
+		case CalendarEventPatchErrorCode.UNSUPPORTED_TIME:
+			return { message: EVENT_UPDATE_MESSAGES.UNSUPPORTED_TIME, configuration: false };
+		case CalendarEventPatchErrorCode.INCOMPATIBLE_PARAMETERS:
+			return { message: EVENT_UPDATE_MESSAGES.INCOMPATIBLE_PARAMETERS, configuration: false };
+		case CalendarEventPatchErrorCode.AMBIGUOUS_PROPERTY:
+			return { message: EVENT_UPDATE_MESSAGES.AMBIGUOUS_PROPERTY, configuration: false };
+		case CalendarEventPatchErrorCode.INVALID_METADATA:
+			return { message: EVENT_UPDATE_MESSAGES.INVALID_METADATA, configuration: false };
+		case CalendarEventPatchErrorCode.INVALID_INPUT:
+		case CalendarEventPatchErrorCode.UNKNOWN_PATCH_FIELD:
+		case CalendarEventPatchErrorCode.IMMUTABLE_FIELD:
+		case CalendarEventPatchErrorCode.INVALID_CONTEXT:
+			return { message: EVENT_UPDATE_MESSAGES.GENERIC, configuration: false };
+	}
+}
+
+function eventUpdateFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof CalDavCalendarEventUpdateError) {
+		if (error.code === CalendarEventUpdateFailureCode.CONFIRMATION_FAILED) {
+			return {
+				message: EVENT_UPDATE_MESSAGES.CONFIRMATION,
+				configuration: false,
+				...(error.statusCode === undefined ? {} : { httpCode: String(error.statusCode) }),
+			};
+		}
+		return { message: EVENT_UPDATE_MESSAGES.GENERIC, configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventPatchError) return eventUpdatePatchFailure(error);
+	if (
+		error instanceof CalDavCalendarEventResourceGetError &&
+		error.code === CalendarEventResourceGetFailureCode.OUTSIDE_CALENDAR
+	) {
+		return { message: EVENT_UPDATE_MESSAGES.INVALID_RESOURCE_URL, configuration: true };
+	}
+	if (error instanceof XmlBuildError && error.code === 'INVALID_UID') {
+		return { message: EVENT_UPDATE_MESSAGES.INVALID_UID, configuration: true };
+	}
+	if (error instanceof CalDavTransportError) {
+		return { ...eventUpdateTransportFailure(error), configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventUidResolutionError) {
+		if (error.code === CalendarEventUidResolutionFailureCode.NOT_FOUND) {
+			return { message: EVENT_UPDATE_MESSAGES.NOT_FOUND, configuration: false };
+		}
+		if (error.code === CalendarEventUidResolutionFailureCode.AMBIGUOUS) {
+			return { message: EVENT_UPDATE_MESSAGES.AMBIGUOUS, configuration: false };
+		}
+		return { message: EVENT_UPDATE_MESSAGES.INVALID_RESPONSE, configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventMutationError) {
+		switch (error.code) {
+			case CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT:
+				return { message: EVENT_UPDATE_MESSAGES.CONCURRENCY, configuration: false };
+			case CalendarEventMutationFailureCode.MISSING_ETAG:
+				return { message: EVENT_UPDATE_MESSAGES.MISSING_ETAG, configuration: false };
+			case CalendarEventMutationFailureCode.OUTSIDE_CALENDAR:
+			case CalendarEventMutationFailureCode.CREATE_CONFLICT:
+			case CalendarEventMutationFailureCode.INVALID_LOCATION:
+			case CalendarEventMutationFailureCode.INVALID_RESPONSE:
+				return { message: EVENT_UPDATE_MESSAGES.INVALID_RESPONSE, configuration: false };
+		}
+	}
+	if (error instanceof CalDavICalendarParseError) {
+		return { message: EVENT_UPDATE_MESSAGES.MALFORMED_ICALENDAR, configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventReadModelError) {
+		return { message: EVENT_UPDATE_MESSAGES.UNSUPPORTED_EVENT, configuration: false };
+	}
+	if (
+		error instanceof CalDavCalendarEventResourceGetError ||
+		error instanceof CalDavICalendarSerializeError ||
+		error instanceof CalDavXmlParseError ||
+		error instanceof CalDavXmlProtocolError ||
+		error instanceof CalDavUrlValidationError ||
+		error instanceof XmlBuildError
+	) {
+		return { message: EVENT_UPDATE_MESSAGES.INVALID_RESPONSE, configuration: false };
+	}
+	return { message: EVENT_UPDATE_MESSAGES.GENERIC, configuration: false };
+}
+
 function eventDeleteValidator(
 	uiEtag: string | undefined,
 	serverEtag: string | undefined,
@@ -903,6 +1096,203 @@ function eventCreateInput(
 		...(descriptionField.present ? { description: descriptionField.value as string } : {}),
 		...(locationField.present ? { location: locationField.value as string } : {}),
 		...(urlField.present ? { url: urlField.value as string } : {}),
+	});
+}
+
+type OptionalPatchExtraction =
+	{ readonly patch: OptionalFieldPatch<string> } | { readonly error: string };
+
+function optionalUpdatePatch(
+	value: unknown,
+	invalidValueMessage: string,
+	validateValue: (value: string) => boolean,
+): OptionalPatchExtraction {
+	try {
+		if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+			return { error: invalidValueMessage };
+		}
+		const outerDescriptors = Object.getOwnPropertyDescriptors(value);
+		if (
+			Object.getOwnPropertySymbols(value).length !== 0 ||
+			Object.keys(outerDescriptors).some((key) => key !== 'change') ||
+			outerDescriptors.change === undefined ||
+			!outerDescriptors.change.enumerable ||
+			!('value' in outerDescriptors.change)
+		) {
+			return { error: invalidValueMessage };
+		}
+		const change = outerDescriptors.change.value as unknown;
+		if (typeof change !== 'object' || change === null || Array.isArray(change)) {
+			return { error: invalidValueMessage };
+		}
+		const descriptors = Object.getOwnPropertyDescriptors(change);
+		if (
+			Object.getOwnPropertySymbols(change).length !== 0 ||
+			Object.keys(descriptors).some((key) => key !== 'action' && key !== 'value') ||
+			descriptors.action === undefined ||
+			!descriptors.action.enumerable ||
+			!('value' in descriptors.action)
+		) {
+			return { error: invalidValueMessage };
+		}
+		const action = descriptors.action.value;
+		if (action === 'remove') return { patch: { kind: 'remove' } };
+		const valueDescriptor = descriptors.value;
+		if (
+			action !== 'set' ||
+			valueDescriptor === undefined ||
+			!valueDescriptor.enumerable ||
+			!('value' in valueDescriptor) ||
+			typeof valueDescriptor.value !== 'string' ||
+			!validateValue(valueDescriptor.value)
+		) {
+			return { error: invalidValueMessage };
+		}
+		return { patch: { kind: 'set', value: valueDescriptor.value } };
+	} catch {
+		return { error: invalidValueMessage };
+	}
+}
+
+function eventUpdatePatch(value: unknown): CalendarEventPatch | string {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
+	}
+
+	let descriptors: Readonly<Record<string, PropertyDescriptor>>;
+	try {
+		if (Object.getOwnPropertySymbols(value).length !== 0) {
+			return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
+		}
+		descriptors = Object.getOwnPropertyDescriptors(value);
+	} catch {
+		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
+	}
+	const keys = Object.keys(descriptors);
+	if (keys.length === 0) return EVENT_UPDATE_MESSAGES.NO_CHANGES;
+	const allowed = new Set(['start', 'end', 'summary', 'description', 'location', 'url']);
+	if (
+		keys.some((key) => {
+			const descriptor = descriptors[key]!;
+			return !allowed.has(key) || !descriptor.enumerable || !('value' in descriptor);
+		})
+	) {
+		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
+	}
+
+	const patch: {
+		start?: { readonly kind: 'set'; readonly value: Date };
+		end?: { readonly kind: 'set'; readonly value: Date };
+		summary?: { readonly kind: 'set'; readonly value: string };
+		description?: OptionalFieldPatch<string>;
+		location?: OptionalFieldPatch<string>;
+		url?: OptionalFieldPatch<string>;
+	} = {};
+	if (descriptors.start !== undefined) {
+		const start = createDateTimeInstant(descriptors.start.value);
+		if (start === undefined) return EVENT_UPDATE_MESSAGES.INVALID_START;
+		patch.start = { kind: 'set', value: start };
+	}
+	if (descriptors.end !== undefined) {
+		const end = createDateTimeInstant(descriptors.end.value);
+		if (end === undefined) return EVENT_UPDATE_MESSAGES.INVALID_END;
+		patch.end = { kind: 'set', value: end };
+	}
+	if (descriptors.summary !== undefined) {
+		const summary = descriptors.summary.value;
+		if (typeof summary !== 'string' || !isValidICalendarText(summary)) {
+			return EVENT_UPDATE_MESSAGES.INVALID_SUMMARY;
+		}
+		patch.summary = { kind: 'set', value: summary };
+	}
+	if (descriptors.description !== undefined) {
+		const extracted = optionalUpdatePatch(
+			descriptors.description.value,
+			EVENT_UPDATE_MESSAGES.INVALID_DESCRIPTION,
+			isValidICalendarText,
+		);
+		if ('error' in extracted) return extracted.error;
+		patch.description = extracted.patch;
+	}
+	if (descriptors.location !== undefined) {
+		const extracted = optionalUpdatePatch(
+			descriptors.location.value,
+			EVENT_UPDATE_MESSAGES.INVALID_LOCATION,
+			isValidICalendarText,
+		);
+		if ('error' in extracted) return extracted.error;
+		patch.location = extracted.patch;
+	}
+	if (descriptors.url !== undefined) {
+		const extracted = optionalUpdatePatch(
+			descriptors.url.value,
+			EVENT_UPDATE_MESSAGES.INVALID_URL,
+			isValidCreateUrl,
+		);
+		if ('error' in extracted) return extracted.error;
+		patch.url = extracted.patch;
+	}
+	return Object.freeze(patch);
+}
+
+function eventUpdateInput(
+	execution: IExecuteFunctions,
+	itemIndex: number,
+): CalendarEventUpdateInput | string {
+	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
+	if (calendarUrl === undefined) return EVENT_UPDATE_MESSAGES.INVALID_CALENDAR_URL;
+
+	const identifierMode = nodeParameter(execution, 'identifierMode', itemIndex);
+	if (identifierMode !== RESOURCE_URL_IDENTIFIER_MODE && identifierMode !== UID_IDENTIFIER_MODE) {
+		return UNSUPPORTED_OPERATION_MESSAGE;
+	}
+	const identifierValue = nodeParameter(execution, identifierMode, itemIndex);
+	let identifier: CalendarEventUpdateInput['identifier'];
+	if (identifierMode === RESOURCE_URL_IDENTIFIER_MODE) {
+		try {
+			if (typeof identifierValue !== 'string' || identifierValue.length === 0) {
+				return EVENT_UPDATE_MESSAGES.INVALID_RESOURCE_URL;
+			}
+			identifier = {
+				kind: 'resourceUrl',
+				resourceUrl: validateAbsoluteHttpUrl(identifierValue),
+			};
+		} catch {
+			return EVENT_UPDATE_MESSAGES.INVALID_RESOURCE_URL;
+		}
+	} else {
+		if (
+			typeof identifierValue !== 'string' ||
+			identifierValue.length === 0 ||
+			!isValidXmlText(identifierValue)
+		) {
+			return EVENT_UPDATE_MESSAGES.INVALID_UID;
+		}
+		identifier = { kind: 'uid', uid: identifierValue };
+	}
+
+	let etag: unknown;
+	try {
+		etag = execution.getNodeParameter('etag', itemIndex);
+	} catch {
+		return EVENT_UPDATE_MESSAGES.INVALID_ETAG;
+	}
+	if (etag !== undefined && typeof etag !== 'string') return EVENT_UPDATE_MESSAGES.INVALID_ETAG;
+
+	let fieldsToUpdate: unknown;
+	try {
+		fieldsToUpdate = execution.getNodeParameter('fieldsToUpdate', itemIndex);
+	} catch {
+		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
+	}
+	const patch = eventUpdatePatch(fieldsToUpdate);
+	if (typeof patch === 'string') return patch;
+
+	return Object.freeze({
+		calendarUrl,
+		identifier,
+		patch,
+		...(typeof etag === 'string' && etag.length > 0 ? { etag } : {}),
 	});
 }
 
@@ -1233,6 +1623,12 @@ export class CalDav implements INodeType {
 						action: 'Get many events',
 					},
 					{
+						name: 'Update',
+						value: UPDATE_OPERATION,
+						description: 'Update a calendar event',
+						action: 'Update a calendar event',
+					},
+					{
 						name: 'Delete',
 						value: DELETE_OPERATION,
 						description: 'Delete a calendar event',
@@ -1275,7 +1671,13 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: {
 						resource: [CALENDAR_RESOURCE, EVENT_RESOURCE],
-						operation: [CREATE_OPERATION, GET_OPERATION, GET_MANY_OPERATION, DELETE_OPERATION],
+						operation: [
+							CREATE_OPERATION,
+							GET_OPERATION,
+							GET_MANY_OPERATION,
+							UPDATE_OPERATION,
+							DELETE_OPERATION,
+						],
 					},
 					hide: {
 						resource: [CALENDAR_RESOURCE],
@@ -1432,7 +1834,7 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: {
 						resource: [EVENT_RESOURCE],
-						operation: [GET_OPERATION, DELETE_OPERATION],
+						operation: [GET_OPERATION, UPDATE_OPERATION, DELETE_OPERATION],
 					},
 				},
 			},
@@ -1445,7 +1847,7 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: {
 						resource: [EVENT_RESOURCE],
-						operation: [GET_OPERATION, DELETE_OPERATION],
+						operation: [GET_OPERATION, UPDATE_OPERATION, DELETE_OPERATION],
 						identifierMode: [RESOURCE_URL_IDENTIFIER_MODE],
 					},
 				},
@@ -1459,7 +1861,7 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: {
 						resource: [EVENT_RESOURCE],
-						operation: [GET_OPERATION, DELETE_OPERATION],
+						operation: [GET_OPERATION, UPDATE_OPERATION, DELETE_OPERATION],
 						identifierMode: [UID_IDENTIFIER_MODE],
 					},
 				},
@@ -1470,8 +1872,149 @@ export class CalDav implements INodeType {
 				type: 'string',
 				default: '',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [DELETE_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPDATE_OPERATION, DELETE_OPERATION],
+					},
 				},
+			},
+			{
+				displayName: 'Fields to Update',
+				name: 'fieldsToUpdate',
+				type: 'collection',
+				placeholder: 'Add Field',
+				default: {},
+				required: true,
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [UPDATE_OPERATION] },
+				},
+				// eslint-disable-next-line n8n-nodes-base/node-param-collection-type-unsorted-items -- issue-37-contract-r2 requires Start, End, Summary, Description, Location, URL order.
+				options: [
+					{
+						displayName: 'Start',
+						name: 'start',
+						type: 'dateTime',
+						default: '',
+					},
+					{
+						displayName: 'End',
+						name: 'end',
+						type: 'dateTime',
+						default: '',
+					},
+					{
+						displayName: 'Summary',
+						name: 'summary',
+						type: 'string',
+						default: '',
+					},
+					{
+						displayName: 'Description',
+						name: 'description',
+						type: 'fixedCollection',
+						typeOptions: { multipleValues: false },
+						default: {},
+						required: true,
+						options: [
+							{
+								displayName: 'Change',
+								name: 'change',
+								values: [
+									{
+										displayName: 'Action',
+										name: 'action',
+										type: 'options',
+										required: true,
+										noDataExpression: true,
+										options: [
+											{ name: 'Set', value: 'set' },
+											{ name: 'Remove', value: 'remove' },
+										],
+										default: 'set',
+									},
+									{
+										displayName: 'Value',
+										name: 'value',
+										type: 'string',
+										typeOptions: { rows: 4 },
+										default: '',
+										displayOptions: { show: { action: ['set'] } },
+									},
+								],
+							},
+						],
+					},
+					{
+						displayName: 'Location',
+						name: 'location',
+						type: 'fixedCollection',
+						typeOptions: { multipleValues: false },
+						default: {},
+						required: true,
+						options: [
+							{
+								displayName: 'Change',
+								name: 'change',
+								values: [
+									{
+										displayName: 'Action',
+										name: 'action',
+										type: 'options',
+										required: true,
+										noDataExpression: true,
+										options: [
+											{ name: 'Set', value: 'set' },
+											{ name: 'Remove', value: 'remove' },
+										],
+										default: 'set',
+									},
+									{
+										displayName: 'Value',
+										name: 'value',
+										type: 'string',
+										default: '',
+										displayOptions: { show: { action: ['set'] } },
+									},
+								],
+							},
+						],
+					},
+					{
+						displayName: 'URL',
+						name: 'url',
+						type: 'fixedCollection',
+						typeOptions: { multipleValues: false },
+						default: {},
+						required: true,
+						options: [
+							{
+								displayName: 'Change',
+								name: 'change',
+								values: [
+									{
+										displayName: 'Action',
+										name: 'action',
+										type: 'options',
+										required: true,
+										noDataExpression: true,
+										options: [
+											{ name: 'Set', value: 'set' },
+											{ name: 'Remove', value: 'remove' },
+										],
+										default: 'set',
+									},
+									{
+										displayName: 'Value',
+										name: 'value',
+										type: 'string',
+										default: '',
+										displayOptions: { show: { action: ['set'] } },
+									},
+								],
+							},
+						],
+					},
+				],
 			},
 		],
 	};
@@ -1507,12 +2050,14 @@ export class CalDav implements INodeType {
 			const isEventCreate = resource === EVENT_RESOURCE && operation === CREATE_OPERATION;
 			const isEventGet = resource === EVENT_RESOURCE && operation === GET_OPERATION;
 			const isEventGetMany = resource === EVENT_RESOURCE && operation === GET_MANY_OPERATION;
+			const isEventUpdate = resource === EVENT_RESOURCE && operation === UPDATE_OPERATION;
 			const isEventDelete = resource === EVENT_RESOURCE && operation === DELETE_OPERATION;
 			if (
 				!isCalendarOperation &&
 				!isEventCreate &&
 				!isEventGet &&
 				!isEventGetMany &&
+				!isEventUpdate &&
 				!isEventDelete
 			) {
 				if (this.continueOnFail()) {
@@ -1600,6 +2145,39 @@ export class CalDav implements INodeType {
 							...(failure.httpCode === undefined ? {} : { httpCode: failure.httpCode }),
 						},
 					);
+				}
+				continue;
+			}
+
+			if (isEventUpdate) {
+				const input = eventUpdateInput(this, itemIndex);
+				if (typeof input === 'string') {
+					if (this.continueOnFail()) {
+						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), input, { itemIndex });
+				}
+
+				try {
+					if (getTransport === undefined) {
+						getTransport = await createN8nCalDavTransport(this);
+					}
+					const updated = await updateCalendarEvent(getTransport, input, () => new Date());
+					returnData.push({ json: eventJson(updated), pairedItem: { item: itemIndex } });
+				} catch (error) {
+					const failure = eventUpdateFailure(error);
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: failure.message },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					if (failure.configuration) {
+						throw new NodeOperationError(this.getNode(), failure.message, { itemIndex });
+					}
+					throw eventDeleteApiError(this.getNode(), failure, itemIndex);
 				}
 				continue;
 			}
