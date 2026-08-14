@@ -143,6 +143,11 @@ describe('CalDAV Calendar Get UI', () => {
 			'returnAll',
 			'limit',
 			'calendar',
+			'uid',
+			'start',
+			'end',
+			'summary',
+			'additionalFields',
 			'start',
 			'end',
 			'returnAll',
@@ -154,7 +159,16 @@ describe('CalDAV Calendar Get UI', () => {
 		]);
 		const calendarProperties = node.description.properties.filter(
 			(property) =>
-				!['start', 'end', 'identifierMode', 'resourceUrl', 'uid', 'etag'].includes(property.name) &&
+				![
+					'start',
+					'end',
+					'summary',
+					'additionalFields',
+					'identifierMode',
+					'resourceUrl',
+					'uid',
+					'etag',
+				].includes(property.name) &&
 				(property.name !== 'returnAll' ||
 					property.displayOptions?.show?.resource?.includes('calendar')) &&
 				(property.name !== 'limit' ||
@@ -230,7 +244,7 @@ describe('CalDAV Calendar Get UI', () => {
 				displayOptions: {
 					show: {
 						resource: ['calendar', 'event'],
-						operation: ['get', 'getMany', 'delete'],
+						operation: ['create', 'get', 'getMany', 'delete'],
 					},
 					hide: { resource: ['calendar'], operation: ['getMany'] },
 				},

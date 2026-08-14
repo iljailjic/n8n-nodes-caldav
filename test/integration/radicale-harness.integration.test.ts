@@ -17,6 +17,7 @@ import { getCalendarCollection } from '../../nodes/CalDav/actions/calendar/get';
 import { discoverCalendarHome } from '../../nodes/CalDav/discovery/calendarHome';
 import { discoverCalendarCollections } from '../../nodes/CalDav/discovery/calendarCollections';
 import { discoverCurrentUserPrincipal } from '../../nodes/CalDav/discovery/currentUserPrincipal';
+import { createCalendarEvent } from '../../nodes/CalDav/events/create';
 import { getCalendarEventByResourceUrl } from '../../nodes/CalDav/events/getByResourceUrl';
 import {
 	CalendarEventMutationFailureCode,
@@ -267,6 +268,62 @@ interface EventDeleteIntegrationParameters {
 	readonly resourceUrl?: string;
 	readonly uid?: string;
 	readonly etag?: unknown;
+}
+
+interface EventCreateIntegrationParameters {
+	readonly calendar: unknown;
+	readonly uid: unknown;
+	readonly start: unknown;
+	readonly end: unknown;
+	readonly summary: unknown;
+	readonly additionalFields: unknown;
+}
+
+function eventCreateContext(
+	run: RadicaleRun,
+	parameters: EventCreateIntegrationParameters,
+): {
+	readonly context: IExecuteFunctions;
+	readonly requests: ReturnType<typeof vi.fn>;
+} {
+	const adapter = requestAdapter(run);
+	const requests = vi.fn(
+		async (options: N8nCalDavRequestOptions) => await adapter.request(options),
+	);
+	const values: Readonly<Record<string, unknown>> = {
+		resource: 'event',
+		operation: 'create',
+		calendar: parameters.calendar,
+		uid: parameters.uid,
+		start: parameters.start,
+		end: parameters.end,
+		summary: parameters.summary,
+		additionalFields: parameters.additionalFields,
+	};
+	const context = {
+		getInputData: vi.fn().mockReturnValue([{ json: { oracle: 'event-create' } }]),
+		getNodeParameter: vi.fn((name: string, itemIndex: number) => {
+			expect(itemIndex).toBe(0);
+			if (!Object.hasOwn(values, name)) {
+				throw new Error(`Unexpected active parameter read: ${name}.`);
+			}
+			return values[name];
+		}),
+		getCredentials: vi.fn().mockResolvedValue({
+			serverUrl: run.endpoint,
+			username: run.username,
+			password: run.password,
+			allowUnauthorizedCerts: false,
+		}),
+		continueOnFail: vi.fn().mockReturnValue(false),
+		getNode: vi.fn().mockReturnValue(workflowNode()),
+		helpers: {
+			async httpRequestWithAuthentication(_credentialType: string, options: IHttpRequestOptions) {
+				return await requests(options as N8nCalDavRequestOptions);
+			},
+		},
+	};
+	return { context: context as unknown as IExecuteFunctions, requests };
 }
 
 function eventDeleteContext(
@@ -815,6 +872,148 @@ describe('Radicale calendar-event UID resolution', () => {
 			const serialized = JSON.stringify({ directResult, uidResult });
 			expect(serialized).not.toContain(run.password);
 			expect(serialized).not.toContain(basicAuthorization(run));
+		} finally {
+			await teardownRun(run);
+		}
+	});
+});
+
+describe('Radicale collision-safe Event Create', () => {
+	it('creates and reads back Unicode data, then preserves it across a same-UID collision', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'node-create-unicode', 'Create Unicode'),
+			);
+			const adapter = requestAdapter(run);
+			const requests = vi.fn(
+				async (options: N8nCalDavRequestOptions) => await adapter.request(options),
+			);
+			const inspectedTransport = createCalDavTransport(run.endpoint, { request: requests });
+			const uid = ` opaque/../🚀-${run.identity} `;
+			const created = await createCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					start: new Date('2040-02-03T10:00:00Z'),
+					end: new Date('2040-02-03T11:00:00Z'),
+					summary: 'Žluťoučký Create 🚀',
+					description: '',
+					location: 'Praha; Brno',
+					url: 'urn:example:radicale:create',
+				},
+				() => new Date('2040-02-01T00:00:00.999Z'),
+			);
+			const expectedResourceUrl = new URL(
+				`${Buffer.from(uid, 'utf8').toString('base64url')}.ics`,
+				calendarUrl,
+			).href;
+			expect(created).toEqual({
+				calendarUrl,
+				resourceUrl: expectedResourceUrl,
+				etag: expect.any(String),
+				uid,
+				summary: 'Žluťoučký Create 🚀',
+				description: '',
+				location: 'Praha; Brno',
+				url: 'urn:example:radicale:create',
+				start: '2040-02-03T10:00:00Z',
+				end: '2040-02-03T11:00:00Z',
+			});
+			const readBack = await getCalendarEventByResourceUrl(
+				transport(run),
+				calendarUrl,
+				validateAbsoluteHttpUrl(expectedResourceUrl),
+			);
+			expect(readBack.event).toMatchObject({
+				uid,
+				summary: 'Žluťoučký Create 🚀',
+				description: '',
+				location: 'Praha; Brno',
+				url: 'urn:example:radicale:create',
+			});
+
+			await expect(
+				createCalendarEvent(
+					inspectedTransport,
+					{
+						calendarUrl,
+						uid,
+						start: new Date('2040-02-03T12:00:00Z'),
+						end: new Date('2040-02-03T13:00:00Z'),
+						summary: 'Forbidden collision overwrite',
+					},
+					() => new Date('2040-02-01T00:00:01Z'),
+				),
+			).rejects.toMatchObject({
+				code: CalendarEventMutationFailureCode.CREATE_CONFLICT,
+			});
+			const retained = await authenticatedFetch(run, expectedResourceUrl);
+			expect(retained.status).toBe(200);
+			const retainedBody = await retained.text();
+			expect(retainedBody).toContain('SUMMARY:Žluťoučký Create 🚀');
+			expect(retainedBody).not.toContain('Forbidden collision overwrite');
+			const putRequests = requests.mock.calls
+				.map(([options]) => options as N8nCalDavRequestOptions)
+				.filter((options) => options.method === 'PUT');
+			expect(putRequests).toHaveLength(2);
+			for (const request of putRequests) {
+				expect(request).toMatchObject({
+					url: expectedResourceUrl,
+					headers: {
+						'If-None-Match': '*',
+						'Content-Type': 'text/calendar; charset=utf-8',
+					},
+				});
+			}
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('maps read-only denial and rejects invalid input before any live request', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = await createSyntheticCalendar(
+				run,
+				'node-create-read-only',
+				'Create Read Only',
+			);
+			await harness.makeCalendarReadOnly(run, calendarUrl);
+			const readOnly = eventCreateContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				uid: `read-only-${run.identity}`,
+				start: '2040-02-03T10:00:00Z',
+				end: '2040-02-03T11:00:00Z',
+				summary: 'Must not be created',
+				additionalFields: {},
+			});
+			const readOnlyError = await captureNodeExecutionError(readOnly.context);
+			expect(readOnlyError).toMatchObject({
+				message: 'Event Create is not authorized for the selected calendar.',
+				context: { itemIndex: 0, httpCode: '403' },
+			});
+			const putRequests = readOnly.requests.mock.calls
+				.map(([options]) => options as N8nCalDavRequestOptions)
+				.filter((options) => options.method === 'PUT');
+			expect(putRequests).toHaveLength(1);
+			expect(putRequests[0]?.headers?.['If-None-Match']).toBe('*');
+
+			const invalid = eventCreateContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				uid: `invalid-${run.identity}`,
+				start: '2040-02-03T10:00:00',
+				end: '2040-02-03T11:00:00Z',
+				summary: 'Invalid timezone-less input',
+				additionalFields: {},
+			});
+			const invalidError = await captureNodeExecutionError(invalid.context);
+			expect(invalidError).toMatchObject({
+				message: 'Start must be a valid date and time with whole-second precision.',
+				context: { itemIndex: 0 },
+			});
+			expect(invalid.requests).not.toHaveBeenCalled();
 		} finally {
 			await teardownRun(run);
 		}
