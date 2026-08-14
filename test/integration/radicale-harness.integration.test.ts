@@ -261,6 +261,69 @@ function calendarGetManyContext(run: RadicaleRun): IExecuteFunctions {
 	return context as unknown as IExecuteFunctions;
 }
 
+interface EventDeleteIntegrationParameters {
+	readonly calendar: unknown;
+	readonly identifierMode: 'resourceUrl' | 'uid';
+	readonly resourceUrl?: string;
+	readonly uid?: string;
+	readonly etag?: unknown;
+}
+
+function eventDeleteContext(
+	run: RadicaleRun,
+	parameters: EventDeleteIntegrationParameters,
+): {
+	readonly context: IExecuteFunctions;
+	readonly requests: ReturnType<typeof vi.fn>;
+} {
+	const adapter = requestAdapter(run);
+	const requests = vi.fn(
+		async (options: N8nCalDavRequestOptions) => await adapter.request(options),
+	);
+	const values: Readonly<Record<string, unknown>> = {
+		resource: 'event',
+		operation: 'delete',
+		calendar: parameters.calendar,
+		identifierMode: parameters.identifierMode,
+		resourceUrl: parameters.resourceUrl,
+		uid: parameters.uid,
+		etag: parameters.etag,
+	};
+	const context = {
+		getInputData: vi.fn().mockReturnValue([{ json: { oracle: 'event-delete' } }]),
+		getNodeParameter: vi.fn((name: string, itemIndex: number) => {
+			expect(itemIndex).toBe(0);
+			if (!Object.hasOwn(values, name)) {
+				throw new Error(`Unexpected active parameter read: ${name}.`);
+			}
+			return values[name];
+		}),
+		getCredentials: vi.fn().mockResolvedValue({
+			serverUrl: run.endpoint,
+			username: run.username,
+			password: run.password,
+			allowUnauthorizedCerts: false,
+		}),
+		continueOnFail: vi.fn().mockReturnValue(false),
+		getNode: vi.fn().mockReturnValue(workflowNode()),
+		helpers: {
+			async httpRequestWithAuthentication(_credentialType: string, options: IHttpRequestOptions) {
+				return await requests(options as N8nCalDavRequestOptions);
+			},
+		},
+	};
+	return { context: context as unknown as IExecuteFunctions, requests };
+}
+
+async function captureNodeExecutionError(context: IExecuteFunctions): Promise<Error> {
+	try {
+		await new CalDav().execute.call(context);
+	} catch (error) {
+		return error as Error;
+	}
+	throw new Error('Expected the live Event Delete operation to fail.');
+}
+
 function calendarListSearchContext(
 	run: RadicaleRun,
 	transformResponseBody?: ResponseBodyTransform,
@@ -984,6 +1047,181 @@ describe('Radicale conditional calendar-event mutations', () => {
 			expect(stored.status).toBe(200);
 			expect(storedBody).toContain('SUMMARY:Race winner');
 			expect(storedBody).not.toContain('Forbidden race loser');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+});
+
+describe('Radicale Event Delete node operation', () => {
+	it('deletes an exact Resource URL with the resolved ETag and returns stable metadata', async () => {
+		const run = await startRun();
+		try {
+			const eventUrl = await createSyntheticEvent(run, 'node-delete-resource-url');
+			const calendarUrl = new URL('./', eventUrl).href;
+			const { context, requests } = eventDeleteContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				identifierMode: 'resourceUrl',
+				resourceUrl: eventUrl,
+			});
+
+			await expect(new CalDav().execute.call(context)).resolves.toEqual([
+				[
+					{
+						json: {
+							calendarUrl,
+							resourceUrl: eventUrl,
+							uid: syntheticEventUid(run),
+							deleted: true,
+						},
+						pairedItem: { item: 0 },
+					},
+				],
+			]);
+
+			const deleteRequests = requests.mock.calls
+				.map(([options]) => options as N8nCalDavRequestOptions)
+				.filter((options) => options.method === 'DELETE');
+			expect(deleteRequests).toHaveLength(1);
+			expect(deleteRequests[0]).toMatchObject({
+				url: eventUrl,
+				headers: { 'If-Match': expect.any(String) },
+			});
+			expect(deleteRequests[0].body).toBeUndefined();
+			expect((await authenticatedFetch(run, eventUrl)).status).toBe(404);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('resolves and deletes by UID within only the selected calendar', async () => {
+		const run = await startRun();
+		try {
+			const eventUrl = await createSyntheticEvent(run, 'node-delete-uid');
+			const calendarUrl = new URL('./', eventUrl).href;
+			const { context, requests } = eventDeleteContext(run, {
+				calendar: { __rl: true, mode: 'list', value: calendarUrl },
+				identifierMode: 'uid',
+				uid: syntheticEventUid(run),
+			});
+
+			await expect(new CalDav().execute.call(context)).resolves.toEqual([
+				[
+					{
+						json: {
+							calendarUrl,
+							resourceUrl: eventUrl,
+							uid: syntheticEventUid(run),
+							deleted: true,
+						},
+						pairedItem: { item: 0 },
+					},
+				],
+			]);
+
+			const observed = requests.mock.calls.map(([options]) => options as N8nCalDavRequestOptions);
+			expect(observed.filter((options) => options.method === 'REPORT')).toHaveLength(1);
+			const deleteRequests = observed.filter((options) => options.method === 'DELETE');
+			expect(deleteRequests).toHaveLength(1);
+			expect(deleteRequests[0]).toMatchObject({
+				url: eventUrl,
+				headers: { 'If-Match': expect.any(String) },
+			});
+			expect(deleteRequests[0].body).toBeUndefined();
+			expect((await authenticatedFetch(run, eventUrl)).status).toBe(404);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('maps a supplied stale ETag to one terminal conflict and retains the newer resource', async () => {
+		const run = await startRun();
+		try {
+			const eventUrl = await createSyntheticEvent(run, 'node-delete-stale');
+			const calendarUrl = new URL('./', eventUrl).href;
+			const before = await authenticatedFetch(run, eventUrl);
+			const staleEtag = before.headers.get('etag');
+			expect(staleEtag).not.toBeNull();
+			const newerBody = mutationEvent(run, 'Newer resource retained after stale delete');
+			expect((await authenticatedFetch(run, eventUrl, 'PUT', newerBody)).status).toBe(204);
+			const { context, requests } = eventDeleteContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				identifierMode: 'resourceUrl',
+				resourceUrl: eventUrl,
+				etag: staleEtag,
+			});
+
+			const error = await captureNodeExecutionError(context);
+			expect(error).toMatchObject({
+				message: 'The calendar event changed before the mutation could be applied.',
+				context: { itemIndex: 0 },
+			});
+			const deleteRequests = requests.mock.calls
+				.map(([options]) => options as N8nCalDavRequestOptions)
+				.filter((options) => options.method === 'DELETE');
+			expect(deleteRequests).toHaveLength(1);
+			expect(deleteRequests[0].headers?.['If-Match']).toBe(staleEtag);
+			expect(deleteRequests[0].body).toBeUndefined();
+			const retained = await authenticatedFetch(run, eventUrl);
+			expect(retained.status).toBe(200);
+			expect(await retained.text()).toContain('SUMMARY:Newer resource retained after stale delete');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('reports a missing event without issuing DELETE', async () => {
+		const run = await startRun();
+		try {
+			const existingUrl = await createSyntheticEvent(run, 'node-delete-missing');
+			const calendarUrl = new URL('./', existingUrl).href;
+			const missingUrl = new URL('missing-event.ics', calendarUrl).href;
+			const { context, requests } = eventDeleteContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				identifierMode: 'resourceUrl',
+				resourceUrl: missingUrl,
+			});
+
+			const error = await captureNodeExecutionError(context);
+			expect(error).toMatchObject({
+				message: 'The calendar event was not found.',
+				context: { itemIndex: 0, httpCode: '404' },
+			});
+			expect(
+				requests.mock.calls
+					.map(([options]) => options as N8nCalDavRequestOptions)
+					.filter((options) => options.method === 'DELETE'),
+			).toEqual([]);
+			expect((await authenticatedFetch(run, existingUrl)).status).toBe(200);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('maps read-only denial and retains the resource while every DELETE stays conditional', async () => {
+		const run = await startRun();
+		try {
+			const eventUrl = await createSyntheticEvent(run, 'node-delete-read-only');
+			const calendarUrl = new URL('./', eventUrl).href;
+			await harness.makeCalendarReadOnly(run, calendarUrl);
+			const { context, requests } = eventDeleteContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				identifierMode: 'resourceUrl',
+				resourceUrl: eventUrl,
+			});
+
+			const error = await captureNodeExecutionError(context);
+			expect(error).toMatchObject({
+				message: 'Event Delete is not authorized.',
+				context: { itemIndex: 0, httpCode: '403' },
+			});
+			const deleteRequests = requests.mock.calls
+				.map(([options]) => options as N8nCalDavRequestOptions)
+				.filter((options) => options.method === 'DELETE');
+			expect(deleteRequests).toHaveLength(1);
+			expect(deleteRequests[0].headers?.['If-Match']).toEqual(expect.any(String));
+			expect(deleteRequests[0].body).toBeUndefined();
+			expect((await authenticatedFetch(run, eventUrl)).status).toBe(200);
 		} finally {
 			await teardownRun(run);
 		}
