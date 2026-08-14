@@ -3,6 +3,17 @@
 Changes from published releases and declared project milestones will be
 documented in this file.
 
+## [0.4.0] - 2026-08-14
+
+### Development checkpoint
+
+- Added deterministic standards-compliant basic timed UTC VEVENT serialization with preservation-AST round trips, RFC escaping and parameter encoding, UTF-8-aware folding, and CRLF output (#33).
+- Added shared conditional CalDAV mutation services with canonical resource metadata, opaque ETags, safe preconditions, and sanitized conflict mapping (#34).
+- Added collision-safe Event Create with explicit UID, canonical URL and authoritative ETag output, item pairing, and Radicale collision validation (#35).
+- Added preservation-first structured event patching with explicit set/remove semantics, deterministic revision metadata, and unknown-data retention (#36).
+- Added conditional Event Update by Resource URL or UID with verified preservation read-back, canonical URL and authoritative current ETag output, and stale-ETag protection (#37).
+- Added conditional Event Delete by Resource URL or UID with mandatory ETag preconditions, canonical deletion metadata, pairing, and stale/read-only validation (#38).
+
 ## [0.3.0] - 2026-08-13
 
 ### Development checkpoint

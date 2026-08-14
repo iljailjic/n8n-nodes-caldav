@@ -138,7 +138,7 @@ function createPackOutput(paths: string[], overrides: PackResultOverrides = {}) 
 	return JSON.stringify([
 		{
 			name: '@iljailjic/n8n-nodes-caldav',
-			version: '0.3.0',
+			version: '0.4.0',
 			files: paths.map((path) => ({ path })),
 			entryCount: paths.length,
 			bundled: [],
