@@ -16,6 +16,7 @@ import * as eventReadModelModule from '../../nodes/CalDav/icalendar/eventReadMod
 import {
 	CalDavCalendarEventReadModelError,
 	CalendarEventReadModelErrorCode,
+	createCalendarEventPreservationContext,
 	mapCalendarEventResource,
 } from '../../nodes/CalDav/icalendar/eventReadModel';
 import type {
@@ -203,6 +204,7 @@ describe('event read-model public contract', () => {
 		expect(Object.keys(eventReadModelModule).sort()).toEqual([
 			'CalDavCalendarEventReadModelError',
 			'CalendarEventReadModelErrorCode',
+			'createCalendarEventPreservationContext',
 			'mapCalendarEventResource',
 		]);
 		expect(CalendarEventReadModelErrorCode).toEqual(
@@ -229,7 +231,7 @@ describe('event read-model public contract', () => {
 		expect(error).not.toHaveProperty('offset');
 	});
 
-	it('satisfies the accepted compile-time model while exposing only three runtime exports', () => {
+	it('satisfies the accepted compile-time model while exposing only four runtime exports', () => {
 		const result = mapLines(event('typed-contract', ['DTSTART:20260812T090000Z']));
 		const eventModel: CalendarEvent = result.event;
 		const context: CalendarEventPreservationContext = result.context;
@@ -239,6 +241,71 @@ describe('event read-model public contract', () => {
 		const typedResult: CalendarEventReadResult = { event: eventModel, context };
 
 		expect({ start, extensions, typedResult }).toBeDefined();
+	});
+});
+
+describe('preservation context identity factory', () => {
+	it.each([
+		['UTC', 'DTSTART:20260812T090000Z', 'RECURRENCE-ID:20260819T090000Z'],
+		['DATE', 'DTSTART;VALUE=DATE:20260812', 'RECURRENCE-ID;VALUE=DATE:20260819'],
+		['floating', 'DTSTART:20260812T090000', 'RECURRENCE-ID:20260819T090000'],
+		[
+			'local TZID with a distinct concrete exception TZID',
+			'DTSTART;TZID=Europe/Prague:20260812T090000',
+			'RECURRENCE-ID;TZID=Europe/London:20260819T080000',
+		],
+	] as const)('accepts a valid %s recurrence identity form', (_label, start, recurrenceId) => {
+		const resource = parseEventResource([
+			...event('factory-identity', [start, 'DURATION:PT1H']),
+			...event('factory-identity', [recurrenceId, start]),
+		]);
+		const components = directComponents(resource.calendar);
+		const context = createCalendarEventPreservationContext(resource);
+
+		expect(context.resource).toBe(resource);
+		expect(context.master).toBe(components[0]);
+		expect(context.exceptions).toEqual([components[1]]);
+		expectDeeplyFrozen(context);
+	});
+
+	it.each([
+		[
+			'incompatible DATE and DATE-TIME',
+			'DTSTART;VALUE=DATE:20260812',
+			'RECURRENCE-ID:20260819T090000Z',
+			'INVALID_EVENT_PROPERTY',
+		],
+		[
+			'incompatible UTC and floating',
+			'DTSTART:20260812T090000Z',
+			'RECURRENCE-ID:20260819T090000',
+			'INVALID_EVENT_PROPERTY',
+		],
+		[
+			'invalid exception date',
+			'DTSTART;VALUE=DATE:20260812',
+			'RECURRENCE-ID;VALUE=DATE:20260229',
+			'INVALID_EVENT_PROPERTY',
+		],
+	] as const)('rejects %s', (_label, start, recurrenceId, code) => {
+		const resource = parseEventResource([
+			...event('factory-invalid', [start]),
+			...event('factory-invalid', [recurrenceId, start]),
+		]);
+		expect(() => createCalendarEventPreservationContext(resource)).toThrowError(
+			expect.objectContaining({ code }),
+		);
+	});
+
+	it('rejects duplicate semantic recurrence identities', () => {
+		const resource = parseEventResource([
+			...event('factory-duplicate', ['DTSTART:20260812T090000Z']),
+			...event('factory-duplicate', ['RECURRENCE-ID:20260819T090000Z', 'DTSTART:20260819T100000Z']),
+			...event('factory-duplicate', ['RECURRENCE-ID:20260819T090000Z', 'DTSTART:20260819T110000Z']),
+		]);
+		expect(() => createCalendarEventPreservationContext(resource)).toThrowError(
+			expect.objectContaining({ code: 'INVALID_EVENT_IDENTITY' }),
+		);
 	});
 });
 

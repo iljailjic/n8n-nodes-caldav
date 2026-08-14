@@ -185,6 +185,7 @@ const DEFAULT_VALUE_TYPES: Readonly<Record<string, string>> = {
 };
 
 const UID_COMPONENT_NAMES = new Set(['VEVENT', 'VTODO', 'VJOURNAL', 'VFREEBUSY']);
+const PARSED_RESOURCE_BRAND = Symbol.for('@iljailjic/n8n-nodes-caldav/icalendar/parsed-resource');
 
 function decodeUtf8(input: Uint8Array): string {
 	try {
@@ -664,5 +665,12 @@ export function parseICalendarResource(input: Uint8Array): ICalendarResource {
 	validateCalendar(calendar);
 	freezeComponent(calendar);
 
-	return Object.freeze({ kind: 'resource', originalIcs, calendar });
+	const resource = { kind: 'resource' as const, originalIcs, calendar };
+	Object.defineProperty(resource, PARSED_RESOURCE_BRAND, {
+		value: true,
+		enumerable: false,
+		writable: false,
+		configurable: false,
+	});
+	return Object.freeze(resource);
 }

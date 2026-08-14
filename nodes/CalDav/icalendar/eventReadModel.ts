@@ -109,6 +109,11 @@ const PARSER_KINDS = new Set([
 	'value',
 ]);
 const UTC_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
+const DATE_PATTERN = /^(\d{4})(\d{2})(\d{2})$/;
+const LOCAL_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/;
+const PRESERVATION_CONTEXT_BRAND = Symbol.for(
+	'@iljailjic/n8n-nodes-caldav/icalendar/preservation-context',
+);
 
 function fail(code: CalendarEventReadModelErrorCode): never {
 	throw new CalDavCalendarEventReadModelError(code);
@@ -185,6 +190,132 @@ function selectMaster(events: readonly ICalendarComponent[]): {
 	if (masters.length === 0) fail('MISSING_MASTER_EVENT');
 	if (masters.length > 1) fail('MULTIPLE_MASTER_EVENTS');
 	return { master: masters[0]!, exceptions };
+}
+
+type RecurrenceIdentityForm = 'date' | 'utc' | 'floating' | 'local';
+
+interface RecurrenceIdentityShape {
+	readonly form: RecurrenceIdentityForm;
+	readonly key: string;
+}
+
+function parameterValues(property: ICalendarProperty, name: string): readonly string[][] {
+	const expectedName = asciiUpperCase(name);
+	return property.parameters
+		.filter((parameter) => asciiUpperCase(parameter.name) === expectedName)
+		.map((parameter) => parameter.values.map((value) => value.value));
+}
+
+function isValidCalendarDateParts(match: RegExpExecArray): boolean {
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	return (
+		year >= 1 &&
+		year <= 9999 &&
+		month >= 1 &&
+		month <= 12 &&
+		day >= 1 &&
+		day <= daysInMonth(year, month)
+	);
+}
+
+function isValidCalendarDateTimeMatch(match: RegExpExecArray): boolean {
+	return (
+		isValidCalendarDateParts(match) &&
+		Number(match[4]) <= 23 &&
+		Number(match[5]) <= 59 &&
+		Number(match[6]) <= 60
+	);
+}
+
+function recurrenceIdentityShape(property: ICalendarProperty): RecurrenceIdentityShape | undefined {
+	if (property.value.textValues !== null) return undefined;
+
+	const valueType = asciiUpperCase(property.value.valueType);
+	const tzidParameters = parameterValues(property, 'TZID');
+	if (tzidParameters.length > 1) return undefined;
+	const tzidValues = tzidParameters[0];
+	if (tzidValues !== undefined && (tzidValues.length !== 1 || tzidValues[0]!.length === 0)) {
+		return undefined;
+	}
+
+	if (valueType === 'DATE') {
+		if (tzidValues !== undefined) return undefined;
+		const match = DATE_PATTERN.exec(property.value.raw);
+		if (match === null || !isValidCalendarDateParts(match)) return undefined;
+		return { form: 'date', key: property.value.raw };
+	}
+
+	if (valueType !== 'DATE-TIME') return undefined;
+	if (property.value.raw.endsWith('Z')) {
+		if (tzidValues !== undefined) return undefined;
+		const match = UTC_DATE_TIME_PATTERN.exec(property.value.raw);
+		if (match === null || !isValidCalendarDateTimeMatch(match)) return undefined;
+		return { form: 'utc', key: property.value.raw };
+	}
+
+	const match = LOCAL_DATE_TIME_PATTERN.exec(property.value.raw);
+	if (match === null || !isValidCalendarDateTimeMatch(match)) return undefined;
+	if (tzidValues === undefined) return { form: 'floating', key: property.value.raw };
+	return { form: 'local', key: `${tzidValues[0]!}\u0000${property.value.raw}` };
+}
+
+function validateExceptionIdentities(
+	master: ICalendarComponent,
+	exceptions: readonly ICalendarComponent[],
+): void {
+	if (exceptions.length === 0) return;
+
+	const masterStarts = directProperties(master, 'DTSTART');
+	if (masterStarts.length > 1) fail('AMBIGUOUS_EVENT_PROPERTY');
+	if (masterStarts.length === 0) fail('INVALID_EVENT_PROPERTY');
+	const masterShape = recurrenceIdentityShape(masterStarts[0]!);
+	if (masterShape === undefined) fail('INVALID_EVENT_PROPERTY');
+
+	const identities = new Set<string>();
+	for (const exception of exceptions) {
+		const recurrenceIds = directProperties(exception, 'RECURRENCE-ID');
+		if (recurrenceIds.length !== 1) {
+			fail(recurrenceIds.length > 1 ? 'AMBIGUOUS_EVENT_PROPERTY' : 'INVALID_EVENT_IDENTITY');
+		}
+		const shape = recurrenceIdentityShape(recurrenceIds[0]!);
+		if (shape === undefined || shape.form !== masterShape.form) fail('INVALID_EVENT_PROPERTY');
+		const identityKey = `${shape.form}\u0000${shape.key}`;
+		if (identities.has(identityKey)) fail('INVALID_EVENT_IDENTITY');
+		identities.add(identityKey);
+	}
+}
+
+export function createCalendarEventPreservationContext(
+	resource: ICalendarResource,
+): CalendarEventPreservationContext {
+	const objectComponents = directComponents(resource.calendar).filter(
+		(component) => asciiUpperCase(component.name) !== 'VTIMEZONE',
+	);
+	if (
+		objectComponents.length === 0 ||
+		objectComponents.some((component) => asciiUpperCase(component.name) !== 'VEVENT')
+	) {
+		fail('NOT_VEVENT_RESOURCE');
+	}
+
+	validateEventIdentity(objectComponents);
+	const { master, exceptions } = selectMaster(objectComponents);
+	validateExceptionIdentities(master, exceptions);
+
+	const context = {
+		resource,
+		master,
+		exceptions: Object.freeze([...exceptions]),
+	};
+	Object.defineProperty(context, PRESERVATION_CONTEXT_BRAND, {
+		value: true,
+		enumerable: false,
+		writable: false,
+		configurable: false,
+	});
+	return Object.freeze(context);
 }
 
 function validateMasterSingletons(master: ICalendarComponent): void {
@@ -424,18 +555,9 @@ function snapshotExtensions(
 export function mapCalendarEventResource(
 	input: CalendarEventResourceInput,
 ): CalendarEventReadResult {
-	const objectComponents = directComponents(input.resource.calendar).filter(
-		(component) => asciiUpperCase(component.name) !== 'VTIMEZONE',
-	);
-	if (
-		objectComponents.length === 0 ||
-		objectComponents.some((component) => asciiUpperCase(component.name) !== 'VEVENT')
-	) {
-		fail('NOT_VEVENT_RESOURCE');
-	}
-
-	const uid = validateEventIdentity(objectComponents);
-	const { master, exceptions } = selectMaster(objectComponents);
+	const context = createCalendarEventPreservationContext(input.resource);
+	const { master } = context;
+	const uid = singleText(directProperties(master, 'UID')[0]!)!;
 	validateMasterSingletons(master);
 
 	const summary = optionalText(master, 'SUMMARY');
@@ -475,12 +597,5 @@ export function mapCalendarEventResource(
 		end: end.formatted,
 		...(extensions !== undefined ? { extensions } : {}),
 	}) satisfies CalendarEvent;
-	const frozenExceptions = Object.freeze([...exceptions]);
-	const context = Object.freeze({
-		resource: input.resource,
-		master,
-		exceptions: frozenExceptions,
-	}) satisfies CalendarEventPreservationContext;
-
 	return Object.freeze({ event, context });
 }
