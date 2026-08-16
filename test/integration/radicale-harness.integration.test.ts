@@ -55,6 +55,10 @@ import {
 	type RadicaleHarnessAdapter,
 	type RadicaleRun,
 } from './support/radicale-harness-contract';
+import {
+	PRAGUE_VTIMEZONE,
+	timedEventIcs,
+} from '../unit/fixtures/time-zones/synthetic-time-zone-fixtures';
 
 function syntheticEventUid(run: RadicaleRun): string {
 	const runScopedUid = Buffer.from(run.identity, 'utf8').toString('hex');
@@ -867,6 +871,43 @@ describe('Radicale authenticated discovery', () => {
 				'2040-01-01T10:30:00Z',
 			);
 			expect(Object.isFrozen(result)).toBe(true);
+			expect(JSON.stringify(result)).not.toContain(run.password);
+			expect(JSON.stringify(result)).not.toContain(basicAuthorization(run));
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('round-trips a synthetic embedded IANA event through Radicale with authoritative local and instant fields', async () => {
+		const run = await startRun();
+		try {
+			const collectionUrl = await createSyntheticCalendar(run, 'iana-time-zone', 'IANA Time Zone');
+			const resourceUrl = new URL('iana-event.ics', collectionUrl).href;
+			const source = timedEventIcs(
+				'DTSTART;TZID=Europe/Prague:20400715T100000',
+				'DTEND;TZID=Europe/Prague:20400715T110000',
+				[PRAGUE_VTIMEZONE],
+			);
+			const put = await authenticatedFetch(run, resourceUrl, 'PUT', source);
+			expect([201, 204]).toContain(put.status);
+
+			const result = await getCalendarEventByResourceUrl(
+				transport(run),
+				validateAbsoluteHttpUrl(collectionUrl),
+				validateAbsoluteHttpUrl(resourceUrl),
+			);
+
+			expect(result.event).toMatchObject({
+				uid: 'synthetic-time-zone-event',
+				timeMode: 'timed',
+				accessMode: 'editable',
+				start: '2040-07-15T07:00:00Z',
+				end: '2040-07-15T08:00:00Z',
+				timeZoneMode: 'iana',
+				timeZone: 'Europe/Prague',
+				startLocal: '2040-07-15T10:00:00',
+				endLocal: '2040-07-15T11:00:00',
+			});
 			expect(JSON.stringify(result)).not.toContain(run.password);
 			expect(JSON.stringify(result)).not.toContain(basicAuthorization(run));
 		} finally {
