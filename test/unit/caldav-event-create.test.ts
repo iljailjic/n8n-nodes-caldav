@@ -235,6 +235,69 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(created.uid).not.toBe(created.resourceUrl);
 	});
 
+	it('reuses one generated UID across all-day DATE serialization, resource identity, authoritative GET, and output', async () => {
+		const authoritativeBody = [
+			'BEGIN:VCALENDAR',
+			'VERSION:2.0',
+			'PRODID:-//example.test//All-day Create oracle//EN',
+			'BEGIN:VEVENT',
+			`UID:${GENERATED_UID}`,
+			'DTSTAMP:20400101T000000Z',
+			'DTSTART;VALUE=DATE:20400102',
+			'DTEND;VALUE=DATE:20400103',
+			'SUMMARY:Summary\\, exact',
+			'END:VEVENT',
+			'END:VCALENDAR',
+			'',
+		].join('\r\n');
+		const expectedResourceUrl = new URL(
+			`${Buffer.from(GENERATED_UID, 'utf8').toString('base64url')}.ics`,
+			CALENDAR_URL,
+		).href;
+		const requests = transport(async (request) =>
+			request.method === CalDavMethod.PUT
+				? response(201, request.url)
+				: response(200, request.url, {
+						etag: '"all-day-generated-etag"',
+						body: authoritativeBody,
+					}),
+		);
+		const allDayInput = {
+			calendarUrl: CALENDAR_URL,
+			timeMode: 'allDay',
+			startDate: '2040-01-02',
+			endDate: '2040-01-03',
+			summary: 'Summary, exact',
+		} as CalendarEventCreateInput;
+
+		const created = await createCalendarEvent(requests, allDayInput, () => FIXED_CLOCK);
+
+		expect(mocks.randomUUID).toHaveBeenCalledTimes(1);
+		expect(requests.request).toHaveBeenCalledTimes(2);
+		const put = requests.request.mock.calls[0]?.[0] as CalDavTransportRequest;
+		const get = requests.request.mock.calls[1]?.[0] as CalDavTransportRequest;
+		expect(put).toMatchObject({ method: CalDavMethod.PUT, url: expectedResourceUrl });
+		expect(get).toEqual({ method: CalDavMethod.GET, url: expectedResourceUrl });
+		const unfolded = put.body?.replace(/\r\n[ \t]/gu, '');
+		expect(unfolded?.split('\r\n').filter((line) => line === `UID:${GENERATED_UID}`)).toHaveLength(
+			1,
+		);
+		expect(unfolded).toContain('DTSTART;VALUE=DATE:20400102\r\n');
+		expect(unfolded).toContain('DTEND;VALUE=DATE:20400103\r\n');
+		expect(unfolded).not.toContain('DTSTART:20400102T');
+		expect(created).toEqual({
+			calendarUrl: CALENDAR_URL,
+			resourceUrl: expectedResourceUrl,
+			etag: '"all-day-generated-etag"',
+			uid: GENERATED_UID,
+			summary: 'Summary, exact',
+			timeMode: 'allDay',
+			accessMode: 'editable',
+			startDate: '2040-01-02',
+			endDate: '2040-01-03',
+		});
+	});
+
 	it('generates a distinct identity once for each separate omitted-UID Create execution', async () => {
 		const generated = [
 			'00000000-0000-4000-8000-000000000001',
