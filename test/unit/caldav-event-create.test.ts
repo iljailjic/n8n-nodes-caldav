@@ -1,4 +1,13 @@
-import { describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+	randomUUID: vi.fn(),
+}));
+
+vi.mock('node:crypto', async (importOriginal) => ({
+	...(await importOriginal<typeof import('node:crypto')>()),
+	randomUUID: mocks.randomUUID,
+}));
 
 import * as createModule from '../../nodes/CalDav/events/create';
 import {
@@ -27,6 +36,7 @@ import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 
 const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/selected/');
 const FIXED_CLOCK = new Date('2040-01-01T00:00:00.987Z');
+const GENERATED_UID = '83a91a20-941d-4e5a-a184-2d46871736b4';
 
 type MockTransport = CalDavTransport & { request: ReturnType<typeof vi.fn> };
 
@@ -68,6 +78,14 @@ function input(overrides: Partial<CalendarEventCreateInput> = {}): CalendarEvent
 	};
 }
 
+function omittedUidInput(
+	overrides: Partial<CalendarEventCreateInput> = {},
+): CalendarEventCreateInput {
+	const createInput: Partial<CalendarEventCreateInput> = { ...input(overrides) };
+	delete createInput.uid;
+	return createInput as CalendarEventCreateInput;
+}
+
 async function captureError(promise: Promise<unknown>): Promise<unknown> {
 	try {
 		await promise;
@@ -76,6 +94,10 @@ async function captureError(promise: Promise<unknown>): Promise<unknown> {
 	}
 	throw new Error('Expected Event Create to fail.');
 }
+
+beforeEach(() => {
+	mocks.randomUUID.mockReset().mockReturnValue(GENERATED_UID);
+});
 
 describe('calendar-event Create coordinator public contract', () => {
 	it('exports exactly the selected runtime surface and immutable failure codes', () => {
@@ -138,9 +160,66 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(request.body).toContain('DTSTAMP:20400101T000000Z\r\n');
 		expect(request.body).toContain('UID:opaque ../UID/🚀?one\r\n');
 		expect(clock).toHaveBeenCalledTimes(1);
+		expect(mocks.randomUUID).not.toHaveBeenCalled();
 		expect(createInput.start.getTime()).toBe(startSnapshot);
 		expect(createInput.end.getTime()).toBe(endSnapshot);
 		expect(FIXED_CLOCK.getTime()).toBe(new Date('2040-01-01T00:00:00.987Z').getTime());
+	});
+
+	it('resolves one omitted UID before the clock and reuses it in the resource, ICS, ETag fallback, and result', async () => {
+		const requests = transport(async (request) => {
+			if (request.method === CalDavMethod.PUT) {
+				return response(201, request.url, { includeEtag: false });
+			}
+			return response(200, request.url, { etag: '"generated-etag"' });
+		});
+		const clock = vi.fn(() => FIXED_CLOCK);
+		const expectedResourceUrl = new URL(
+			`${Buffer.from(GENERATED_UID, 'utf8').toString('base64url')}.ics`,
+			CALENDAR_URL,
+		).href;
+
+		const created = await createCalendarEvent(requests, omittedUidInput(), clock);
+
+		expect(mocks.randomUUID).toHaveBeenCalledTimes(1);
+		expect(mocks.randomUUID.mock.invocationCallOrder[0]).toBeLessThan(
+			clock.mock.invocationCallOrder[0]!,
+		);
+		expect(requests.request).toHaveBeenCalledTimes(2);
+		expect(
+			requests.request.mock.calls.map(([request]) => (request as CalDavTransportRequest).url),
+		).toEqual([expectedResourceUrl, expectedResourceUrl]);
+		const put = requests.request.mock.calls[0]?.[0] as CalDavTransportRequest;
+		const unfolded = put.body?.replace(/\r\n[ \t]/gu, '');
+		expect(unfolded?.split('\r\n').filter((line) => line === `UID:${GENERATED_UID}`)).toHaveLength(
+			1,
+		);
+		expect(created).toMatchObject({
+			resourceUrl: expectedResourceUrl,
+			uid: GENERATED_UID,
+			etag: '"generated-etag"',
+		});
+		expect(created.uid).not.toBe(created.resourceUrl);
+	});
+
+	it('generates a distinct identity once for each separate omitted-UID Create execution', async () => {
+		const generated = [
+			'00000000-0000-4000-8000-000000000001',
+			'00000000-0000-4000-8000-000000000002',
+			'00000000-0000-4000-8000-000000000003',
+		];
+		for (const uid of generated) mocks.randomUUID.mockReturnValueOnce(uid);
+		const requests = transport(async (request) => response(201, request.url));
+
+		const created = [];
+		for (let index = 0; index < generated.length; index += 1) {
+			created.push(await createCalendarEvent(requests, omittedUidInput(), () => FIXED_CLOCK));
+		}
+
+		expect(mocks.randomUUID).toHaveBeenCalledTimes(3);
+		expect(created.map(({ uid }) => uid)).toEqual(generated);
+		expect(new Set(created.map(({ resourceUrl }) => resourceUrl)).size).toBe(3);
+		expect(requests.request).toHaveBeenCalledTimes(3);
 	});
 
 	it('accepts the exact 255-octet resource-segment boundary and rejects the first overflow before clock or I/O', async () => {
@@ -163,6 +242,7 @@ describe('calendar-event Create coordinator public contract', () => {
 		});
 		expect(clock).not.toHaveBeenCalled();
 		expect(rejectedTransport.request).not.toHaveBeenCalled();
+		expect(mocks.randomUUID).not.toHaveBeenCalled();
 	});
 
 	it.each(['', '\ud800private', '\u0000private'])(
@@ -175,6 +255,7 @@ describe('calendar-event Create coordinator public contract', () => {
 			expect(error).toMatchObject({ field: 'uid' });
 			expect(clock).not.toHaveBeenCalled();
 			expect(requests.request).not.toHaveBeenCalled();
+			expect(mocks.randomUUID).not.toHaveBeenCalled();
 		},
 	);
 

@@ -942,6 +942,62 @@ describe('Radicale calendar-event UID resolution', () => {
 });
 
 describe('Radicale collision-safe Event Create', () => {
+	it('generates a canonical UUID for blank node UID and reads back one matching VEVENT identity', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = await createSyntheticCalendar(
+				run,
+				'node-create-generated-uid',
+				'Create Generated UID',
+			);
+			const execution = eventCreateContext(run, {
+				calendar: { __rl: true, mode: 'url', value: calendarUrl },
+				uid: '',
+				start: '2040-02-03T10:00:00Z',
+				end: '2040-02-03T11:00:00Z',
+				summary: 'Generated UID round trip',
+				additionalFields: {},
+			});
+
+			const [output] = await new CalDav().execute.call(execution.context);
+			expect(output).toHaveLength(1);
+			const created = output[0]?.json;
+			const uid = created?.uid;
+			expect(uid).toEqual(
+				expect.stringMatching(
+					/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+				),
+			);
+			if (typeof uid !== 'string') throw new Error('Generated UID output is missing.');
+			const expectedResourceUrl = new URL(
+				`${Buffer.from(uid, 'utf8').toString('base64url')}.ics`,
+				calendarUrl,
+			).href;
+			expect(created).toMatchObject({
+				calendarUrl,
+				resourceUrl: expectedResourceUrl,
+				uid,
+				summary: 'Generated UID round trip',
+			});
+			expect(output[0]).toMatchObject({ pairedItem: { item: 0 } });
+
+			const readBack = await getCalendarEventByResourceUrl(
+				transport(run),
+				validateAbsoluteHttpUrl(calendarUrl),
+				validateAbsoluteHttpUrl(expectedResourceUrl),
+			);
+			expect(readBack.event.uid).toBe(uid);
+			expect(readBack.event.resourceUrl).toBe(expectedResourceUrl);
+
+			const stored = await authenticatedFetch(run, expectedResourceUrl);
+			expect(stored.status).toBe(200);
+			const unfoldedLines = (await stored.text()).replace(/\r?\n[ \t]/gu, '').split(/\r?\n/u);
+			expect(unfoldedLines.filter((line) => line === `UID:${uid}`)).toHaveLength(1);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
 	it('creates and reads back Unicode data, then preserves it across a same-UID collision', async () => {
 		const run = await startRun();
 		try {
