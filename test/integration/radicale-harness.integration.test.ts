@@ -277,6 +277,7 @@ interface EventDeleteIntegrationParameters {
 interface EventCreateIntegrationParameters {
 	readonly calendar: unknown;
 	readonly uid: unknown;
+	readonly timeMode: 'timed';
 	readonly start: unknown;
 	readonly end: unknown;
 	readonly summary: unknown;
@@ -289,6 +290,7 @@ interface EventUpdateIntegrationParameters {
 	readonly resourceUrl?: string;
 	readonly uid?: string;
 	readonly etag?: unknown;
+	readonly timeMode: 'timed';
 	readonly fieldsToUpdate: unknown;
 }
 
@@ -308,6 +310,7 @@ function eventCreateContext(
 		operation: 'create',
 		calendar: parameters.calendar,
 		uid: parameters.uid,
+		timeMode: parameters.timeMode,
 		start: parameters.start,
 		end: parameters.end,
 		summary: parameters.summary,
@@ -410,6 +413,7 @@ function eventUpdateContext(
 		resourceUrl: parameters.resourceUrl,
 		uid: parameters.uid,
 		etag: parameters.etag,
+		timeMode: parameters.timeMode,
 		fieldsToUpdate: parameters.fieldsToUpdate,
 	};
 	const context = {
@@ -895,6 +899,8 @@ describe('Radicale calendar-event UID resolution', () => {
 				etag: storedEtag,
 				uid,
 				summary: 'Synthetic harness oracle event',
+				timeMode: 'timed',
+				accessMode: 'editable',
 				start: '2040-01-02T10:00:00Z',
 				end: '2040-01-02T10:30:00Z',
 			};
@@ -1040,6 +1046,8 @@ describe('Radicale collision-safe Event Create', () => {
 				description: '',
 				location: 'Praha; Brno',
 				url: 'urn:example:radicale:create',
+				timeMode: 'timed',
+				accessMode: 'editable',
 				start: '2040-02-03T10:00:00Z',
 				end: '2040-02-03T11:00:00Z',
 			});
@@ -1106,6 +1114,7 @@ describe('Radicale collision-safe Event Create', () => {
 			const readOnly = eventCreateContext(run, {
 				calendar: { __rl: true, mode: 'url', value: calendarUrl },
 				uid: `read-only-${run.identity}`,
+				timeMode: 'timed',
 				start: '2040-02-03T10:00:00Z',
 				end: '2040-02-03T11:00:00Z',
 				summary: 'Must not be created',
@@ -1125,6 +1134,7 @@ describe('Radicale collision-safe Event Create', () => {
 			const invalid = eventCreateContext(run, {
 				calendar: { __rl: true, mode: 'url', value: calendarUrl },
 				uid: `invalid-${run.identity}`,
+				timeMode: 'timed',
 				start: '2040-02-03T10:00:00',
 				end: '2040-02-03T11:00:00Z',
 				summary: 'Invalid timezone-less input',
@@ -1199,6 +1209,8 @@ describe('Radicale conditional calendar-event mutations', () => {
 				description: 'Created through the merged mutation service',
 				location: 'Integration calendar',
 				url: 'urn:example:calendar:radicale-oracle',
+				timeMode: 'timed',
+				accessMode: 'editable',
 				start: '2040-01-02T10:00:00Z',
 				end: '2040-01-02T10:30:00Z',
 			});
@@ -1400,6 +1412,7 @@ describe('Radicale conditional Event Update operation', () => {
 				identifierMode: 'resourceUrl',
 				resourceUrl: eventUrl,
 				etag: '',
+				timeMode: 'timed',
 				fieldsToUpdate: {
 					summary: 'After preservation update',
 					description: { change: { action: 'set', value: '' } },
@@ -1419,6 +1432,8 @@ describe('Radicale conditional Event Update operation', () => {
 						uid: syntheticEventUid(run),
 						summary: 'After preservation update',
 						description: '',
+						timeMode: 'timed',
+						accessMode: 'editable',
 						start: '2040-01-02T10:00:00Z',
 						end: '2040-01-02T10:30:00Z',
 					},
@@ -1461,6 +1476,7 @@ describe('Radicale conditional Event Update operation', () => {
 				identifierMode: 'uid',
 				uid: syntheticEventUid(run),
 				etag: suppliedEtag,
+				timeMode: 'timed',
 				fieldsToUpdate: { location: { change: { action: 'set', value: 'UID oracle' } } },
 			});
 
@@ -1500,6 +1516,7 @@ describe('Radicale conditional Event Update operation', () => {
 				identifierMode: 'resourceUrl',
 				resourceUrl: eventUrl,
 				etag: staleEtag,
+				timeMode: 'timed',
 				fieldsToUpdate: { summary: 'Forbidden stale Update' },
 			});
 
@@ -1532,6 +1549,7 @@ describe('Radicale conditional Event Update operation', () => {
 					identifierMode: 'resourceUrl',
 					resourceUrl: eventUrl,
 					etag: '',
+					timeMode: 'timed',
 					fieldsToUpdate: { summary: 'Forbidden race loser' },
 				},
 				async (options) => {
@@ -1568,6 +1586,7 @@ describe('Radicale conditional Event Update operation', () => {
 				identifierMode: 'resourceUrl',
 				resourceUrl: eventUrl,
 				etag: '',
+				timeMode: 'timed',
 				fieldsToUpdate: { summary: 'Forbidden read-only Update' },
 			});
 
