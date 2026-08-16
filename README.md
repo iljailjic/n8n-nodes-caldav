@@ -65,6 +65,10 @@ Event operations cover timed and all-day events, UTC and IANA time zones,
 description, location, URL, categories, status, transparency, reminders,
 recurrence, and raw iCalendar data.
 
+For Event Create, supply a UID to preserve that exact event identity, or leave
+UID blank to generate a standards-compliant UUID. Each separate Create with a
+blank UID generates a new identity; omission is not an idempotency mechanism.
+
 See [docs/MVP.md](docs/MVP.md) for the complete version 1.0.0 scope and
 acceptance criteria.
 

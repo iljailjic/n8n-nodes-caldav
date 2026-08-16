@@ -196,7 +196,7 @@ describe('CalDAV Event Create metadata', () => {
 		});
 	});
 
-	it('exposes exactly Calendar, UID, Start, End, Summary, and ordered Additional Fields', () => {
+	it('exposes optional UID help and the established ordered Create fields', () => {
 		const properties = createProperties();
 		expect(properties.map(({ displayName }) => displayName)).toEqual([
 			'Calendar',
@@ -206,15 +206,20 @@ describe('CalDAV Event Create metadata', () => {
 			'Summary',
 			'Additional Fields',
 		]);
+		const uid = properties[1];
+		expect(uid).toMatchObject({ name: 'uid', type: 'string', default: '' });
+		expect(uid).not.toHaveProperty('required');
+		expect(uid?.description).toContain('blank');
+		expect(uid?.description).toContain('generated UUID');
+		expect(uid?.description).toContain('Each separate Create');
 		expect(
-			properties.slice(1, 5).map(({ name, type, required, default: defaultValue }) => ({
+			properties.slice(2, 5).map(({ name, type, required, default: defaultValue }) => ({
 				name,
 				type,
 				required,
 				default: defaultValue,
 			})),
 		).toEqual([
-			{ name: 'uid', type: 'string', required: true, default: '' },
 			{ name: 'start', type: 'dateTime', required: true, default: '' },
 			{ name: 'end', type: 'dateTime', required: true, default: '' },
 			{ name: 'summary', type: 'string', required: true, default: '' },
@@ -303,6 +308,27 @@ describe('CalDAV Event Create input and output mapping', () => {
 		});
 		expect(mocks.createCalendarEvent.mock.calls[0]?.[1]).not.toHaveProperty('url');
 	});
+
+	it('converts blank UID to omission and preserves generated output pairing for multiple items', async () => {
+		const generated = [
+			'00000000-0000-4000-8000-000000000001',
+			'00000000-0000-4000-8000-000000000002',
+			'00000000-0000-4000-8000-000000000003',
+		];
+		for (const uid of generated) mocks.createCalendarEvent.mockResolvedValueOnce(created(uid));
+
+		const [output] = await new CalDav().execute.call(
+			context([parameters({ uid: '' }), parameters({ uid: '' }), parameters({ uid: '' })]),
+		);
+
+		expect(output).toEqual(
+			generated.map((uid, item) => ({ json: created(uid), pairedItem: { item } })),
+		);
+		expect(mocks.createCalendarEvent).toHaveBeenCalledTimes(3);
+		for (const call of mocks.createCalendarEvent.mock.calls) {
+			expect(call[1]).not.toHaveProperty('uid');
+		}
+	});
 });
 
 describe('CalDAV Event Create deterministic validation', () => {
@@ -313,12 +339,17 @@ describe('CalDAV Event Create deterministic validation', () => {
 			'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
 		],
 		['UID type', { uid: 12 }, 'UID must be a non-empty valid iCalendar text value.'],
-		['UID empty', { uid: '' }, 'UID must be a non-empty valid iCalendar text value.'],
 		[
 			'UID Unicode',
 			{ uid: '\ud800private' },
 			'UID must be a non-empty valid iCalendar text value.',
 		],
+		[
+			'UID carriage return',
+			{ uid: 'private\ruid' },
+			'UID must be a non-empty valid iCalendar text value.',
+		],
+		['UID DEL', { uid: 'private\u007fuid' }, 'UID must be a non-empty valid iCalendar text value.'],
 		[
 			'resource overflow',
 			{ uid: 'a'.repeat(189) },
@@ -513,5 +544,17 @@ describe('CalDAV Event Create multi-item and sanitized failures', () => {
 			],
 		]);
 		expect(JSON.stringify(output)).not.toMatch(/private-uid|403|calendar\.example/i);
+	});
+
+	it('sanitizes an unexpected UID generator failure through the generic Create path', async () => {
+		mocks.createCalendarEvent.mockRejectedValueOnce(new Error('private-generator-sentinel'));
+		const error = await captureError(context([parameters({ uid: '' })]));
+
+		expect(error).toBeInstanceOf(NodeApiError);
+		expect(error).toMatchObject({
+			message: 'Event Create failed.',
+			context: { itemIndex: 0 },
+		});
+		expect(JSON.stringify(error)).not.toContain('private-generator-sentinel');
 	});
 });

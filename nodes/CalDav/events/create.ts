@@ -3,20 +3,17 @@
 import { mapCalendarEventResource } from '../icalendar/eventReadModel';
 import type { CalendarEvent } from '../icalendar/eventReadModel';
 import { parseICalendarResource } from '../icalendar/parser';
-import {
-	CalDavICalendarSerializeError,
-	CalDavICalendarSerializeErrorCode,
-	serializeBasicUtcEvent,
-} from '../icalendar/serializer';
+import { serializeBasicUtcEvent } from '../icalendar/serializer';
 import { CalDavTransportError } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import { joinCalendarCollectionUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import { createCalendarEventResource, getCalendarEventMutationEtag } from './mutations';
+import { resolveCalendarEventUid } from './uid';
 
 export interface CalendarEventCreateInput {
 	readonly calendarUrl: AbsoluteHttpUrl;
-	readonly uid: string;
+	readonly uid?: string;
 	readonly start: Date;
 	readonly end: Date;
 	readonly summary: string;
@@ -72,35 +69,7 @@ export class CalDavCalendarEventCreateError extends Error {
 
 const MAX_RESOURCE_SEGMENT_BYTES = 255;
 
-function isValidICalendarText(value: string): boolean {
-	for (let index = 0; index < value.length; index += 1) {
-		const codeUnit = value.charCodeAt(index);
-		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-			const next = value.charCodeAt(index + 1);
-			if (next < 0xdc00 || next > 0xdfff) return false;
-			index += 1;
-			continue;
-		}
-		if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) return false;
-		if (codeUnit === 0x09 || codeUnit === 0x0a) continue;
-		if (codeUnit < 0x20 || codeUnit === 0x7f) return false;
-	}
-	return true;
-}
-
 function resourceNameForUid(uid: string): string {
-	if (typeof uid !== 'string') {
-		throw new CalDavICalendarSerializeError(CalDavICalendarSerializeErrorCode.INVALID_INPUT, 'uid');
-	}
-	if (uid.length === 0) {
-		throw new CalDavICalendarSerializeError(
-			CalDavICalendarSerializeErrorCode.MISSING_REQUIRED_FIELD,
-			'uid',
-		);
-	}
-	if (!isValidICalendarText(uid)) {
-		throw new CalDavICalendarSerializeError(CalDavICalendarSerializeErrorCode.INVALID_TEXT, 'uid');
-	}
 	const encoded = Buffer.from(uid, 'utf8')
 		.toString('base64')
 		.replace(/\+/g, '-')
@@ -181,10 +150,11 @@ export async function createCalendarEvent(
 	input: CalendarEventCreateInput,
 	clock: CalendarEventCreateClock,
 ): Promise<CreatedCalendarEvent> {
-	const resourceUrl = joinCalendarCollectionUrl(input.calendarUrl, resourceNameForUid(input.uid));
+	const uid = resolveCalendarEventUid(input.uid);
+	const resourceUrl = joinCalendarCollectionUrl(input.calendarUrl, resourceNameForUid(uid));
 	const dtstamp = readClock(clock);
 	const calendarData = serializeBasicUtcEvent({
-		uid: input.uid,
+		uid,
 		dtstamp,
 		start: input.start,
 		end: input.end,
