@@ -1025,10 +1025,12 @@ function eventCreateInput(
 	if (calendarUrl === undefined) return EVENT_CREATE_MESSAGES.INVALID_CALENDAR_URL;
 
 	const uidValue = nodeParameter(execution, 'uid', itemIndex);
-	if (typeof uidValue !== 'string' || uidValue.length === 0 || !isValidICalendarText(uidValue)) {
+	if (typeof uidValue !== 'string' || !isValidICalendarText(uidValue)) {
 		return EVENT_CREATE_MESSAGES.INVALID_UID;
 	}
-	if (!createResourceNameFits(uidValue)) return EVENT_CREATE_MESSAGES.RESOURCE_NAME_TOO_LONG;
+	if (uidValue.length > 0 && !createResourceNameFits(uidValue)) {
+		return EVENT_CREATE_MESSAGES.RESOURCE_NAME_TOO_LONG;
+	}
 
 	const start = createDateTimeInstant(nodeParameter(execution, 'start', itemIndex));
 	if (start === undefined) return EVENT_CREATE_MESSAGES.INVALID_START;
@@ -1089,7 +1091,7 @@ function eventCreateInput(
 	if (end.getTime() <= start.getTime()) return EVENT_CREATE_MESSAGES.INVALID_RANGE;
 	return Object.freeze({
 		calendarUrl,
-		uid: uidValue,
+		...(uidValue.length === 0 ? {} : { uid: uidValue }),
 		start,
 		end,
 		summary,
@@ -1706,8 +1708,9 @@ export class CalDav implements INodeType {
 				displayName: 'UID',
 				name: 'uid',
 				type: 'string',
-				required: true,
 				default: '',
+				description:
+					'Optional event identity. Leave blank to use a generated UUID. Each separate Create without a UID creates a new identity.',
 				displayOptions: {
 					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
 				},

@@ -116,6 +116,7 @@ describe('calendar-event Create coordinator public contract', () => {
 			ETAG_RETRIEVAL_FAILED: 'CALENDAR_EVENT_CREATE_ETAG_RETRIEVAL_FAILED',
 		});
 		expectTypeOf<CalendarEventCreateClock>().toEqualTypeOf<() => Date>();
+		expectTypeOf<CalendarEventCreateInput['uid']>().toEqualTypeOf<string | undefined>();
 		expectTypeOf(createCalendarEvent).returns.toEqualTypeOf<Promise<CreatedCalendarEvent>>();
 	});
 

@@ -545,4 +545,16 @@ describe('CalDAV Event Create multi-item and sanitized failures', () => {
 		]);
 		expect(JSON.stringify(output)).not.toMatch(/private-uid|403|calendar\.example/i);
 	});
+
+	it('sanitizes an unexpected UID generator failure through the generic Create path', async () => {
+		mocks.createCalendarEvent.mockRejectedValueOnce(new Error('private-generator-sentinel'));
+		const error = await captureError(context([parameters({ uid: '' })]));
+
+		expect(error).toBeInstanceOf(NodeApiError);
+		expect(error).toMatchObject({
+			message: 'Event Create failed.',
+			context: { itemIndex: 0 },
+		});
+		expect(JSON.stringify(error)).not.toContain('private-generator-sentinel');
+	});
 });
