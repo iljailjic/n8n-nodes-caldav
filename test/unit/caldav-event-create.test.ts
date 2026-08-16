@@ -47,6 +47,7 @@ function response(
 		readonly etag?: unknown;
 		readonly includeEtag?: boolean;
 		readonly headers?: CalDavResponseHeaders;
+		readonly body?: string;
 	} = {},
 ): CalDavTransportResponse {
 	return {
@@ -54,7 +55,7 @@ function response(
 		effectiveUrl,
 		headers: options.headers ?? {},
 		...(options.includeEtag === false ? {} : { etag: options.etag ?? '"created-etag"' }),
-		body: Buffer.alloc(0),
+		body: Buffer.from(options.body ?? '', 'utf8'),
 	} as CalDavTransportResponse;
 }
 
@@ -71,6 +72,7 @@ function input(overrides: Partial<CalendarEventCreateInput> = {}): CalendarEvent
 	return {
 		calendarUrl: CALENDAR_URL,
 		uid: 'opaque ../UID/🚀?one',
+		timeMode: 'timed',
 		start: new Date('2040-01-02T10:00:00Z'),
 		end: new Date('2040-01-02T11:00:00Z'),
 		summary: 'Summary, exact',
@@ -84,6 +86,26 @@ function omittedUidInput(
 	const createInput: Partial<CalendarEventCreateInput> = { ...input(overrides) };
 	delete createInput.uid;
 	return createInput as CalendarEventCreateInput;
+}
+
+function eventData(uid: string): string {
+	return [
+		'BEGIN:VCALENDAR',
+		'VERSION:2.0',
+		'PRODID:-//example.test//Create oracle//EN',
+		'BEGIN:VEVENT',
+		`UID:${uid}`,
+		'DTSTAMP:20400101T000000Z',
+		'DTSTART:20400102T100000Z',
+		'DTEND:20400102T110000Z',
+		'SUMMARY:Summary\\, exact',
+		'DESCRIPTION:',
+		'LOCATION:Brno 🚀',
+		'URL:urn:example:opaque%2Fvalue',
+		'END:VEVENT',
+		'END:VCALENDAR',
+		'',
+	].join('\r\n');
 }
 
 async function captureError(promise: Promise<unknown>): Promise<unknown> {
@@ -120,9 +142,14 @@ describe('calendar-event Create coordinator public contract', () => {
 		expectTypeOf(createCalendarEvent).returns.toEqualTypeOf<Promise<CreatedCalendarEvent>>();
 	});
 
-	it('maps an opaque Unicode UID injectively to one base64url direct child and returns local normalization', async () => {
+	it('maps an opaque Unicode UID injectively and returns its authoritative read-back', async () => {
 		const requests = transport(async (request) =>
-			response(201, request.url, { etag: ' W/"opaque etag" ' }),
+			request.method === CalDavMethod.PUT
+				? response(201, request.url)
+				: response(200, request.url, {
+						etag: ' W/"opaque etag" ',
+						body: eventData('opaque ../UID/🚀?one'),
+					}),
 		);
 		const createInput = input({
 			description: '',
@@ -144,12 +171,14 @@ describe('calendar-event Create coordinator public contract', () => {
 			description: '',
 			location: 'Brno 🚀',
 			url: 'urn:example:opaque%2Fvalue',
+			timeMode: 'timed',
+			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T11:00:00Z',
 		});
 
 		const request = requests.request.mock.calls[0]?.[0] as CalDavTransportRequest;
-		expect(requests.request).toHaveBeenCalledTimes(1);
+		expect(requests.request).toHaveBeenCalledTimes(2);
 		expect(request).toMatchObject({
 			method: CalDavMethod.PUT,
 			url: expectedResourceUrl,
@@ -167,12 +196,15 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(FIXED_CLOCK.getTime()).toBe(new Date('2040-01-01T00:00:00.987Z').getTime());
 	});
 
-	it('resolves one omitted UID before the clock and reuses it in the resource, ICS, ETag fallback, and result', async () => {
+	it('resolves one omitted UID before the clock and reuses it in the resource, ICS, authoritative GET, and result', async () => {
 		const requests = transport(async (request) => {
 			if (request.method === CalDavMethod.PUT) {
 				return response(201, request.url, { includeEtag: false });
 			}
-			return response(200, request.url, { etag: '"generated-etag"' });
+			return response(200, request.url, {
+				etag: '"generated-etag"',
+				body: eventData(GENERATED_UID),
+			});
 		});
 		const clock = vi.fn(() => FIXED_CLOCK);
 		const expectedResourceUrl = new URL(
@@ -210,7 +242,12 @@ describe('calendar-event Create coordinator public contract', () => {
 			'00000000-0000-4000-8000-000000000003',
 		];
 		for (const uid of generated) mocks.randomUUID.mockReturnValueOnce(uid);
-		const requests = transport(async (request) => response(201, request.url));
+		let readIndex = 0;
+		const requests = transport(async (request) => {
+			if (request.method === CalDavMethod.PUT) return response(201, request.url);
+			const uid = generated[readIndex++]!;
+			return response(200, request.url, { body: eventData(uid) });
+		});
 
 		const created = [];
 		for (let index = 0; index < generated.length; index += 1) {
@@ -220,16 +257,21 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(mocks.randomUUID).toHaveBeenCalledTimes(3);
 		expect(created.map(({ uid }) => uid)).toEqual(generated);
 		expect(new Set(created.map(({ resourceUrl }) => resourceUrl)).size).toBe(3);
-		expect(requests.request).toHaveBeenCalledTimes(3);
+		expect(readIndex).toBe(3);
+		expect(requests.request).toHaveBeenCalledTimes(6);
 	});
 
 	it('accepts the exact 255-octet resource-segment boundary and rejects the first overflow before clock or I/O', async () => {
 		const acceptedUid = 'a'.repeat(188);
 		const acceptedName = `${Buffer.from(acceptedUid).toString('base64url')}.ics`;
 		expect(Buffer.byteLength(acceptedName, 'ascii')).toBe(255);
-		const acceptedTransport = transport(async (request) => response(201, request.url));
+		const acceptedTransport = transport(async (request) =>
+			request.method === CalDavMethod.PUT
+				? response(201, request.url)
+				: response(200, request.url, { body: eventData(acceptedUid) }),
+		);
 		await createCalendarEvent(acceptedTransport, input({ uid: acceptedUid }), () => FIXED_CLOCK);
-		expect(acceptedTransport.request).toHaveBeenCalledTimes(1);
+		expect(acceptedTransport.request).toHaveBeenCalledTimes(2);
 
 		const rejectedTransport = transport(async (request) => response(201, request.url));
 		const clock = vi.fn(() => FIXED_CLOCK);
@@ -302,7 +344,7 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(requests.request).not.toHaveBeenCalled();
 	});
 
-	it('performs one bodyless ETag GET only when the valid PUT omits ETag', async () => {
+	it('always performs one authoritative body GET after the valid PUT', async () => {
 		const requestedUrls: string[] = [];
 		const requests = transport(async (request) => {
 			requestedUrls.push(request.url);
@@ -312,7 +354,7 @@ describe('calendar-event Create coordinator public contract', () => {
 			return response(
 				200,
 				'https://calendar.example.test/calendars/selected/canonical-created.ics',
-				{ etag: '' },
+				{ etag: '', body: eventData('opaque ../UID/🚀?one') },
 			);
 		});
 

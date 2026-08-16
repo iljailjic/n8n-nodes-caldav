@@ -7,10 +7,6 @@ import * as timeRangeQueryModule from '../../nodes/CalDav/events/timeRangeQuery'
 import { queryCalendarEventsByTimeRange } from '../../nodes/CalDav/events/timeRangeQuery';
 import type { CalendarEventReadResult } from '../../nodes/CalDav/icalendar/eventReadModel';
 import {
-	CalDavCalendarEventReadModelError,
-	CalendarEventReadModelErrorCode,
-} from '../../nodes/CalDav/icalendar/eventReadModel';
-import {
 	CalDavICalendarParseError,
 	ICALENDAR_MAX_RESOURCE_BYTES,
 } from '../../nodes/CalDav/icalendar/parser';
@@ -57,6 +53,18 @@ const EXPECTED_REPORT = `<?xml version="1.0" encoding="UTF-8"?>
       </c:comp-filter>
     </c:comp-filter>
   </c:filter>
+  <c:timezone>BEGIN:VCALENDAR&#13;
+PRODID:-//n8n-nodes-caldav//EN&#13;
+VERSION:2.0&#13;
+BEGIN:VTIMEZONE&#13;
+TZID:UTC&#13;
+BEGIN:STANDARD&#13;
+DTSTART:19700101T000000&#13;
+TZOFFSETFROM:+0000&#13;
+TZOFFSETTO:+0000&#13;
+END:STANDARD&#13;
+END:VTIMEZONE&#13;
+END:VCALENDAR</c:timezone>
 </c:calendar-query>`;
 
 type MockTransport = CalDavTransport & { readonly request: ReturnType<typeof vi.fn> };
@@ -384,6 +392,8 @@ describe('event resource property selection and mapping', () => {
 			etag: exactEtag,
 			uid: 'synthetic-complete',
 			summary: 'Synthetic event',
+			timeMode: 'timed',
+			accessMode: 'editable',
 			start: '2026-01-02T10:00:00Z',
 			end: '2026-01-02T11:00:00Z',
 		});
@@ -630,7 +640,7 @@ describe('recurrence, lower errors, protocol failures, and byte limits', () => {
 		expect(String(error)).not.toContain('private-malformed-sentinel');
 	});
 
-	it('preserves an unsupported event read-model failure atomically', async () => {
+	it('returns an unsupported event as safe read-only without dropping other resources', async () => {
 		const unsupported = eventIcs('private-tzid-sentinel').replace(
 			'DTSTART:20260102T100000Z',
 			'DTSTART;TZID=Private/Sentinel:20260102T100000',
@@ -639,14 +649,19 @@ describe('recurrence, lower errors, protocol failures, and byte limits', () => {
 			successfulResource('/valid.ics', eventIcs('valid')) +
 				successfulResource('/unsupported.ics', unsupported),
 		);
-		const error = await captureFailure(mockTransport(async () => transportResponse(xml)));
+		const result = await queryCalendarEventsByTimeRange(
+			mockTransport(async () => transportResponse(xml)),
+			CALENDAR_URL,
+			RANGE,
+		);
 
-		expect(error).toBeInstanceOf(CalDavCalendarEventReadModelError);
-		expect(error).toMatchObject({
-			code: CalendarEventReadModelErrorCode.UNSUPPORTED_EVENT_TIME,
+		expect(result).toHaveLength(2);
+		expect(result.find(({ event }) => event.uid === 'private-tzid-sentinel')?.event).toMatchObject({
+			timeMode: 'unsupported',
+			accessMode: 'readOnly',
+			readOnlyReason: 'unsupportedTimeRepresentation',
 		});
-		expect(String(error)).not.toContain('private-tzid-sentinel');
-		expect(String(error)).not.toContain('Private/Sentinel');
+		expect(JSON.stringify(result.map(({ event }) => event))).not.toContain('Private/Sentinel');
 	});
 
 	it('preserves the parser 5 MiB resource bound independently', async () => {

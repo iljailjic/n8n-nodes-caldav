@@ -181,6 +181,8 @@ describe('calendar event Update coordinator requests and authoritative result', 
 			etag: ' "current server etag" ',
 			uid: 'update@example.test',
 			summary: 'After update',
+			timeMode: 'timed',
+			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T10:30:00Z',
 		});

@@ -60,8 +60,11 @@ interface EventCreateParameters {
 	readonly operation: unknown;
 	readonly calendar: unknown;
 	readonly uid: unknown;
+	readonly timeMode: unknown;
 	readonly start: unknown;
 	readonly end: unknown;
+	readonly startDate?: unknown;
+	readonly endDate?: unknown;
 	readonly summary: unknown;
 	readonly additionalFields: unknown;
 }
@@ -76,6 +79,7 @@ function parameters(overrides: Partial<EventCreateParameters> = {}): EventCreate
 		operation: 'create',
 		calendar: locator('https://calendar.example.test/calendars/work'),
 		uid: 'opaque UID 🚀',
+		timeMode: 'timed',
 		start: '2040-01-02T10:00:00+01:00',
 		end: '2040-01-02T11:00:00+01:00',
 		summary: 'Meeting',
@@ -112,6 +116,8 @@ function created(uid: string, optional: Record<string, string> = {}) {
 		uid,
 		summary: 'Meeting',
 		...optional,
+		timeMode: 'timed',
+		accessMode: 'editable',
 		start: '2040-01-02T09:00:00Z',
 		end: '2040-01-02T10:00:00Z',
 	};
@@ -196,13 +202,16 @@ describe('CalDAV Event Create metadata', () => {
 		});
 	});
 
-	it('exposes optional UID help and the established ordered Create fields', () => {
+	it('exposes optional UID help, explicit time mode, and both mode-specific time pairs', () => {
 		const properties = createProperties();
 		expect(properties.map(({ displayName }) => displayName)).toEqual([
 			'Calendar',
 			'UID',
+			'Time Mode',
 			'Start',
 			'End',
+			'Start Date',
+			'End Date',
 			'Summary',
 			'Additional Fields',
 		]);
@@ -213,18 +222,21 @@ describe('CalDAV Event Create metadata', () => {
 		expect(uid?.description).toContain('generated UUID');
 		expect(uid?.description).toContain('Each separate Create');
 		expect(
-			properties.slice(2, 5).map(({ name, type, required, default: defaultValue }) => ({
+			properties.slice(2, 8).map(({ name, type, required, default: defaultValue }) => ({
 				name,
 				type,
 				required,
 				default: defaultValue,
 			})),
 		).toEqual([
+			{ name: 'timeMode', type: 'options', required: true, default: 'timed' },
 			{ name: 'start', type: 'dateTime', required: true, default: '' },
 			{ name: 'end', type: 'dateTime', required: true, default: '' },
+			{ name: 'startDate', type: 'dateTime', required: true, default: '' },
+			{ name: 'endDate', type: 'dateTime', required: true, default: '' },
 			{ name: 'summary', type: 'string', required: true, default: '' },
 		]);
-		const additional = properties[5];
+		const additional = properties[8];
 		expect(additional).toMatchObject({
 			name: 'additionalFields',
 			type: 'collection',

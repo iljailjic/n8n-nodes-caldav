@@ -38,6 +38,11 @@ Define resources, operations, fields, item mapping, and n8n-specific errors.
 Delegate protocol work to application services. Do not build XML, iCalendar, or
 HTTP requests here.
 
+Event time input is an explicit `timed` or `allDay` union. The n8n layer owns
+strict expression normalization and projects native Date/DateTime values to
+calendar dates with the workflow timezone; it never derives all-day dates from
+the host timezone.
+
 ### CalDAV/WebDAV transport
 
 Own authenticated HTTP requests, WebDAV methods, headers, redirects, timeouts,
@@ -56,11 +61,20 @@ Build and parse namespace-aware WebDAV/CalDAV XML documents. Convert XML to
 typed protocol objects and apply defensive input limits. Do not depend on n8n
 UI types.
 
+Time-range REPORT construction owns the fixed UTC `CALDAV:timezone` context
+used to make all-day overlap semantics independent of server configuration.
+
 ### iCalendar parser/serializer
 
 Parse and serialize `VCALENDAR`, `VEVENT`, time zones, alarms, recurrence, and
 raw ICS while preserving data outside the simplified event model whenever
 possible.
+
+The public event read model discriminates editable UTC timed events, editable
+Gregorian all-day events with an exclusive end date, and safe read-only events
+whose time representation is unsupported. Structured time changes preserve
+unrelated components and parameters, and explicit timed/all-day conversions
+never infer a timezone or duration.
 
 ### Provider adapters
 

@@ -43,6 +43,14 @@ export type UtcDateTimeString = string & {
 	readonly __utcDateTimeString: unique symbol;
 };
 
+export type CalendarDateString = string & {
+	readonly __calendarDateString: unique symbol;
+};
+
+export type CalendarEventEditableTimeMode = 'timed' | 'allDay';
+export type CalendarEventAccessMode = 'editable' | 'readOnly';
+export type CalendarEventReadOnlyReason = 'unsupportedTimeRepresentation';
+
 export type CalendarEventExtensionValue =
 	| null
 	| boolean
@@ -63,7 +71,7 @@ export interface CalendarEventResourceInput {
 	readonly extensions?: CalendarEventExtensions;
 }
 
-export interface CalendarEvent {
+interface CalendarEventCommon {
 	readonly calendarUrl: AbsoluteHttpUrl;
 	readonly resourceUrl: AbsoluteHttpUrl;
 	readonly etag?: string;
@@ -72,10 +80,29 @@ export interface CalendarEvent {
 	readonly description?: string;
 	readonly location?: string;
 	readonly url?: string;
-	readonly start: UtcDateTimeString;
-	readonly end: UtcDateTimeString;
 	readonly extensions?: CalendarEventExtensions;
 }
+
+export type CalendarEvent = CalendarEventCommon &
+	(
+		| {
+				readonly timeMode: 'timed';
+				readonly accessMode: 'editable';
+				readonly start: UtcDateTimeString;
+				readonly end: UtcDateTimeString;
+		  }
+		| {
+				readonly timeMode: 'allDay';
+				readonly accessMode: 'editable';
+				readonly startDate: CalendarDateString;
+				readonly endDate: CalendarDateString;
+		  }
+		| {
+				readonly timeMode: 'unsupported';
+				readonly accessMode: 'readOnly';
+				readonly readOnlyReason: CalendarEventReadOnlyReason;
+		  }
+	);
 
 export interface CalendarEventPreservationContext {
 	readonly resource: ICalendarResource;
@@ -378,6 +405,11 @@ interface ParsedUtcDateTime {
 	readonly comparisonKey: string;
 }
 
+interface ParsedCalendarDate {
+	readonly formatted: CalendarDateString;
+	readonly comparisonKey: string;
+}
+
 function parseUtcDateTime(property: ICalendarProperty): ParsedUtcDateTime {
 	if (hasParameter(property, 'TZID')) fail('UNSUPPORTED_EVENT_TIME');
 
@@ -409,6 +441,31 @@ function parseUtcDateTime(property: ICalendarProperty): ParsedUtcDateTime {
 			`${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}Z` as UtcDateTimeString,
 		comparisonKey: `${yearText}${monthText}${dayText}${hourText}${minuteText}${secondText}`,
 	};
+}
+
+function parseCalendarDate(property: ICalendarProperty): ParsedCalendarDate {
+	if (hasParameter(property, 'TZID')) fail('UNSUPPORTED_EVENT_TIME');
+	const match = DATE_PATTERN.exec(property.value.raw);
+	if (match === null || !isValidCalendarDateParts(match)) fail('INVALID_EVENT_PROPERTY');
+	const [, year, month, day] = match;
+	return {
+		formatted: `${year}-${month}-${day}` as CalendarDateString,
+		comparisonKey: property.value.raw,
+	};
+}
+
+function timePropertyIsSyntacticallyReadable(property: ICalendarProperty): boolean {
+	if (property.value.textValues !== null) return false;
+	const valueType = asciiUpperCase(property.value.valueType);
+	if (valueType === 'DATE') {
+		const match = DATE_PATTERN.exec(property.value.raw);
+		return match !== null && isValidCalendarDateParts(match);
+	}
+	if (valueType !== 'DATE-TIME') return false;
+	const utcMatch = UTC_DATE_TIME_PATTERN.exec(property.value.raw);
+	if (utcMatch !== null) return isValidCalendarDateTimeMatch(utcMatch);
+	const localMatch = LOCAL_DATE_TIME_PATTERN.exec(property.value.raw);
+	return localMatch !== null && isValidCalendarDateTimeMatch(localMatch);
 }
 
 function isPlainRecord(value: object): boolean {
@@ -583,15 +640,7 @@ export function mapCalendarEventResource(
 		fail('INVALID_EVENT_PROPERTY');
 	}
 
-	const start = parseUtcDateTime(startProperty);
-	if (durationProperty !== undefined) fail('UNSUPPORTED_EVENT_TIME');
-	const end = endProperty === undefined ? start : parseUtcDateTime(endProperty);
-	if (end.comparisonKey <= start.comparisonKey && endProperty !== undefined) {
-		fail('INVALID_EVENT_TIME_RANGE');
-	}
-
-	const extensions = snapshotExtensions(input.extensions);
-	const event = Object.freeze({
+	const common = {
 		calendarUrl: input.calendarUrl,
 		resourceUrl: input.resourceUrl,
 		...(input.etag !== undefined ? { etag: input.etag } : {}),
@@ -600,8 +649,88 @@ export function mapCalendarEventResource(
 		...(description !== undefined ? { description } : {}),
 		...(location !== undefined ? { location } : {}),
 		...(url !== undefined ? { url } : {}),
-		start: start.formatted,
-		end: end.formatted,
+	};
+
+	let time:
+		| {
+				readonly timeMode: 'timed';
+				readonly accessMode: 'editable';
+				readonly start: UtcDateTimeString;
+				readonly end: UtcDateTimeString;
+		  }
+		| {
+				readonly timeMode: 'allDay';
+				readonly accessMode: 'editable';
+				readonly startDate: CalendarDateString;
+				readonly endDate: CalendarDateString;
+		  }
+		| {
+				readonly timeMode: 'unsupported';
+				readonly accessMode: 'readOnly';
+				readonly readOnlyReason: 'unsupportedTimeRepresentation';
+		  };
+
+	const startType = asciiUpperCase(startProperty.value.valueType);
+	const endType =
+		endProperty === undefined ? undefined : asciiUpperCase(endProperty.value.valueType);
+	const unsupported = (): void => {
+		time = {
+			timeMode: 'unsupported',
+			accessMode: 'readOnly',
+			readOnlyReason: 'unsupportedTimeRepresentation',
+		};
+	};
+
+	if (!timePropertyIsSyntacticallyReadable(startProperty)) fail('INVALID_EVENT_PROPERTY');
+	if (endProperty !== undefined && !timePropertyIsSyntacticallyReadable(endProperty)) {
+		fail('INVALID_EVENT_PROPERTY');
+	}
+
+	if (durationProperty !== undefined) {
+		unsupported();
+	} else if (
+		startType === 'DATE' &&
+		endProperty !== undefined &&
+		endType === 'DATE' &&
+		!hasParameter(startProperty, 'TZID') &&
+		!hasParameter(endProperty, 'TZID')
+	) {
+		const start = parseCalendarDate(startProperty);
+		const end = parseCalendarDate(endProperty);
+		if (end.comparisonKey <= start.comparisonKey) fail('INVALID_EVENT_TIME_RANGE');
+		time = {
+			timeMode: 'allDay',
+			accessMode: 'editable',
+			startDate: start.formatted,
+			endDate: end.formatted,
+		};
+	} else if (
+		startType === 'DATE-TIME' &&
+		(endProperty === undefined || endType === 'DATE-TIME') &&
+		!hasParameter(startProperty, 'TZID') &&
+		(endProperty === undefined || !hasParameter(endProperty, 'TZID')) &&
+		UTC_DATE_TIME_PATTERN.test(startProperty.value.raw) &&
+		(endProperty === undefined || UTC_DATE_TIME_PATTERN.test(endProperty.value.raw))
+	) {
+		const start = parseUtcDateTime(startProperty);
+		const end = endProperty === undefined ? start : parseUtcDateTime(endProperty);
+		if (end.comparisonKey <= start.comparisonKey && endProperty !== undefined) {
+			fail('INVALID_EVENT_TIME_RANGE');
+		}
+		time = {
+			timeMode: 'timed',
+			accessMode: 'editable',
+			start: start.formatted,
+			end: end.formatted,
+		};
+	} else {
+		unsupported();
+	}
+	const extensions = snapshotExtensions(input.extensions);
+
+	const event = Object.freeze({
+		...common,
+		...time!,
 		...(extensions !== undefined ? { extensions } : {}),
 	}) satisfies CalendarEvent;
 	return Object.freeze({ event, context });

@@ -221,6 +221,8 @@ describe('calendar-event direct-resource request and mapping', () => {
 			description: 'Description',
 			location: 'Room',
 			url: 'https://public.example.test/event',
+			timeMode: 'timed',
+			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T10:30:00Z',
 		});

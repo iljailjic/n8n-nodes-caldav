@@ -31,7 +31,7 @@ const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/cale
 const RESOURCE_URL = validateAbsoluteHttpUrl(
 	'https://calendar.example.test/calendars/all-day/oracle.ics',
 );
-const MODIFIED_AT = new Date('2041-02-03T04:05:06.987Z');
+const MODIFIED_AT = new Date('2041-02-03T04:05:06Z');
 
 type Issue41Patch = {
 	readonly timeMode: 'timed' | 'allDay';
@@ -225,7 +225,9 @@ describe('issue #41 strict Gregorian DATE and exclusive-end semantics', () => {
 
 			expect(serialized).toContain(`DTSTART;VALUE=DATE:${start}\r\n`);
 			expect(serialized).toContain(`DTEND;VALUE=DATE:${end}\r\n`);
-			expect(serialized).not.toMatch(/DT(?:START|END)[^\r\n]*(?:T|Z|TZID)/);
+			expect(serialized).not.toMatch(
+				/DT(?:START|END)(?:;[^:\r\n]*)?:[^\r\n]*(?:T|Z)|DT(?:START|END)[^:\r\n]*TZID/,
+			);
 			expect(event).toMatchObject({ startDate: expectedStart, endDate: expectedEnd });
 		},
 	);

@@ -134,6 +134,8 @@ function result(
 		description: 'Public description',
 		location: 'Room',
 		url: 'https://public.example.test/event',
+		timeMode: 'timed' as const,
+		accessMode: 'editable' as const,
 		start: '2040-01-02T10:00:00Z' as CalendarEventReadResult['event']['start'],
 		end: '2040-01-02T10:30:00Z' as CalendarEventReadResult['event']['end'],
 		...overrides,
@@ -396,9 +398,9 @@ describe('CalDAV Event Get dispatch and output', () => {
 		expect(executionContext.getNodeParameter).not.toHaveBeenCalledWith('resourceUrl', 0);
 	});
 
-	it('emits only the stable provider-neutral projection and strips recurrence/context data', async () => {
+	it('emits the stable provider-neutral projection with extensions last and strips context data', async () => {
 		const event = result('recurring@example.test', {
-			extensions: { synthetic: { privateValue: 'private-extension-sentinel' } },
+			extensions: { synthetic: { providerValue: 'extension-value' } },
 		});
 		mocks.getCalendarEventByResourceUrl.mockResolvedValue(event);
 
@@ -415,8 +417,11 @@ describe('CalDAV Event Get dispatch and output', () => {
 			'description',
 			'location',
 			'url',
+			'timeMode',
+			'accessMode',
 			'start',
 			'end',
+			'extensions',
 		]);
 		expect(output).toEqual({
 			json: {
@@ -428,13 +433,18 @@ describe('CalDAV Event Get dispatch and output', () => {
 				description: event.event.description,
 				location: event.event.location,
 				url: event.event.url,
+				timeMode: 'timed',
+				accessMode: 'editable',
 				start: event.event.start,
 				end: event.event.end,
+				extensions: event.event.extensions,
 			},
 			pairedItem: { item: 0 },
 		});
 		expect(output.json).not.toHaveProperty('context');
-		expect(output.json).not.toHaveProperty('extensions');
+		expect(output.json.extensions).toEqual({
+			synthetic: { providerValue: 'extension-value' },
+		});
 		expect(output.json).not.toHaveProperty('id');
 		expect(JSON.stringify(output)).not.toContain('private-ics-sentinel');
 	});
@@ -460,6 +470,8 @@ describe('CalDAV Event Get dispatch and output', () => {
 			resourceUrl: event.event.resourceUrl,
 			etag: '',
 			uid: '',
+			timeMode: 'timed',
+			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T10:30:00Z',
 		});

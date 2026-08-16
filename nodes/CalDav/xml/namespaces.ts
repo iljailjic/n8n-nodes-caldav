@@ -58,6 +58,7 @@ export const XML_QUALIFIED_NAMES: Readonly<{
 	currentUserPrivilegeSet: XmlQualifiedName;
 	calendarQuery: XmlQualifiedName;
 	calendarData: XmlQualifiedName;
+	timezone: XmlQualifiedName;
 	filter: XmlQualifiedName;
 	compFilter: XmlQualifiedName;
 	propFilter: XmlQualifiedName;
@@ -77,6 +78,7 @@ export const XML_QUALIFIED_NAMES: Readonly<{
 	currentUserPrivilegeSet: createQualifiedName('dav', 'current-user-privilege-set'),
 	calendarQuery: createQualifiedName('caldav', 'calendar-query'),
 	calendarData: createQualifiedName('caldav', 'calendar-data'),
+	timezone: createQualifiedName('caldav', 'timezone'),
 	filter: createQualifiedName('caldav', 'filter'),
 	compFilter: createQualifiedName('caldav', 'comp-filter'),
 	propFilter: createQualifiedName('caldav', 'prop-filter'),

@@ -1,7 +1,7 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The accepted protocol-layer contract requires transport-independent typed errors, outside the n8n UI boundary. */
 
 import { createCalendarEventPreservationContext } from './eventReadModel';
-import type { CalendarEventPreservationContext } from './eventReadModel';
+import type { CalendarDateString, CalendarEventPreservationContext } from './eventReadModel';
 import { parseICalendarResource } from './parser';
 import type {
 	ICalendarComponent,
@@ -18,17 +18,29 @@ export type SetPatch<T> = {
 
 export type OptionalFieldPatch<T> = SetPatch<T> | { readonly kind: 'remove' };
 
-export interface CalendarEventPatch {
-	readonly start?: SetPatch<Date>;
-	readonly end?: SetPatch<Date>;
+interface CalendarEventPatchCommon {
 	readonly summary?: SetPatch<string>;
 	readonly description?: OptionalFieldPatch<string>;
 	readonly location?: OptionalFieldPatch<string>;
 	readonly url?: OptionalFieldPatch<string>;
 }
 
+export type CalendarEventPatch = CalendarEventPatchCommon &
+	(
+		| {
+				readonly timeMode: 'timed';
+				readonly start?: SetPatch<Date>;
+				readonly end?: SetPatch<Date>;
+		  }
+		| {
+				readonly timeMode: 'allDay';
+				readonly startDate?: SetPatch<CalendarDateString>;
+				readonly endDate?: SetPatch<CalendarDateString>;
+		  }
+	);
+
 export type CalendarEventPatchField =
-	'start' | 'end' | 'summary' | 'description' | 'location' | 'url';
+	'start' | 'end' | 'startDate' | 'endDate' | 'summary' | 'description' | 'location' | 'url';
 
 export const CalendarEventPatchErrorCode = Object.freeze({
 	INVALID_INPUT: 'INVALID_INPUT',
@@ -84,23 +96,30 @@ interface ValidatedOperation {
 	readonly kind: PatchKind;
 	readonly text?: string;
 	readonly timestamp?: number;
+	readonly calendarDate?: CalendarDateString;
 }
 
-type ValidatedPatch = Partial<Readonly<Record<CalendarEventPatchField, ValidatedOperation>>>;
+type ValidatedPatch = Partial<Readonly<Record<CalendarEventPatchField, ValidatedOperation>>> & {
+	readonly timeMode?: 'timed' | 'allDay';
+};
 
 const PATCH_FIELDS = [
 	'start',
 	'end',
+	'startDate',
+	'endDate',
 	'summary',
 	'description',
 	'location',
 	'url',
 ] as const satisfies readonly CalendarEventPatchField[];
-const PATCH_FIELD_SET = new Set<string>(PATCH_FIELDS);
+const PATCH_FIELD_SET = new Set<string>(['timeMode', ...PATCH_FIELDS]);
 const OPTIONAL_FIELDS = new Set<CalendarEventPatchField>(['description', 'location', 'url']);
 const PROPERTY_NAMES: Readonly<Record<CalendarEventPatchField, string>> = {
 	start: 'DTSTART',
 	end: 'DTEND',
+	startDate: 'DTSTART',
+	endDate: 'DTEND',
 	summary: 'SUMMARY',
 	description: 'DESCRIPTION',
 	location: 'LOCATION',
@@ -121,6 +140,8 @@ const CANONICAL_RANK = new Map<string, number>(CANONICAL_ORDER.map((name, index)
 const SINGLETON_NAMES = ['DTSTART', 'DTEND', 'SUMMARY', 'DESCRIPTION', 'LOCATION', 'URL'] as const;
 const IMMUTABLE_KEY_FORMS = new Set(['UID', 'RECURRENCEID', 'RECURRENCE-ID']);
 const UTC_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
+const CALENDAR_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const ICALENDAR_DATE_PATTERN = /^(\d{4})(\d{2})(\d{2})$/;
 const SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*$/;
 const HEX_PATTERN = /^[0-9A-Fa-f]$/;
 const PRESERVATION_CONTEXT_PROVENANCE_VERIFIER = '__isCanonicalCalendarEventPreservationContext';
@@ -441,6 +462,10 @@ function isValidText(value: string): boolean {
 
 function validatePatchOperations(snapshot: Readonly<Record<string, unknown>>): ValidatedPatch {
 	const validated: Partial<Record<CalendarEventPatchField, ValidatedOperation>> = {};
+	const timeMode = snapshot.timeMode;
+	if (timeMode !== undefined && timeMode !== 'timed' && timeMode !== 'allDay') {
+		fail('INVALID_INPUT');
+	}
 	for (const field of PATCH_FIELDS) {
 		if (!Object.prototype.hasOwnProperty.call(snapshot, field)) continue;
 		const operationValue = snapshot[field];
@@ -462,6 +487,8 @@ function validatePatchOperations(snapshot: Readonly<Record<string, unknown>>): V
 
 		if (field === 'start' || field === 'end') {
 			validated[field] = { kind: 'set', timestamp: dateTimestamp(operation.value, field) };
+		} else if (field === 'startDate' || field === 'endDate') {
+			validated[field] = { kind: 'set', calendarDate: calendarDateValue(operation.value, field) };
 		} else {
 			if (typeof operation.value !== 'string') fail('INVALID_INPUT', field);
 			if (field === 'url') {
@@ -470,7 +497,7 @@ function validatePatchOperations(snapshot: Readonly<Record<string, unknown>>): V
 			validated[field] = { kind: 'set', text: operation.value };
 		}
 	}
-	return validated;
+	return { ...validated, ...(timeMode === undefined ? {} : { timeMode }) };
 }
 
 function isUnreserved(character: string): boolean {
@@ -662,7 +689,13 @@ function parametersAreCompatible(
 	if (tzidParameters.length !== 0) return false;
 
 	const expected =
-		field === 'url' ? 'URI' : field === 'start' || field === 'end' ? 'DATE-TIME' : 'TEXT';
+		field === 'url'
+			? 'URI'
+			: field === 'start' || field === 'end'
+				? 'DATE-TIME'
+				: field === 'startDate' || field === 'endDate'
+					? 'DATE'
+					: 'TEXT';
 	const explicit = effectiveValueParameter(property);
 	return explicit === undefined
 		? asciiUpperCase(property.value.valueType) === expected
@@ -672,6 +705,9 @@ function parametersAreCompatible(
 function validateTouchedParameters(master: ICalendarComponent, patch: ValidatedPatch): void {
 	for (const field of PATCH_FIELDS) {
 		if (patch[field]?.kind !== 'set') continue;
+		if (field === 'start' || field === 'end' || field === 'startDate' || field === 'endDate') {
+			continue;
+		}
 		const property = directProperties(master, PROPERTY_NAMES[field])[0];
 		if (property !== undefined && !parametersAreCompatible(property, field)) {
 			fail('INCOMPATIBLE_PARAMETERS', field);
@@ -687,6 +723,42 @@ function daysInMonth(year: number, month: number): number {
 	if (month === 2) return isLeapYear(year) ? 29 : 28;
 	if (month === 4 || month === 6 || month === 9 || month === 11) return 30;
 	return 31;
+}
+
+function calendarDateValue(value: unknown, field: 'startDate' | 'endDate'): CalendarDateString {
+	if (typeof value !== 'string') fail('INVALID_INPUT', field);
+	const match = CALENDAR_DATE_PATTERN.exec(value);
+	if (match === null) fail('INVALID_DATE', field);
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	if (
+		year < 1 ||
+		year > 9999 ||
+		month < 1 ||
+		month > 12 ||
+		day < 1 ||
+		day > daysInMonth(year, month)
+	) {
+		fail('INVALID_DATE', field);
+	}
+	return value as CalendarDateString;
+}
+
+function calendarDateKey(raw: string): string | undefined {
+	const match = ICALENDAR_DATE_PATTERN.exec(raw);
+	if (match === null) return undefined;
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	return year >= 1 &&
+		year <= 9999 &&
+		month >= 1 &&
+		month <= 12 &&
+		day >= 1 &&
+		day <= daysInMonth(year, month)
+		? raw
+		: undefined;
 }
 
 function utcDateTimeKey(raw: string): string | undefined {
@@ -735,47 +807,135 @@ function formatUtcDateTime(timestamp: number): string {
 	);
 }
 
-function safeUtcTimeProperty(property: ICalendarProperty): boolean {
-	return (
-		asciiUpperCase(property.value.valueType) === 'DATE-TIME' &&
-		property.value.textValues === null &&
-		parametersAreCompatible(property, 'start')
-	);
+type EditableTimeMode = 'timed' | 'allDay';
+
+interface TimePatchPlan {
+	readonly remoteMode: EditableTimeMode;
+	readonly targetMode: EditableTimeMode;
+	readonly conversion: boolean;
+	readonly touchesTime: boolean;
 }
 
-function finalTimeKeys(
+function timePropertyMode(property: ICalendarProperty): EditableTimeMode | undefined {
+	if (property.value.textValues !== null) return undefined;
+	const type = asciiUpperCase(property.value.valueType);
+	if (
+		type === 'DATE-TIME' &&
+		utcDateTimeKey(property.value.raw) !== undefined &&
+		parametersAreCompatible(property, 'start')
+	) {
+		return 'timed';
+	}
+	if (
+		type === 'DATE' &&
+		calendarDateKey(property.value.raw) !== undefined &&
+		parametersAreCompatible(property, 'startDate')
+	) {
+		return 'allDay';
+	}
+	return undefined;
+}
+
+function conversionParametersAreSafe(property: ICalendarProperty): boolean {
+	return property.parameters.every((parameter) => asciiUpperCase(parameter.name) === 'VALUE');
+}
+
+function planTimePatch(
 	context: CalendarEventPreservationContext,
 	patch: ValidatedPatch,
-): { readonly start: string; readonly end: string } | undefined {
-	const hasStart = patch.start?.kind === 'set';
-	const hasEnd = patch.end?.kind === 'set';
-	if (!hasStart && !hasEnd) return undefined;
-	const failureField: CalendarEventPatchField = hasStart ? 'start' : 'end';
+): TimePatchPlan {
+	const hasTimedStart = patch.start?.kind === 'set';
+	const hasTimedEnd = patch.end?.kind === 'set';
+	const hasDateStart = patch.startDate?.kind === 'set';
+	const hasDateEnd = patch.endDate?.kind === 'set';
+	const hasTimed = hasTimedStart || hasTimedEnd;
+	const hasAllDay = hasDateStart || hasDateEnd;
+	if (hasTimed && hasAllDay) fail('INVALID_INPUT');
+	if (!hasTimed && !hasAllDay && patch.timeMode === undefined) {
+		return {
+			remoteMode: 'timed',
+			targetMode: 'timed',
+			conversion: false,
+			touchesTime: false,
+		};
+	}
+	const failureField: CalendarEventPatchField = hasTimed
+		? hasTimedStart
+			? 'start'
+			: 'end'
+		: hasDateStart
+			? 'startDate'
+			: 'endDate';
 	const master = context.master;
 	const starts = directProperties(master, 'DTSTART');
 	const ends = directProperties(master, 'DTEND');
 	if (
 		starts.length !== 1 ||
 		ends.length !== 1 ||
-		directProperties(master, 'DURATION').length !== 0 ||
-		directProperties(master, 'RRULE').length !== 0 ||
-		directProperties(master, 'RDATE').length !== 0 ||
-		directProperties(master, 'EXDATE').length !== 0 ||
-		context.exceptions.length !== 0 ||
-		!safeUtcTimeProperty(starts[0]!) ||
-		!safeUtcTimeProperty(ends[0]!)
+		directProperties(master, 'DURATION').length !== 0
+	) {
+		fail('UNSUPPORTED_TIME', failureField);
+	}
+	const startMode = timePropertyMode(starts[0]!);
+	const endMode = timePropertyMode(ends[0]!);
+	if (startMode === undefined || startMode !== endMode) fail('UNSUPPORTED_TIME', failureField);
+	const remoteMode = startMode;
+	const targetMode = patch.timeMode ?? (hasTimed ? 'timed' : hasAllDay ? 'allDay' : remoteMode);
+	if ((targetMode === 'timed' && hasAllDay) || (targetMode === 'allDay' && hasTimed)) {
+		fail('INVALID_INPUT');
+	}
+	const conversion = targetMode !== remoteMode;
+	const touchesTime = hasTimed || hasAllDay || conversion;
+	if (conversion) {
+		if (
+			(targetMode === 'timed' && (!hasTimedStart || !hasTimedEnd)) ||
+			(targetMode === 'allDay' && (!hasDateStart || !hasDateEnd))
+		) {
+			fail('INVALID_INPUT', targetMode === 'timed' ? 'end' : 'endDate');
+		}
+		if (!conversionParametersAreSafe(starts[0]!) || !conversionParametersAreSafe(ends[0]!)) {
+			fail('INCOMPATIBLE_PARAMETERS', targetMode === 'timed' ? 'start' : 'startDate');
+		}
+	}
+	if (
+		touchesTime &&
+		(directProperties(master, 'RRULE').length !== 0 ||
+			directProperties(master, 'RDATE').length !== 0 ||
+			directProperties(master, 'EXDATE').length !== 0 ||
+			context.exceptions.length !== 0)
 	) {
 		fail('UNSUPPORTED_TIME', failureField);
 	}
 
-	const newStart = hasStart ? formatUtcDateTime(patch.start!.timestamp!) : undefined;
-	const newEnd = hasEnd ? formatUtcDateTime(patch.end!.timestamp!) : undefined;
-	const startKey =
-		newStart === undefined ? utcDateTimeKey(starts[0]!.value.raw) : utcDateTimeKey(newStart);
-	const endKey = newEnd === undefined ? utcDateTimeKey(ends[0]!.value.raw) : utcDateTimeKey(newEnd);
-	if (startKey === undefined || endKey === undefined) fail('UNSUPPORTED_TIME', failureField);
-	if (endKey <= startKey) fail('INVALID_TIME_RANGE');
-	return { start: startKey, end: endKey };
+	if (targetMode === 'timed') {
+		const startKey = hasTimedStart
+			? utcDateTimeKey(formatUtcDateTime(patch.start!.timestamp!))
+			: remoteMode === 'timed'
+				? utcDateTimeKey(starts[0]!.value.raw)
+				: undefined;
+		const endKey = hasTimedEnd
+			? utcDateTimeKey(formatUtcDateTime(patch.end!.timestamp!))
+			: remoteMode === 'timed'
+				? utcDateTimeKey(ends[0]!.value.raw)
+				: undefined;
+		if (startKey === undefined || endKey === undefined) fail('UNSUPPORTED_TIME', failureField);
+		if (endKey <= startKey) fail('INVALID_TIME_RANGE');
+	} else {
+		const startKey = hasDateStart
+			? patch.startDate!.calendarDate!.split('-').join('')
+			: remoteMode === 'allDay'
+				? calendarDateKey(starts[0]!.value.raw)
+				: undefined;
+		const endKey = hasDateEnd
+			? patch.endDate!.calendarDate!.split('-').join('')
+			: remoteMode === 'allDay'
+				? calendarDateKey(ends[0]!.value.raw)
+				: undefined;
+		if (startKey === undefined || endKey === undefined) fail('UNSUPPORTED_TIME', failureField);
+		if (endKey <= startKey) fail('INVALID_TIME_RANGE');
+	}
+
+	return { remoteMode, targetMode, conversion, touchesTime };
 }
 
 function operationChanges(
@@ -790,6 +950,9 @@ function operationChanges(
 		return (
 			utcDateTimeKey(property.value.raw) !== utcDateTimeKey(formatUtcDateTime(operation.timestamp!))
 		);
+	}
+	if (field === 'startDate' || field === 'endDate') {
+		return calendarDateKey(property.value.raw) !== operation.calendarDate!.split('-').join('');
 	}
 	if (field === 'url') return property.value.raw !== operation.text;
 	return property.value.textValues?.length !== 1 || property.value.textValues[0] !== operation.text;
@@ -812,15 +975,37 @@ function replacementProperty(
 	name: string,
 	field: CalendarEventPatchField | 'metadata',
 	value: string,
+	timePlan?: TimePatchPlan,
 ): ICalendarProperty {
-	const isText = field !== 'metadata' && field !== 'start' && field !== 'end' && field !== 'url';
+	const isTimed = field === 'start' || field === 'end';
+	const isAllDay = field === 'startDate' || field === 'endDate';
+	const isText = field !== 'metadata' && !isTimed && !isAllDay && field !== 'url';
+	const parameters: readonly ICalendarParameter[] =
+		isAllDay && timePlan?.conversion === true
+			? Object.freeze([
+					{
+						kind: 'parameter' as const,
+						name: 'VALUE',
+						values: [
+							{
+								kind: 'parameterValue' as const,
+								raw: 'DATE',
+								value: 'DATE',
+								quoted: false,
+							},
+						],
+					},
+				])
+			: isTimed && timePlan?.conversion === true
+				? Object.freeze([])
+				: (existing?.parameters ?? Object.freeze([]));
 	return freezeProperty({
 		kind: 'property',
 		name: existing?.name ?? name,
-		parameters: existing?.parameters ?? Object.freeze([]),
+		parameters,
 		value: {
 			kind: 'value',
-			valueType: isText ? 'TEXT' : field === 'url' ? 'URI' : 'DATE-TIME',
+			valueType: isText ? 'TEXT' : field === 'url' ? 'URI' : isAllDay ? 'DATE' : 'DATE-TIME',
 			raw: isText ? '' : value,
 			textValues: isText ? [value] : null,
 		},
@@ -856,6 +1041,7 @@ function applyFieldOperation(
 	entries: ICalendarEntry[],
 	field: CalendarEventPatchField,
 	operation: ValidatedOperation,
+	timePlan: TimePatchPlan,
 ): void {
 	const name = PROPERTY_NAMES[field];
 	const index = entries.findIndex(
@@ -869,8 +1055,10 @@ function applyFieldOperation(
 	const value =
 		field === 'start' || field === 'end'
 			? formatUtcDateTime(operation.timestamp!)
-			: operation.text!;
-	const replacement = replacementProperty(existing, name, field, value);
+			: field === 'startDate' || field === 'endDate'
+				? operation.calendarDate!.split('-').join('')
+				: operation.text!;
+	const replacement = replacementProperty(existing, name, field, value, timePlan);
 	if (index >= 0) entries[index] = replacement;
 	else insertCanonical(entries, replacement);
 }
@@ -905,12 +1093,13 @@ function constructResource(
 	patch: ValidatedPatch,
 	metadata: { readonly dtstamp: ICalendarProperty; readonly lastModified?: ICalendarProperty },
 	modifiedAt: number,
+	timePlan: TimePatchPlan,
 ): ICalendarResource {
 	const masterEntries = [...context.master.entries];
 	for (const field of PATCH_FIELDS) {
 		const operation = patch[field];
 		if (operation !== undefined && operationChanges(context.master, field, operation)) {
-			applyFieldOperation(masterEntries, field, operation);
+			applyFieldOperation(masterEntries, field, operation, timePlan);
 		}
 	}
 	applyMetadata(masterEntries, metadata, modifiedAt);
@@ -946,7 +1135,7 @@ export function applyCalendarEventPatch(
 	const snapshot = validateStage(() => snapshotPatch(patch), 'INVALID_INPUT');
 	const validatedPatch = validateStage(() => validatePatchOperations(snapshot), 'INVALID_INPUT');
 	validateTouchedParameters(canonicalContext.master, validatedPatch);
-	finalTimeKeys(canonicalContext, validatedPatch);
+	const timePlan = planTimePatch(canonicalContext, validatedPatch);
 	if (
 		!PATCH_FIELDS.some((field) => {
 			const operation = validatedPatch[field];
@@ -956,5 +1145,5 @@ export function applyCalendarEventPatch(
 		fail('NO_CHANGES');
 	}
 	const modifiedTimestamp = validateStage(() => dateTimestamp(modifiedAt), 'INVALID_DATE');
-	return constructResource(canonicalContext, validatedPatch, metadata, modifiedTimestamp);
+	return constructResource(canonicalContext, validatedPatch, metadata, modifiedTimestamp, timePlan);
 }

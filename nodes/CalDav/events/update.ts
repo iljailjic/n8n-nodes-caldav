@@ -49,7 +49,7 @@ export interface CalendarEventUpdateInput {
 
 export type CalendarEventUpdateClock = () => Date;
 
-export type UpdatedCalendarEvent = Omit<CalendarEvent, 'etag'> & {
+export type UpdatedCalendarEvent = CalendarEvent & {
 	readonly etag: string;
 };
 
@@ -313,6 +313,11 @@ export async function updateCalendarEvent(
 		current.event.resourceUrl,
 		current.event.uid,
 	);
+	if (current.event.accessMode === 'readOnly') {
+		throw new Error(
+			'The calendar event is read-only because its time representation is unsupported.',
+		);
+	}
 
 	const etag =
 		snapshot.etag !== undefined && snapshot.etag.length > 0 ? snapshot.etag : current.event.etag;
@@ -363,25 +368,13 @@ export async function updateCalendarEvent(
 				normalizeCalendarCollectionUrl(current.event.calendarUrl) ||
 			!isDirectCalendarChild(current.event.calendarUrl, confirmed.event.resourceUrl) ||
 			confirmed.event.uid !== current.event.uid ||
-			!semanticallyEquivalent(patchedResource, confirmed.context.resource)
+			(confirmed.event.accessMode === 'editable' &&
+				!semanticallyEquivalent(patchedResource, confirmed.context.resource))
 		) {
 			return confirmationFailed();
 		}
 
-		return Object.freeze({
-			calendarUrl: confirmed.event.calendarUrl,
-			resourceUrl: confirmed.event.resourceUrl,
-			etag: confirmed.event.etag,
-			uid: confirmed.event.uid,
-			...(confirmed.event.summary === undefined ? {} : { summary: confirmed.event.summary }),
-			...(confirmed.event.description === undefined
-				? {}
-				: { description: confirmed.event.description }),
-			...(confirmed.event.location === undefined ? {} : { location: confirmed.event.location }),
-			...(confirmed.event.url === undefined ? {} : { url: confirmed.event.url }),
-			start: confirmed.event.start,
-			end: confirmed.event.end,
-		});
+		return Object.freeze({ ...confirmed.event, etag: confirmed.event.etag });
 	} catch (error) {
 		if (error instanceof CalDavCalendarEventUpdateError) throw error;
 		return confirmationFailed(error);

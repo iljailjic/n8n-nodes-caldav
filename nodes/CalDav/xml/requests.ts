@@ -179,7 +179,7 @@ function validateDate(value: unknown, field: 'start' | 'end'): ValidatedUtcDate 
 		throw invalidDateError(field);
 	}
 
-	if (year < 0 || year > 9999 || milliseconds !== 0) {
+	if (year < 1 || year > 9999 || milliseconds !== 0) {
 		throw new XmlBuildError(
 			'INVALID_DATE',
 			'Calendar query dates require a four-digit UTC year and zero milliseconds',
@@ -267,6 +267,21 @@ function resolvePropfindProperties(properties: unknown): XmlQualifiedName[] {
 	return qualifiedProperties;
 }
 
+const UTC_CALENDAR_TIMEZONE = [
+	'BEGIN:VCALENDAR',
+	'PRODID:-//n8n-nodes-caldav//EN',
+	'VERSION:2.0',
+	'BEGIN:VTIMEZONE',
+	'TZID:UTC',
+	'BEGIN:STANDARD',
+	'DTSTART:19700101T000000',
+	'TZOFFSETFROM:+0000',
+	'TZOFFSETTO:+0000',
+	'END:STANDARD',
+	'END:VTIMEZONE',
+	'END:VCALENDAR',
+].join('&#13;\n');
+
 function reportPrefixLines(): string[] {
 	return [
 		XML_DECLARATION,
@@ -281,11 +296,16 @@ function reportPrefixLines(): string[] {
 	];
 }
 
-function reportSuffixLines(): string[] {
+function reportSuffixLines(includeUtcTimezone = false): string[] {
 	return [
 		`      </${XML_QUALIFIED_NAMES.compFilter.qualifiedName}>`,
 		`    </${XML_QUALIFIED_NAMES.compFilter.qualifiedName}>`,
 		`  </${XML_QUALIFIED_NAMES.filter.qualifiedName}>`,
+		...(includeUtcTimezone
+			? [
+					`  <${XML_QUALIFIED_NAMES.timezone.qualifiedName}>${UTC_CALENDAR_TIMEZONE}</${XML_QUALIFIED_NAMES.timezone.qualifiedName}>`,
+				]
+			: []),
 		`</${XML_QUALIFIED_NAMES.calendarQuery.qualifiedName}>`,
 	];
 }
@@ -401,6 +421,6 @@ export function buildCalendarTimeRangeQueryReport(input: CalendarTimeRangeQueryI
 	return [
 		...reportPrefixLines(),
 		`        <${XML_QUALIFIED_NAMES.timeRange.qualifiedName} start="${startAttribute}" end="${endAttribute}"/>`,
-		...reportSuffixLines(),
+		...reportSuffixLines(true),
 	].join('\n');
 }

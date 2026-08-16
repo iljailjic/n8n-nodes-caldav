@@ -510,6 +510,76 @@ describe('issue #41 validation, privacy, pairing, and Get Many projection', () =
 		expect(mocks.createCalendarEvent).toHaveBeenCalledTimes(2);
 	});
 
+	it('projects extensions last for timed, all-day, and read-only execution outputs', async () => {
+		const timed = {
+			...event('timed-extensions', {
+				timeMode: 'timed',
+				start: '2024-02-29T10:00:00Z',
+				end: '2024-02-29T11:00:00Z',
+			}),
+			extensions: { oracle: { mode: 'timed' } },
+		};
+		const allDay = {
+			...event('all-day-extensions', {
+				timeMode: 'allDay',
+				startDate: '2024-02-29',
+				endDate: '2024-03-01',
+			}),
+			extensions: { oracle: { mode: 'allDay' } },
+		};
+		const readOnly = {
+			...event('read-only-extensions', {
+				timeMode: 'unsupported',
+				readOnlyReason: 'unsupportedTimeRepresentation',
+			}),
+			extensions: { oracle: { mode: 'readOnly' } },
+		};
+		mocks.queryCalendarEventsByTimeRange.mockResolvedValue(
+			[timed, allDay, readOnly].map((event) => ({ event, context: {} })),
+		);
+
+		const [output] = await new CalDav().execute.call(context([getManyParameters()]));
+
+		expect(output.map(({ json }) => json)).toEqual([timed, allDay, readOnly]);
+		expect(output.map(({ json }) => Object.keys(json))).toEqual([
+			[
+				'calendarUrl',
+				'resourceUrl',
+				'etag',
+				'uid',
+				'summary',
+				'timeMode',
+				'accessMode',
+				'start',
+				'end',
+				'extensions',
+			],
+			[
+				'calendarUrl',
+				'resourceUrl',
+				'etag',
+				'uid',
+				'summary',
+				'timeMode',
+				'accessMode',
+				'startDate',
+				'endDate',
+				'extensions',
+			],
+			[
+				'calendarUrl',
+				'resourceUrl',
+				'etag',
+				'uid',
+				'summary',
+				'timeMode',
+				'accessMode',
+				'readOnlyReason',
+				'extensions',
+			],
+		]);
+	});
+
 	it('projects mixed Get Many results without dropping read-only items and applies Limit afterward', async () => {
 		mocks.queryCalendarEventsByTimeRange.mockResolvedValue([
 			{
