@@ -195,7 +195,7 @@ function createPackOutput(paths: string[], overrides: PackResultOverrides = {}) 
 	return JSON.stringify([
 		{
 			name: '@iljailjic/n8n-nodes-caldav',
-			version: '0.4.0',
+			version: '0.5.0',
 			files: paths.map((path) => ({ path })),
 			entryCount: paths.length,
 			bundled: [],
@@ -284,6 +284,14 @@ describe('package contents verifier', () => {
 
 	it('rejects a valid-shaped result with a version-only identity mismatch', () => {
 		const packOutput = createPackOutput(expectedPackageFiles, { version: '0.2.1' });
+
+		expect(() => verifyPackOutput(packOutput)).toThrow(
+			'npm pack returned unexpected package identity',
+		);
+	});
+
+	it('rejects the previous 0.4.0 checkpoint identity', () => {
+		const packOutput = createPackOutput(expectedPackageFiles, { version: '0.4.0' });
 
 		expect(() => verifyPackOutput(packOutput)).toThrow(
 			'npm pack returned unexpected package identity',

@@ -3,6 +3,16 @@
 Changes from published releases and declared project milestones will be
 documented in this file.
 
+## [0.5.0] - 2026-08-17
+
+### Development checkpoint
+
+- Added optional cryptographically generated RFC 4122 UUIDv4 event UIDs while preserving supplied opaque UIDs and one consistent identity across serialization, resource naming, and output (#40).
+- Added explicit timed, all-day, and safe read-only event-time modes with strict Gregorian exclusive end dates, workflow-time-zone normalization, preservation-first conversions, and fixed-UTC query semantics (#41).
+- Added pinned IANA TZDB 2026c validation and deterministic UTC/IANA conversion with embedded VTIMEZONE authority and secure RFC 7808/7809 time-zone reference discovery (#42).
+- Added reference-first finite IANA authoring with deterministic RFC-compliant embedded VTIMEZONE fallback, proven closed-event coverage, and safe rejection when a representation cannot be proved (#43).
+- Added deterministic calendar-scoped Event Upsert with supplied/omitted UID branching, preservation-first conditional Create/Update, semantic no-op handling, and strict race classification without deleting history (#44).
+
 ## [0.4.0] - 2026-08-14
 
 ### Development checkpoint
