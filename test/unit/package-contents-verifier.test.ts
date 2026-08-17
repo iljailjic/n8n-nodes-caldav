@@ -32,6 +32,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/discovery/currentUserPrincipal.d.ts',
 	'dist/nodes/CalDav/discovery/currentUserPrincipal.js',
 	'dist/nodes/CalDav/discovery/currentUserPrincipal.js.map',
+	'dist/nodes/CalDav/discovery/timeZoneReferences.d.ts',
+	'dist/nodes/CalDav/discovery/timeZoneReferences.js',
+	'dist/nodes/CalDav/discovery/timeZoneReferences.js.map',
 	'dist/nodes/CalDav/events/create.d.ts',
 	'dist/nodes/CalDav/events/create.js',
 	'dist/nodes/CalDav/events/create.js.map',
@@ -65,6 +68,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/icalendar/serializer.d.ts',
 	'dist/nodes/CalDav/icalendar/serializer.js',
 	'dist/nodes/CalDav/icalendar/serializer.js.map',
+	'dist/nodes/CalDav/icalendar/timeZones.d.ts',
+	'dist/nodes/CalDav/icalendar/timeZones.js',
+	'dist/nodes/CalDav/icalendar/timeZones.js.map',
 	'dist/nodes/CalDav/methods/credentialTest.d.ts',
 	'dist/nodes/CalDav/methods/credentialTest.js',
 	'dist/nodes/CalDav/methods/credentialTest.js.map',
@@ -135,6 +141,18 @@ const updateArtifactPaths = [
 	'dist/nodes/CalDav/events/update.js.map',
 ] as const;
 
+const timeZoneArtifactPaths = [
+	'dist/nodes/CalDav/icalendar/timeZones.d.ts',
+	'dist/nodes/CalDav/icalendar/timeZones.js',
+	'dist/nodes/CalDav/icalendar/timeZones.js.map',
+] as const;
+
+const timeZoneReferenceArtifactPaths = [
+	'dist/nodes/CalDav/discovery/timeZoneReferences.d.ts',
+	'dist/nodes/CalDav/discovery/timeZoneReferences.js',
+	'dist/nodes/CalDav/discovery/timeZoneReferences.js.map',
+] as const;
+
 interface PackResultOverrides {
 	bundled?: unknown;
 	entryCount?: unknown;
@@ -160,7 +178,7 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(100);
+		expect(expectedPackageFiles).toHaveLength(106);
 		expect(expectedPackageFiles.filter((path) => path.includes('/events/create.'))).toEqual(
 			createArtifactPaths,
 		);
@@ -176,6 +194,12 @@ describe('package contents verifier', () => {
 		expect(expectedPackageFiles.filter((path) => path.includes('/events/update.'))).toEqual(
 			updateArtifactPaths,
 		);
+		expect(expectedPackageFiles.filter((path) => path.includes('/icalendar/timeZones.'))).toEqual(
+			timeZoneArtifactPaths,
+		);
+		expect(
+			expectedPackageFiles.filter((path) => path.includes('/discovery/timeZoneReferences.')),
+		).toEqual(timeZoneReferenceArtifactPaths);
 		expect(() => verifyPackOutput(packOutput)).not.toThrow();
 	});
 

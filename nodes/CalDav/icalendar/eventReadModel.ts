@@ -1,4 +1,14 @@
+/* eslint-disable @n8n/community-nodes/require-node-api-error -- protocol-layer typed errors are mapped at the node boundary. */
+
+import { parseICalendarResource } from './parser';
 import type { ICalendarComponent, ICalendarProperty, ICalendarResource } from './parser';
+import {
+	CalDavIanaTimeZoneError,
+	canonicalizeIanaTimeZone,
+	resolveLocalDateTimeInTimeZone,
+} from './timeZones';
+import type { IanaTimeZoneId, LocalDateTimeString } from './timeZones';
+import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type { AbsoluteHttpUrl } from '../transport/url';
 
 export const CalendarEventReadModelErrorCode = Object.freeze({
@@ -68,6 +78,7 @@ export interface CalendarEventResourceInput {
 	readonly resourceUrl: AbsoluteHttpUrl;
 	readonly etag?: string;
 	readonly resource: ICalendarResource;
+	readonly timeZoneDefinition?: ICalendarComponent;
 	readonly extensions?: CalendarEventExtensions;
 }
 
@@ -83,26 +94,33 @@ interface CalendarEventCommon {
 	readonly extensions?: CalendarEventExtensions;
 }
 
-export type CalendarEvent = CalendarEventCommon &
-	(
-		| {
-				readonly timeMode: 'timed';
-				readonly accessMode: 'editable';
-				readonly start: UtcDateTimeString;
-				readonly end: UtcDateTimeString;
-		  }
-		| {
-				readonly timeMode: 'allDay';
-				readonly accessMode: 'editable';
-				readonly startDate: CalendarDateString;
-				readonly endDate: CalendarDateString;
-		  }
-		| {
-				readonly timeMode: 'unsupported';
-				readonly accessMode: 'readOnly';
-				readonly readOnlyReason: CalendarEventReadOnlyReason;
-		  }
-	);
+export interface TimedCalendarEvent extends CalendarEventCommon {
+	readonly timeMode: 'timed';
+	readonly accessMode: 'editable';
+	readonly start: UtcDateTimeString;
+	readonly end: UtcDateTimeString;
+	readonly timeZoneMode: 'utc' | 'iana';
+	readonly timeZone?: IanaTimeZoneId;
+	readonly startLocal: LocalDateTimeString;
+	readonly endLocal: LocalDateTimeString;
+}
+
+export interface AllDayCalendarEvent extends CalendarEventCommon {
+	readonly timeMode: 'allDay';
+	readonly accessMode: 'editable';
+	readonly startDate: CalendarDateString;
+	readonly endDate: CalendarDateString;
+}
+
+export type EditableCalendarEvent = TimedCalendarEvent | AllDayCalendarEvent;
+
+export interface ReadOnlyCalendarEvent extends CalendarEventCommon {
+	readonly timeMode: 'unsupported';
+	readonly accessMode: 'readOnly';
+	readonly readOnlyReason: 'unsupportedTimeRepresentation';
+}
+
+export type CalendarEvent = EditableCalendarEvent | ReadOnlyCalendarEvent;
 
 export interface CalendarEventPreservationContext {
 	readonly resource: ICalendarResource;
@@ -306,7 +324,7 @@ function validateExceptionIdentities(
 			fail(recurrenceIds.length > 1 ? 'AMBIGUOUS_EVENT_PROPERTY' : 'INVALID_EVENT_IDENTITY');
 		}
 		const shape = recurrenceIdentityShape(recurrenceIds[0]!);
-		if (shape === undefined || shape.form !== masterShape.form) fail('INVALID_EVENT_PROPERTY');
+		if (shape === undefined) fail('INVALID_EVENT_PROPERTY');
 		const identityKey = `${shape.form}\u0000${shape.key}`;
 		if (identities.has(identityKey)) fail('INVALID_EVENT_IDENTITY');
 		identities.add(identityKey);
@@ -410,6 +428,11 @@ interface ParsedCalendarDate {
 	readonly comparisonKey: string;
 }
 
+interface ParsedLocalDateTime {
+	readonly local: LocalDateTimeString;
+	readonly rawKey: string;
+}
+
 function parseUtcDateTime(property: ICalendarProperty): ParsedUtcDateTime {
 	if (hasParameter(property, 'TZID')) fail('UNSUPPORTED_EVENT_TIME');
 
@@ -466,6 +489,71 @@ function timePropertyIsSyntacticallyReadable(property: ICalendarProperty): boole
 	if (utcMatch !== null) return isValidCalendarDateTimeMatch(utcMatch);
 	const localMatch = LOCAL_DATE_TIME_PATTERN.exec(property.value.raw);
 	return localMatch !== null && isValidCalendarDateTimeMatch(localMatch);
+}
+
+function parseLocalDateTime(property: ICalendarProperty): ParsedLocalDateTime | undefined {
+	if (asciiUpperCase(property.value.valueType) !== 'DATE-TIME') return undefined;
+	const match = LOCAL_DATE_TIME_PATTERN.exec(property.value.raw);
+	if (match === null || !isValidCalendarDateTimeMatch(match) || Number(match[6]) > 59) {
+		return undefined;
+	}
+	return {
+		local:
+			`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}` as LocalDateTimeString,
+		rawKey: property.value.raw,
+	};
+}
+
+function onlyTzid(property: ICalendarProperty): string | undefined {
+	const tzids = parameterValues(property, 'TZID');
+	if (tzids.length !== 1 || tzids[0]!.length !== 1 || tzids[0]![0]!.length === 0) return undefined;
+	return tzids[0]![0]!;
+}
+
+function utcInstant(value: Date): UtcDateTimeString {
+	return value.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
+}
+
+function isUtcExceptionDateTime(property: ICalendarProperty): boolean {
+	try {
+		return (
+			asciiUpperCase(property.value.valueType) === 'DATE-TIME' &&
+			property.value.textValues === null &&
+			property.value.raw.endsWith('Z') &&
+			parseUtcDateTime(property) !== undefined
+		);
+	} catch {
+		return false;
+	}
+}
+
+function isIanaExceptionDateTime(property: ICalendarProperty, timeZone: IanaTimeZoneId): boolean {
+	const parsed = parseLocalDateTime(property);
+	const identifier = onlyTzid(property);
+	if (parsed === undefined || identifier === undefined) return false;
+	try {
+		return canonicalizeIanaTimeZone(identifier) === timeZone;
+	} catch {
+		return false;
+	}
+}
+
+function exceptionsMatchTimedRepresentation(
+	exceptions: readonly ICalendarComponent[],
+	timeZoneMode: 'utc' | 'iana',
+	timeZone?: IanaTimeZoneId,
+): boolean {
+	return exceptions.every((exception) => {
+		const recurrenceIds = directProperties(exception, 'RECURRENCE-ID');
+		const starts = directProperties(exception, 'DTSTART');
+		const ends = directProperties(exception, 'DTEND');
+		if (recurrenceIds.length !== 1 || starts.length !== 1 || ends.length > 1) return false;
+		const properties = [recurrenceIds[0]!, starts[0]!, ...ends];
+		return timeZoneMode === 'utc'
+			? properties.every(isUtcExceptionDateTime)
+			: timeZone !== undefined &&
+					properties.every((property) => isIanaExceptionDateTime(property, timeZone));
+	});
 }
 
 function isPlainRecord(value: object): boolean {
@@ -609,7 +697,6 @@ function snapshotExtensions(
 		return snapshotExtensionsUnchecked(extensions, failValidation);
 	} catch (error: unknown) {
 		if (typeof error === 'object' && error !== null && internalErrors.has(error)) {
-			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- Preserve the accepted transport-independent protocol error unchanged.
 			throw error;
 		}
 		return fail('INVALID_EVENT_EXTENSIONS');
@@ -639,7 +726,12 @@ export function mapCalendarEventResource(
 	) {
 		fail('INVALID_EVENT_PROPERTY');
 	}
+	if (!timePropertyIsSyntacticallyReadable(startProperty)) fail('INVALID_EVENT_PROPERTY');
+	if (endProperty !== undefined && !timePropertyIsSyntacticallyReadable(endProperty)) {
+		fail('INVALID_EVENT_PROPERTY');
+	}
 
+	const extensions = snapshotExtensions(input.extensions);
 	const common = {
 		calendarUrl: input.calendarUrl,
 		resourceUrl: input.resourceUrl,
@@ -651,87 +743,229 @@ export function mapCalendarEventResource(
 		...(url !== undefined ? { url } : {}),
 	};
 
-	let time:
+	const startType = asciiUpperCase(startProperty.value.valueType);
+	if (startType === 'DATE') {
+		let event: CalendarEvent;
+		if (
+			durationProperty === undefined &&
+			endProperty !== undefined &&
+			asciiUpperCase(endProperty.value.valueType) === 'DATE' &&
+			!hasParameter(startProperty, 'TZID') &&
+			!hasParameter(endProperty, 'TZID')
+		) {
+			const start = parseCalendarDate(startProperty);
+			const end = parseCalendarDate(endProperty);
+			if (end.comparisonKey <= start.comparisonKey) fail('INVALID_EVENT_TIME_RANGE');
+			event = Object.freeze({
+				...common,
+				timeMode: 'allDay',
+				accessMode: 'editable',
+				startDate: start.formatted,
+				endDate: end.formatted,
+				...(extensions !== undefined ? { extensions } : {}),
+			});
+		} else {
+			event = Object.freeze({
+				...common,
+				timeMode: 'unsupported',
+				accessMode: 'readOnly',
+				readOnlyReason: 'unsupportedTimeRepresentation',
+				...(extensions !== undefined ? { extensions } : {}),
+			});
+		}
+		return Object.freeze({ event, context });
+	}
+
+	let timed:
 		| {
-				readonly timeMode: 'timed';
-				readonly accessMode: 'editable';
 				readonly start: UtcDateTimeString;
 				readonly end: UtcDateTimeString;
+				readonly timeZoneMode: 'utc';
+				readonly startLocal: LocalDateTimeString;
+				readonly endLocal: LocalDateTimeString;
 		  }
 		| {
-				readonly timeMode: 'allDay';
-				readonly accessMode: 'editable';
-				readonly startDate: CalendarDateString;
-				readonly endDate: CalendarDateString;
+				readonly start: UtcDateTimeString;
+				readonly end: UtcDateTimeString;
+				readonly timeZoneMode: 'iana';
+				readonly timeZone: IanaTimeZoneId;
+				readonly startLocal: LocalDateTimeString;
+				readonly endLocal: LocalDateTimeString;
 		  }
-		| {
-				readonly timeMode: 'unsupported';
-				readonly accessMode: 'readOnly';
-				readonly readOnlyReason: 'unsupportedTimeRepresentation';
-		  };
+		| undefined;
 
-	const startType = asciiUpperCase(startProperty.value.valueType);
-	const endType =
-		endProperty === undefined ? undefined : asciiUpperCase(endProperty.value.valueType);
-	const unsupported = (): void => {
-		time = {
-			timeMode: 'unsupported',
-			accessMode: 'readOnly',
-			readOnlyReason: 'unsupportedTimeRepresentation',
-		};
-	};
-
-	if (!timePropertyIsSyntacticallyReadable(startProperty)) fail('INVALID_EVENT_PROPERTY');
-	if (endProperty !== undefined && !timePropertyIsSyntacticallyReadable(endProperty)) {
-		fail('INVALID_EVENT_PROPERTY');
-	}
-
-	if (durationProperty !== undefined) {
-		unsupported();
-	} else if (
-		startType === 'DATE' &&
-		endProperty !== undefined &&
-		endType === 'DATE' &&
-		!hasParameter(startProperty, 'TZID') &&
-		!hasParameter(endProperty, 'TZID')
-	) {
-		const start = parseCalendarDate(startProperty);
-		const end = parseCalendarDate(endProperty);
-		if (end.comparisonKey <= start.comparisonKey) fail('INVALID_EVENT_TIME_RANGE');
-		time = {
-			timeMode: 'allDay',
-			accessMode: 'editable',
-			startDate: start.formatted,
-			endDate: end.formatted,
-		};
-	} else if (
-		startType === 'DATE-TIME' &&
-		(endProperty === undefined || endType === 'DATE-TIME') &&
-		!hasParameter(startProperty, 'TZID') &&
-		(endProperty === undefined || !hasParameter(endProperty, 'TZID')) &&
-		UTC_DATE_TIME_PATTERN.test(startProperty.value.raw) &&
-		(endProperty === undefined || UTC_DATE_TIME_PATTERN.test(endProperty.value.raw))
-	) {
-		const start = parseUtcDateTime(startProperty);
-		const end = endProperty === undefined ? start : parseUtcDateTime(endProperty);
-		if (end.comparisonKey <= start.comparisonKey && endProperty !== undefined) {
-			fail('INVALID_EVENT_TIME_RANGE');
+	const effectiveEndProperty =
+		endProperty ?? (durationProperty === undefined ? startProperty : undefined);
+	if (durationProperty === undefined && effectiveEndProperty !== undefined) {
+		if (startProperty.value.raw.endsWith('Z') && effectiveEndProperty.value.raw.endsWith('Z')) {
+			try {
+				const start = parseUtcDateTime(startProperty);
+				const end = parseUtcDateTime(effectiveEndProperty);
+				if (endProperty !== undefined && end.comparisonKey <= start.comparisonKey) {
+					fail('INVALID_EVENT_TIME_RANGE');
+				}
+				timed = {
+					start: start.formatted,
+					end: end.formatted,
+					timeZoneMode: 'utc',
+					startLocal: start.formatted.slice(0, -1) as LocalDateTimeString,
+					endLocal: end.formatted.slice(0, -1) as LocalDateTimeString,
+				};
+			} catch (error) {
+				if (
+					error instanceof CalDavCalendarEventReadModelError &&
+					error.code === CalendarEventReadModelErrorCode.INVALID_EVENT_TIME_RANGE
+				) {
+					throw error;
+				}
+			}
+		} else {
+			const startLocal = parseLocalDateTime(startProperty);
+			const endLocal = parseLocalDateTime(effectiveEndProperty);
+			const startTzid = onlyTzid(startProperty);
+			const endTzid = onlyTzid(effectiveEndProperty);
+			if (
+				startLocal !== undefined &&
+				endLocal !== undefined &&
+				startTzid !== undefined &&
+				endTzid !== undefined &&
+				startTzid === endTzid
+			) {
+				try {
+					const timeZone = canonicalizeIanaTimeZone(startTzid);
+					const definitions = directComponents(input.resource.calendar).filter(
+						(component) =>
+							asciiUpperCase(component.name) === 'VTIMEZONE' &&
+							directProperties(component, 'TZID').some(
+								(property) => singleText(property) === startTzid,
+							),
+					);
+					let startInstant: Date | undefined;
+					let endInstant: Date | undefined;
+					const definition =
+						definitions.length === 1
+							? definitions[0]
+							: definitions.length === 0
+								? input.timeZoneDefinition
+								: undefined;
+					if (definition !== undefined) {
+						const identifiers = directProperties(definition, 'TZID');
+						const definitionTimeZone =
+							identifiers.length === 1 ? singleText(identifiers[0]!) : undefined;
+						if (
+							definitionTimeZone === undefined ||
+							canonicalizeIanaTimeZone(definitionTimeZone) !== timeZone
+						) {
+							throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+						}
+						startInstant = resolveLocalDateTimeInTimeZone(startLocal.local, timeZone, definition);
+						endInstant = resolveLocalDateTimeInTimeZone(endLocal.local, timeZone, definition);
+					}
+					if (startInstant !== undefined && endInstant !== undefined) {
+						if (endProperty !== undefined && endInstant.getTime() <= startInstant.getTime()) {
+							fail('INVALID_EVENT_TIME_RANGE');
+						}
+						timed = {
+							start: utcInstant(startInstant),
+							end: utcInstant(endInstant),
+							timeZoneMode: 'iana',
+							timeZone,
+							startLocal: startLocal.local,
+							endLocal: endLocal.local,
+						};
+					}
+				} catch (error) {
+					if (
+						error instanceof CalDavCalendarEventReadModelError &&
+						error.code === CalendarEventReadModelErrorCode.INVALID_EVENT_TIME_RANGE
+					) {
+						throw error;
+					}
+				}
+			}
 		}
-		time = {
-			timeMode: 'timed',
-			accessMode: 'editable',
-			start: start.formatted,
-			end: end.formatted,
-		};
-	} else {
-		unsupported();
 	}
-	const extensions = snapshotExtensions(input.extensions);
+	if (
+		timed !== undefined &&
+		!exceptionsMatchTimedRepresentation(
+			context.exceptions,
+			timed.timeZoneMode,
+			timed.timeZoneMode === 'iana' ? timed.timeZone : undefined,
+		)
+	) {
+		timed = undefined;
+	}
 
-	const event = Object.freeze({
-		...common,
-		...time!,
-		...(extensions !== undefined ? { extensions } : {}),
-	}) satisfies CalendarEvent;
+	const event = Object.freeze(
+		timed === undefined
+			? {
+					...common,
+					timeMode: 'unsupported',
+					accessMode: 'readOnly',
+					readOnlyReason: 'unsupportedTimeRepresentation',
+					...(extensions !== undefined ? { extensions } : {}),
+				}
+			: {
+					...common,
+					timeMode: 'timed',
+					accessMode: 'editable',
+					start: timed.start,
+					end: timed.end,
+					timeZoneMode: timed.timeZoneMode,
+					...(timed.timeZoneMode === 'iana' ? { timeZone: timed.timeZone } : {}),
+					startLocal: timed.startLocal,
+					endLocal: timed.endLocal,
+					...(extensions !== undefined ? { extensions } : {}),
+				},
+	) satisfies CalendarEvent;
 	return Object.freeze({ event, context });
+}
+
+function referencedTimeZone(resource: ICalendarResource): IanaTimeZoneId | undefined {
+	const context = createCalendarEventPreservationContext(resource);
+	const starts = directProperties(context.master, 'DTSTART');
+	const ends = directProperties(context.master, 'DTEND');
+	if (starts.length !== 1 || ends.length !== 1) return undefined;
+	const start = starts[0]!;
+	const end = ends[0]!;
+	if (parseLocalDateTime(start) === undefined || parseLocalDateTime(end) === undefined) {
+		return undefined;
+	}
+	const startTzid = onlyTzid(start);
+	const endTzid = onlyTzid(end);
+	if (startTzid === undefined || startTzid !== endTzid) return undefined;
+	let timeZone: IanaTimeZoneId;
+	try {
+		timeZone = canonicalizeIanaTimeZone(startTzid);
+	} catch {
+		return undefined;
+	}
+	const embedded = directComponents(resource.calendar).filter(
+		(component) =>
+			asciiUpperCase(component.name) === 'VTIMEZONE' &&
+			directProperties(component, 'TZID').some((property) => singleText(property) === startTzid),
+	);
+	return embedded.length === 0 ? timeZone : undefined;
+}
+
+export async function mapCalendarEventResourceWithTimeZoneContext(
+	input: CalendarEventResourceInput,
+	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
+): Promise<CalendarEventReadResult> {
+	const timeZone = referencedTimeZone(input.resource);
+	if (timeZone === undefined || timeZoneContext === undefined)
+		return mapCalendarEventResource(input);
+	try {
+		const reference = await timeZoneContext.resolveReference(input.calendarUrl, timeZone);
+		const resource = parseICalendarResource(Buffer.from(reference.calendarData, 'utf8'));
+		const definitions = directComponents(resource.calendar).filter(
+			(component) => asciiUpperCase(component.name) === 'VTIMEZONE',
+		);
+		return mapCalendarEventResource({
+			...input,
+			...(definitions.length === 1 ? { timeZoneDefinition: definitions[0] } : {}),
+		});
+	} catch {
+		return mapCalendarEventResource(input);
+	}
 }

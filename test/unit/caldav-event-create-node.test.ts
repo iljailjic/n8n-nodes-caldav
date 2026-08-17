@@ -208,6 +208,8 @@ describe('CalDAV Event Create metadata', () => {
 			'Calendar',
 			'UID',
 			'Time Mode',
+			'Time Zone Mode',
+			'Time Zone',
 			'Start',
 			'End',
 			'Start Date',
@@ -222,7 +224,7 @@ describe('CalDAV Event Create metadata', () => {
 		expect(uid?.description).toContain('generated UUID');
 		expect(uid?.description).toContain('Each separate Create');
 		expect(
-			properties.slice(2, 8).map(({ name, type, required, default: defaultValue }) => ({
+			properties.slice(2, 10).map(({ name, type, required, default: defaultValue }) => ({
 				name,
 				type,
 				required,
@@ -230,13 +232,15 @@ describe('CalDAV Event Create metadata', () => {
 			})),
 		).toEqual([
 			{ name: 'timeMode', type: 'options', required: true, default: 'timed' },
+			{ name: 'timeZoneMode', type: 'options', required: true, default: 'utc' },
+			{ name: 'timeZone', type: 'options', required: true, default: '' },
 			{ name: 'start', type: 'dateTime', required: true, default: '' },
 			{ name: 'end', type: 'dateTime', required: true, default: '' },
 			{ name: 'startDate', type: 'dateTime', required: true, default: '' },
 			{ name: 'endDate', type: 'dateTime', required: true, default: '' },
 			{ name: 'summary', type: 'string', required: true, default: '' },
 		]);
-		const additional = properties[8];
+		const additional = properties[10];
 		expect(additional).toMatchObject({
 			name: 'additionalFields',
 			type: 'collection',

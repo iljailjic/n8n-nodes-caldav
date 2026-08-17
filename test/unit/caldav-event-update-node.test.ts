@@ -27,6 +27,10 @@ import {
 	CalendarEventUpdateFailureCode,
 } from '../../nodes/CalDav/events/update';
 import {
+	CalDavTimeZoneReferenceError,
+	TimeZoneReferenceFailureCode,
+} from '../../nodes/CalDav/discovery/timeZoneReferences';
+import {
 	CalDavCalendarEventPatchError,
 	CalendarEventPatchErrorCode,
 } from '../../nodes/CalDav/icalendar/patcher';
@@ -232,6 +236,7 @@ describe('CalDAV Event Update metadata', () => {
 			displayOptions: { show: { resource: ['event'], operation: ['update'] } },
 		});
 		expect(fields.options?.map((option) => option.name)).toEqual([
+			'timeZone',
 			'start',
 			'end',
 			'startDate',
@@ -468,6 +473,16 @@ describe('CalDAV Event Update error mapping, continuation, and privacy', () => {
 		[
 			new CalDavCalendarEventUpdateError(CalendarEventUpdateFailureCode.CONFIRMATION_FAILED, 404),
 			'The event was updated, but its current state could not be verified.',
+			NodeApiError,
+		],
+		[
+			new CalDavTimeZoneReferenceError(TimeZoneReferenceFailureCode.SERVER_UNSUPPORTED),
+			'The CalDAV server does not support IANA time zones by reference.',
+			NodeApiError,
+		],
+		[
+			new CalDavTimeZoneReferenceError(TimeZoneReferenceFailureCode.ZONE_UNAVAILABLE),
+			'The selected IANA time zone is not available by reference on the CalDAV server.',
 			NodeApiError,
 		],
 	] as const)(

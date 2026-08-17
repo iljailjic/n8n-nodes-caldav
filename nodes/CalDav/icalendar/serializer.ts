@@ -13,6 +13,8 @@ import type {
 	ICalendarProperty,
 	ICalendarResource,
 } from './parser';
+import { projectInstantInTimeZone } from './timeZones';
+import type { CalendarEventTimeZone, IanaTimeZoneId, LocalDateTimeString } from './timeZones';
 
 export const CALDAV_ICALENDAR_PRODID = '-//iljailjic//n8n-nodes-caldav//EN';
 
@@ -38,6 +40,18 @@ export type BasicUtcEventSerializationInput = BasicEventSerializationCommon &
 				readonly endDate: string;
 		  }
 	);
+
+export type BasicTimedEventSerializationInput = BasicEventSerializationCommon & {
+	readonly timeMode?: 'timed';
+	readonly start: Date;
+	readonly end: Date;
+	readonly timeZone: CalendarEventTimeZone;
+};
+
+export type CalendarEventInstantProjector = (
+	instant: Date,
+	timeZone: IanaTimeZoneId,
+) => LocalDateTimeString;
 
 export type BasicUtcEventSerializationField =
 	| 'uid'
@@ -98,7 +112,12 @@ interface BasicInputSnapshotCommon {
 
 type BasicInputSnapshot = BasicInputSnapshotCommon &
 	(
-		| { readonly timeMode: 'timed'; readonly start: number; readonly end: number }
+		| {
+				readonly timeMode: 'timed';
+				readonly start: number;
+				readonly end: number;
+				readonly timeZone: CalendarEventTimeZone;
+		  }
 		| { readonly timeMode: 'allDay'; readonly startDate: string; readonly endDate: string }
 	);
 
@@ -472,20 +491,28 @@ function calendarDate(value: unknown, field: 'startDate' | 'endDate'): string {
 	return value;
 }
 
-function snapshotBasicInput(input: BasicUtcEventSerializationInput): BasicInputSnapshot {
+function snapshotBasicInput(
+	input: BasicUtcEventSerializationInput,
+	timeZone: CalendarEventTimeZone,
+): BasicInputSnapshot {
 	if (!isRecord(input)) fail('INVALID_INPUT');
 
 	const uid = requiredString(input.uid, 'uid', false);
 	const dtstamp = dateTimestamp(input.dtstamp, 'dtstamp');
 	const mode = input.timeMode ?? 'timed';
 	let time:
-		| { readonly timeMode: 'timed'; readonly start: number; readonly end: number }
+		| {
+				readonly timeMode: 'timed';
+				readonly start: number;
+				readonly end: number;
+				readonly timeZone: CalendarEventTimeZone;
+		  }
 		| { readonly timeMode: 'allDay'; readonly startDate: string; readonly endDate: string };
 	if (mode === 'timed') {
 		if ('startDate' in input || 'endDate' in input) fail('INVALID_INPUT', 'timeMode');
 		const start = dateTimestamp(input.start, 'start');
 		const end = dateTimestamp(input.end, 'end');
-		time = { timeMode: 'timed', start, end };
+		time = { timeMode: 'timed', start, end, timeZone };
 	} else if (mode === 'allDay') {
 		if ('start' in input || 'end' in input) fail('INVALID_INPUT', 'timeMode');
 		const startDate = calendarDate(input.startDate, 'startDate');
@@ -561,17 +588,48 @@ function dateProperty(name: string, raw: string): ICalendarProperty {
 	};
 }
 
-function basicResource(input: BasicInputSnapshot): ICalendarResource {
+function ianaDateTimeProperty(name: string, raw: string, timeZone: string): ICalendarProperty {
+	return {
+		kind: 'property',
+		name,
+		parameters: [
+			{
+				kind: 'parameter',
+				name: 'TZID',
+				values: [{ kind: 'parameterValue', raw: timeZone, value: timeZone, quoted: false }],
+			},
+		],
+		value: { kind: 'value', valueType: 'DATE-TIME', raw, textValues: null },
+	};
+}
+
+function basicResource(
+	input: BasicInputSnapshot,
+	projectInstant: CalendarEventInstantProjector = projectInstantInTimeZone,
+): ICalendarResource {
 	const timeProperties =
-		input.timeMode === 'timed'
+		input.timeMode === 'allDay'
 			? [
-					rawProperty('DTSTART', 'DATE-TIME', formatUtcDateTime(input.start)),
-					rawProperty('DTEND', 'DATE-TIME', formatUtcDateTime(input.end)),
-				]
-			: [
 					dateProperty('DTSTART', input.startDate.split('-').join('')),
 					dateProperty('DTEND', input.endDate.split('-').join('')),
-				];
+				]
+			: input.timeZone.timeZoneMode === 'utc'
+				? [
+						rawProperty('DTSTART', 'DATE-TIME', formatUtcDateTime(input.start)),
+						rawProperty('DTEND', 'DATE-TIME', formatUtcDateTime(input.end)),
+					]
+				: [
+						ianaDateTimeProperty(
+							'DTSTART',
+							projectInstant(new Date(input.start), input.timeZone.timeZone).replace(/[-:]/g, ''),
+							input.timeZone.timeZone,
+						),
+						ianaDateTimeProperty(
+							'DTEND',
+							projectInstant(new Date(input.end), input.timeZone.timeZone).replace(/[-:]/g, ''),
+							input.timeZone.timeZone,
+						),
+					];
 	const eventEntries: ICalendarEntry[] = [
 		textProperty('UID', input.uid),
 		rawProperty('DTSTAMP', 'DATE-TIME', formatUtcDateTime(input.dtstamp)),
@@ -857,7 +915,24 @@ function serializeResource(resource: ICalendarResource): string {
 
 export function serializeBasicUtcEvent(input: BasicUtcEventSerializationInput): string {
 	try {
-		return serializeICalendarResource(basicResource(snapshotBasicInput(input)));
+		return serializeICalendarResource(
+			basicResource(snapshotBasicInput(input, { timeZoneMode: 'utc' })),
+		);
+	} catch (error) {
+		if (error instanceof CalDavICalendarSerializeError) throw error;
+		fail('INVALID_INPUT');
+	}
+}
+
+export function serializeBasicTimedEvent(
+	input: BasicTimedEventSerializationInput,
+	projectInstant: CalendarEventInstantProjector = projectInstantInTimeZone,
+): string {
+	try {
+		if (!isRecord(input.timeZone)) fail('INVALID_INPUT');
+		return serializeICalendarResource(
+			basicResource(snapshotBasicInput(input, input.timeZone), projectInstant),
+		);
 	} catch (error) {
 		if (error instanceof CalDavICalendarSerializeError) throw error;
 		fail('INVALID_INPUT');

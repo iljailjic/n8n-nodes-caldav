@@ -145,6 +145,8 @@ describe('CalDAV Calendar Get UI', () => {
 			'calendar',
 			'uid',
 			'timeMode',
+			'timeZoneMode',
+			'timeZone',
 			'start',
 			'end',
 			'startDate',
@@ -175,6 +177,8 @@ describe('CalDAV Calendar Get UI', () => {
 					'identifierMode',
 					'resourceUrl',
 					'uid',
+					'timeZoneMode',
+					'timeZone',
 					'etag',
 					'fieldsToUpdate',
 				].includes(property.name) &&

@@ -175,6 +175,9 @@ describe('calendar-event Create coordinator public contract', () => {
 			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T11:00:00Z',
+			timeZoneMode: 'utc',
+			startLocal: '2040-01-02T10:00:00',
+			endLocal: '2040-01-02T11:00:00',
 		});
 
 		const request = requests.request.mock.calls[0]?.[0] as CalDavTransportRequest;

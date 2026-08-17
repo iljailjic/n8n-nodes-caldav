@@ -70,11 +70,23 @@ Parse and serialize `VCALENDAR`, `VEVENT`, time zones, alarms, recurrence, and
 raw ICS while preserving data outside the simplified event model whenever
 possible.
 
-The public event read model discriminates editable UTC timed events, editable
+The public event read model discriminates editable UTC or IANA timed events, editable
 Gregorian all-day events with an exclusive end date, and safe read-only events
 whose time representation is unsupported. Structured time changes preserve
 unrelated components and parameters, and explicit timed/all-day conversions
 never infer a timezone or duration.
+
+`icalendar/timeZones.ts` owns the checked-in IANA TZDB 2026c Zone/Link identity
+oracle and deterministic `Intl` instant/local conversion. Embedded
+`VTIMEZONE` rules remain authoritative when reading an event. Unsupported or
+ambiguous representations project to the read-only event branch rather than
+inventing an instant.
+
+`discovery/timeZoneReferences.ts` owns RFC 7809 capability detection and RFC
+7808 TZDIST lookup. It keeps authenticated CalDAV discovery separate from
+anonymous TZDIST requests, filters untrusted service targets, validates strong
+ETags and calendar content, and scopes positive and negative caches to one
+node execution.
 
 ### Provider adapters
 

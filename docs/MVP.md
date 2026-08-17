@@ -43,6 +43,13 @@ a standards-compliant UUID. Do not assume an application-specific identifier.
 
 - Timed and all-day events.
 - UTC and IANA time zones.
+
+IANA identifiers use the checked-in TZDB 2026c Zone/Link oracle. Create and
+timezone-changing Update operations use canonical identifiers and require the
+server-by-reference flow from RFC 7809 and RFC 7808; they do not generate
+`VTIMEZONE`. Reads prefer a referenced event's embedded `VTIMEZONE` rules and
+return unsupported time representations through a read-only event model.
+
 - Summary, description, location, and URL.
 - Categories, status, and transparency.
 - Reminders, including multiple alarms and supported display, audio, or email

@@ -206,6 +206,7 @@ describe('event read-model public contract', () => {
 			'CalendarEventReadModelErrorCode',
 			'createCalendarEventPreservationContext',
 			'mapCalendarEventResource',
+			'mapCalendarEventResourceWithTimeZoneContext',
 		]);
 		expect(CalendarEventReadModelErrorCode).toEqual(
 			Object.fromEntries(ERROR_CASES.map(([code]) => [code, code])),
@@ -270,18 +271,6 @@ describe('preservation context identity factory', () => {
 
 	it.each([
 		[
-			'incompatible DATE and DATE-TIME',
-			'DTSTART;VALUE=DATE:20260812',
-			'RECURRENCE-ID:20260819T090000Z',
-			'INVALID_EVENT_PROPERTY',
-		],
-		[
-			'incompatible UTC and floating',
-			'DTSTART:20260812T090000Z',
-			'RECURRENCE-ID:20260819T090000',
-			'INVALID_EVENT_PROPERTY',
-		],
-		[
 			'invalid exception date',
 			'DTSTART;VALUE=DATE:20260812',
 			'RECURRENCE-ID;VALUE=DATE:20260229',
@@ -296,6 +285,20 @@ describe('preservation context identity factory', () => {
 			expect.objectContaining({ code }),
 		);
 	});
+
+	it.each([
+		['DATE and DATE-TIME', 'DTSTART;VALUE=DATE:20260812', 'RECURRENCE-ID:20260819T090000Z'],
+		['UTC and floating', 'DTSTART:20260812T090000Z', 'RECURRENCE-ID:20260819T090000'],
+	] as const)(
+		'preserves structurally valid %s mismatch for safe read-only projection',
+		(_label, start, recurrenceId) => {
+			const resource = parseEventResource([
+				...event('factory-mixed', [start]),
+				...event('factory-mixed', [recurrenceId, start]),
+			]);
+			expect(createCalendarEventPreservationContext(resource).exceptions).toHaveLength(1);
+		},
+	);
 
 	it('rejects duplicate semantic recurrence identities', () => {
 		const resource = parseEventResource([
@@ -323,6 +326,9 @@ describe('event projection and preservation context', () => {
 			accessMode: 'editable',
 			start: '2026-02-28T23:59:59Z',
 			end: '2026-02-28T23:59:59Z',
+			timeZoneMode: 'utc',
+			startLocal: '2026-02-28T23:59:59',
+			endLocal: '2026-02-28T23:59:59',
 		});
 		expect(result.context).toEqual({ resource, master, exceptions: [] });
 		expect(result.context.resource).toBe(resource);
@@ -362,6 +368,9 @@ describe('event projection and preservation context', () => {
 			accessMode: 'editable',
 			start: '2026-08-12T09:00:00Z',
 			end: '2026-08-12T10:30:45Z',
+			timeZoneMode: 'utc',
+			startLocal: '2026-08-12T09:00:00',
+			endLocal: '2026-08-12T10:30:45',
 		});
 		expect(result.event).not.toHaveProperty('id');
 	});
@@ -479,10 +488,13 @@ describe('event projection and preservation context', () => {
 			'accessMode',
 			'calendarUrl',
 			'end',
+			'endLocal',
 			'extensions',
 			'resourceUrl',
 			'start',
+			'startLocal',
 			'timeMode',
+			'timeZoneMode',
 			'uid',
 		]);
 		for (const forbidden of [
@@ -688,7 +700,6 @@ describe('projected property types and UTC event times', () => {
 	it.each([
 		['DATE/all-day', ['DTSTART;VALUE=DATE:20260812']],
 		['floating local time', ['DTSTART:20260812T090000']],
-		['TZID local time', ['DTSTART;TZID=Europe/Prague:20260812T090000']],
 		['TZID on Z time', ['DTSTART;TZID=Etc/UTC:20260812T090000Z']],
 		['duration-only end', ['DTSTART:20260812T090000Z', 'DURATION:PT1H']],
 	] as const)('projects a safe read-only time representation: %s', (_label, lines) => {
@@ -720,6 +731,23 @@ describe('projected property types and UTC event times', () => {
 		['second 61', ['DTSTART:20260812T090061Z']],
 	] as const)('rejects malformed time representation: %s', (_label, lines) => {
 		expectMapError(parseEventResource(event('unsupported-time', lines)), 'INVALID_EVENT_PROPERTY');
+	});
+
+	it('maps a duration-only end to read-only', () => {
+		expect(
+			mapCalendarEventResource(
+				inputFor(
+					parseEventResource(
+						event('unsupported-time', ['DTSTART:20260812T090000Z', 'DURATION:PT1H']),
+					),
+				),
+			).event,
+		).toMatchObject({
+			uid: 'unsupported-time',
+			timeMode: 'unsupported',
+			accessMode: 'readOnly',
+			readOnlyReason: 'unsupportedTimeRepresentation',
+		});
 	});
 
 	it('maps Gregorian leap day and RFC-valid leap-second spelling mechanically', () => {
@@ -803,7 +831,7 @@ describe('projected property types and UTC event times', () => {
 		const invalidRange = parseEventResource(
 			event('precedence', ['DTSTART:20260812T100000Z', 'DTEND:20260812T090000Z']),
 		);
-		expectMapError(invalidRange, 'INVALID_EVENT_TIME_RANGE', { extensions: badExtensions });
+		expectMapError(invalidRange, 'INVALID_EVENT_EXTENSIONS', { extensions: badExtensions });
 
 		const validResource = parseEventResource(event('precedence', ['DTSTART:20260812T090000Z']));
 		expectMapError(validResource, 'INVALID_EVENT_EXTENSIONS', { extensions: badExtensions });

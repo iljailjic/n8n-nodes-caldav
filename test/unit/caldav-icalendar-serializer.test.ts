@@ -167,6 +167,7 @@ describe('iCalendar serializer public contract', () => {
 			'CALDAV_ICALENDAR_PRODID',
 			'CalDavICalendarSerializeError',
 			'CalDavICalendarSerializeErrorCode',
+			'serializeBasicTimedEvent',
 			'serializeBasicUtcEvent',
 			'serializeICalendarResource',
 		]);
@@ -535,6 +536,9 @@ describe('parser and read-model round trip', () => {
 			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T10:30:00Z',
+			timeZoneMode: 'utc',
+			startLocal: '2040-01-02T10:00:00',
+			endLocal: '2040-01-02T10:30:00',
 		});
 		expect(result.context.resource).toBe(parsed);
 	});

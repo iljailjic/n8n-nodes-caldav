@@ -177,6 +177,8 @@ describe('issue #41 exact Event node surface', () => {
 			'Calendar',
 			'UID',
 			'Time Mode',
+			'Time Zone Mode',
+			'Time Zone',
 			'Start',
 			'End',
 			'Start Date',
@@ -227,6 +229,7 @@ describe('issue #41 exact Event node surface', () => {
 		]);
 		const fields = properties.find(({ name }) => name === 'fieldsToUpdate');
 		expect(fields?.options?.map((option) => option.displayName)).toEqual([
+			'Time Zone',
 			'Start',
 			'End',
 			'Start Date',
