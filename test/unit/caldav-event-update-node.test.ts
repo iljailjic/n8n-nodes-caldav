@@ -18,6 +18,7 @@ vi.mock('../../nodes/CalDav/events/update', async (importOriginal) => ({
 }));
 
 import { CalDav } from '../../nodes/CalDav/CalDav.node';
+import { resolveCalendarEventTimeZoneAuthoring } from '../../nodes/CalDav/events/timeZoneAuthoring';
 import {
 	CalDavCalendarEventMutationError,
 	CalendarEventMutationFailureCode,
@@ -41,6 +42,7 @@ import {
 	CalDavRemoteProtocolError,
 } from '../../nodes/CalDav/transport/http';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import { canonicalizeIanaTimeZone } from '../../nodes/CalDav/icalendar/timeZones';
 
 const NODE: INode = {
 	id: 'event-update-node',
@@ -144,6 +146,24 @@ async function captureError(execution: IExecuteFunctions): Promise<Error> {
 		return error as Error;
 	}
 	throw new Error('Expected Event Update execution to fail.');
+}
+
+async function authoringFailure(
+	code: 'UNBOUNDED_REQUIRES_REFERENCE' | 'UNREPRESENTABLE_TIME_ZONE',
+): Promise<unknown> {
+	const coverage =
+		code === 'UNBOUNDED_REQUIRES_REFERENCE'
+			? ({ kind: 'unbounded' } as const)
+			: ({
+					kind: 'finite',
+					start: new Date('0001-01-01T00:00:00Z'),
+					end: new Date('9999-12-31T23:59:59Z'),
+				} as const);
+	return await resolveCalendarEventTimeZoneAuthoring({
+		calendarUrl: validateAbsoluteHttpUrl(CALENDAR_URL),
+		timeZone: canonicalizeIanaTimeZone('Europe/Prague'),
+		coverage,
+	}).catch((error: unknown) => error);
 }
 
 beforeEach(() => {
@@ -496,6 +516,26 @@ describe('CalDAV Event Update error mapping, continuation, and privacy', () => {
 			if (message.includes('verified')) {
 				expect((error as NodeApiError).context.httpCode).toBe('404');
 			}
+		},
+	);
+
+	it.each([
+		[
+			'UNBOUNDED_REQUIRES_REFERENCE',
+			'An unbounded IANA recurrence requires server time-zone reference support.',
+		],
+		[
+			'UNREPRESENTABLE_TIME_ZONE',
+			'The selected IANA time zone cannot be represented safely for this calendar event.',
+		],
+	] as const)(
+		'maps %s authoring failure to an item-indexed local safe error',
+		async (code, message) => {
+			mocks.updateCalendarEvent.mockRejectedValueOnce(await authoringFailure(code));
+			const error = await captureError(context([parameters()]));
+			expect(error).toBeInstanceOf(NodeOperationError);
+			expect(error).toMatchObject({ message, context: { itemIndex: 0 } });
+			expect(JSON.stringify(error)).not.toMatch(/Prague|calendar\.example|private|VTIMEZONE/i);
 		},
 	);
 

@@ -270,6 +270,64 @@ describe('calendar event Update coordinator requests and authoritative result', 
 		});
 	});
 
+	it('performs a non-time IANA update without reference lookup or generation', async () => {
+		const current = readResult(SUPPORTED_EMBEDDED_IANA_EVENT, { etag: '"snapshot"' });
+		const resolveReference = vi.fn().mockRejectedValue(new Error('private-reference'));
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(current)
+			.mockImplementationOnce(async () => {
+				const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+				return readResult(sent, { etag: '"confirmed"' });
+			});
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: RESOURCE_URL,
+		});
+
+		await expect(
+			updateCalendarEvent(
+				TRANSPORT,
+				resourceInput({ summary: { kind: 'set', value: 'Text only' } }),
+				() => CLOCK,
+				{ resolveReference },
+			),
+		).resolves.toMatchObject({ summary: 'Text only', timeZone: 'Europe/Prague' });
+		expect(resolveReference).not.toHaveBeenCalled();
+		const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+		expect(sent).toContain('TZID:Europe/Prague');
+		expect(sent).toContain('DTSTART;TZID=Europe/Prague:20400715T100000');
+	});
+
+	it('rejects unsafe finite fallback after the resource read but before patch clock or PUT', async () => {
+		const current = readResult(calendarData(), { etag: '"snapshot"' });
+		mocks.getCalendarEventByResourceUrl.mockResolvedValueOnce(current);
+		const resolveReference = vi.fn().mockRejectedValue(new Error('private-reference'));
+		const clock = vi.fn(() => CLOCK);
+		const error = await updateCalendarEvent(
+			TRANSPORT,
+			resourceInput({
+				timeMode: 'timed',
+				timeZone: {
+					kind: 'set',
+					value: { timeZoneMode: 'iana', timeZone: 'Europe/Prague' },
+				},
+				start: { kind: 'set', value: new Date('0001-01-01T00:00:00Z') },
+				end: { kind: 'set', value: new Date('9999-12-31T23:59:59Z') },
+			} as CalendarEventPatch),
+			clock,
+			{ resolveReference },
+		).catch((failure: unknown) => failure);
+		expect(error).toMatchObject({
+			code: 'UNREPRESENTABLE_TIME_ZONE',
+			message: 'The selected IANA time zone cannot be represented safely for this calendar event.',
+		});
+		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledOnce();
+		expect(resolveReference).toHaveBeenCalledOnce();
+		expect(clock).not.toHaveBeenCalled();
+		expect(mocks.updateCalendarEventResource).not.toHaveBeenCalled();
+		expect(JSON.stringify(error)).not.toMatch(/Prague|calendar\.example|0001|9999|private/i);
+	});
+
 	it('performs URL GET -> conditional PUT -> GET, preserves unknown data, and returns frozen read-back', async () => {
 		const patch: CalendarEventPatch = {
 			summary: { kind: 'set', value: 'After update' },

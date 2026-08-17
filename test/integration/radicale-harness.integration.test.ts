@@ -35,6 +35,7 @@ import {
 } from '../../nodes/CalDav/events/resolveByUid';
 import { serializeBasicUtcEvent } from '../../nodes/CalDav/icalendar/serializer';
 import type { CalendarEventPatch } from '../../nodes/CalDav/icalendar/patcher';
+import { canonicalizeIanaTimeZone } from '../../nodes/CalDav/icalendar/timeZones';
 import {
 	CalDavAuthenticationError,
 	CalDavAuthorizationError,
@@ -910,6 +911,136 @@ describe('Radicale authenticated discovery', () => {
 			});
 			expect(JSON.stringify(result)).not.toContain(run.password);
 			expect(JSON.stringify(result)).not.toContain(basicAuthorization(run));
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('creates, queries, updates bounds, changes zones, and reads generated finite fallback definitions', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'generated-vtimezone', 'Generated VTIMEZONE'),
+			);
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+			const resolveReference = vi.fn().mockRejectedValue(new Error('synthetic unavailable'));
+			const timeZoneContext = { resolveReference };
+			const uid = `generated-vtimezone-${run.identity}@example.test`;
+			const prague = canonicalizeIanaTimeZone('Europe/Prague');
+
+			const created = await createCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-07-15T08:00:00Z'),
+					end: new Date('2040-07-15T09:00:00Z'),
+					timeZone: { timeZoneMode: 'iana', timeZone: prague },
+					summary: 'Generated Prague fallback',
+				},
+				() => new Date('2040-01-01T00:00:00Z'),
+				timeZoneContext,
+			);
+			expect(created).toMatchObject({
+				uid,
+				timeMode: 'timed',
+				accessMode: 'editable',
+				start: '2040-07-15T08:00:00Z',
+				end: '2040-07-15T09:00:00Z',
+				timeZoneMode: 'iana',
+				timeZone: 'Europe/Prague',
+				startLocal: '2040-07-15T10:00:00',
+				endLocal: '2040-07-15T11:00:00',
+			});
+			expect(resolveReference).toHaveBeenCalledOnce();
+			expect(request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method)).toEqual(
+				['PUT', 'GET'],
+			);
+			let storedBody = await (await authenticatedFetch(run, created.resourceUrl)).text();
+			expect(storedBody.match(/BEGIN:VTIMEZONE/g)).toHaveLength(1);
+			expect(storedBody).toContain('TZID:Europe/Prague');
+			expect(storedBody).toContain('DTSTART;TZID=Europe/Prague:20400715T100000');
+			expect(storedBody).not.toMatch(/(?:RRULE|TZNAME|TZURL|X-LIC-LOCATION):/);
+
+			const query = await queryCalendarEventsByTimeRange(inspectedTransport, calendarUrl, {
+				start: new Date('2040-07-15T07:59:59Z'),
+				end: new Date('2040-07-15T09:00:01Z'),
+			});
+			expect(query.map(({ event }) => event.uid)).toContain(uid);
+			expect(query.find(({ event }) => event.uid === uid)?.event).toMatchObject({
+				timeZone: 'Europe/Prague',
+				start: '2040-07-15T08:00:00Z',
+				end: '2040-07-15T09:00:00Z',
+			});
+
+			request.mockClear();
+			const boundsUpdated = await updateCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+					etag: created.etag,
+					patch: {
+						timeMode: 'timed',
+						start: { kind: 'set', value: new Date('2040-07-15T08:30:00Z') },
+						end: { kind: 'set', value: new Date('2040-07-15T09:30:00Z') },
+					} as CalendarEventPatch,
+				},
+				() => new Date('2040-01-02T00:00:00Z'),
+				timeZoneContext,
+			);
+			expect(boundsUpdated).toMatchObject({
+				timeZone: 'Europe/Prague',
+				start: '2040-07-15T08:30:00Z',
+				end: '2040-07-15T09:30:00Z',
+			});
+			expect(resolveReference).toHaveBeenCalledTimes(1);
+			expect(request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method)).toEqual(
+				['GET', 'PUT', 'GET'],
+			);
+
+			request.mockClear();
+			const newYork = canonicalizeIanaTimeZone('America/New_York');
+			const zoneChanged = await updateCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+					etag: boundsUpdated.etag,
+					patch: {
+						timeMode: 'timed',
+						timeZone: {
+							kind: 'set',
+							value: { timeZoneMode: 'iana', timeZone: newYork },
+						},
+						start: { kind: 'set', value: new Date('2040-07-15T08:30:00Z') },
+						end: { kind: 'set', value: new Date('2040-07-15T09:30:00Z') },
+					} as CalendarEventPatch,
+				},
+				() => new Date('2040-01-03T00:00:00Z'),
+				timeZoneContext,
+			);
+			expect(zoneChanged).toMatchObject({
+				timeZone: 'America/New_York',
+				start: '2040-07-15T08:30:00Z',
+				end: '2040-07-15T09:30:00Z',
+				startLocal: '2040-07-15T04:30:00',
+				endLocal: '2040-07-15T05:30:00',
+			});
+			expect(resolveReference).toHaveBeenCalledTimes(2);
+			expect(request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method)).toEqual(
+				['GET', 'PUT', 'GET'],
+			);
+
+			storedBody = await (await authenticatedFetch(run, created.resourceUrl)).text();
+			expect(storedBody.match(/BEGIN:VTIMEZONE/g)).toHaveLength(1);
+			expect(storedBody).toContain('TZID:America/New_York');
+			expect(storedBody).toContain('DTSTART;TZID=America/New_York:20400715T043000');
+			expect(storedBody).not.toContain('TZID:Europe/Prague');
+			expect(JSON.stringify(zoneChanged)).not.toMatch(/synthetic unavailable|BEGIN:VTIMEZONE/);
 		} finally {
 			await teardownRun(run);
 		}
