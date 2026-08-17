@@ -7,6 +7,8 @@ import type { ICalendarComponent, ICalendarProperty } from '../../nodes/CalDav/i
 import { serializeICalendarResource } from '../../nodes/CalDav/icalendar/serializer';
 import {
 	assertVTimeZoneCovers,
+	CalDavVTimeZoneGenerationError,
+	CalDavVTimeZoneGenerationErrorCode,
 	canonicalizeIanaTimeZone,
 	generateFiniteVTimeZone,
 	projectInstantInTimeZone,
@@ -250,9 +252,16 @@ describe('finite VTIMEZONE generation', () => {
 		['subsecond end', new Date('2040-01-01T00:00:00Z'), new Date('2040-01-02T00:00:00.001Z')],
 		['reversed', new Date('2040-01-02T00:00:00Z'), new Date('2040-01-01T00:00:00Z')],
 	] as const)('rejects %s as INVALID_COVERAGE without echoing values', (_label, start, end) => {
-		expect(() =>
-			generateFiniteVTimeZone(canonicalizeIanaTimeZone('Europe/Prague'), { start, end }),
-		).toThrowError(expect.objectContaining({ code: 'INVALID_COVERAGE' }));
+		const error = (() => {
+			try {
+				generateFiniteVTimeZone(canonicalizeIanaTimeZone('Europe/Prague'), { start, end });
+			} catch (failure) {
+				return failure;
+			}
+			throw new Error('Expected generation failure.');
+		})();
+		expect(error).toBeInstanceOf(CalDavVTimeZoneGenerationError);
+		expect(error).toMatchObject({ code: CalDavVTimeZoneGenerationErrorCode.INVALID_COVERAGE });
 	});
 
 	it('rejects years outside 0001-9999 and a finite horizon exceeding resource limits', () => {
@@ -291,5 +300,37 @@ describe('finite VTIMEZONE generation', () => {
 				end: new Date('2042-12-31T23:59:59Z'),
 			}),
 		).toThrowError(expect.objectContaining({ code: 'UNREPRESENTABLE_TIME_ZONE' }));
+	});
+
+	it('does not extrapolate a lone finite offset transition beyond its explicit onset', () => {
+		const timeZone = canonicalizeIanaTimeZone('Europe/Prague');
+		const generated = generateFiniteVTimeZone(timeZone, {
+			start: new Date('2040-01-01T00:00:00Z'),
+			end: new Date('2040-12-31T23:59:59Z'),
+		});
+		const changing = observances(generated).find(
+			(observance) =>
+				property(observance, 'TZOFFSETFROM').value.raw !==
+				property(observance, 'TZOFFSETTO').value.raw,
+		);
+		expect(changing).toBeDefined();
+		const incomplete: ICalendarComponent = {
+			kind: 'component',
+			name: 'VTIMEZONE',
+			entries: [
+				property(generated, 'TZID'),
+				{ ...changing!, entries: changing!.entries.slice(0, 3) },
+			],
+		};
+		expect(() =>
+			assertVTimeZoneCovers(incomplete, timeZone, {
+				start: new Date('2040-01-01T00:00:00Z'),
+				end: new Date('2040-12-31T23:59:59Z'),
+			}),
+		).toThrowError(
+			expect.objectContaining({
+				code: CalDavVTimeZoneGenerationErrorCode.UNREPRESENTABLE_TIME_ZONE,
+			}),
+		);
 	});
 });

@@ -25,7 +25,6 @@ import type {
 	ICalendarResource,
 	ICalendarValue,
 } from '../icalendar/parser';
-import { parseICalendarResource } from '../icalendar/parser';
 import {
 	applyCalendarEventPatch,
 	CalDavCalendarEventPatchError,
@@ -34,11 +33,15 @@ import {
 import type { CalendarEventPatch } from '../icalendar/patcher';
 import { serializeICalendarResource } from '../icalendar/serializer';
 import type { CalendarEventInstantProjector } from '../icalendar/serializer';
-import { projectInstantInTimeZone } from '../icalendar/timeZones';
+import { assertVTimeZoneCovers, projectInstantInTimeZone } from '../icalendar/timeZones';
 import { CalDavTransportError, CalDavTransportErrorCode } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import { normalizeCalendarCollectionUrl, validateAbsoluteHttpUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
+import {
+	CalDavCalendarEventTimeZoneAuthoringError,
+	resolveCalendarEventTimeZoneAuthoring,
+} from './timeZoneAuthoring';
 
 export type CalendarEventUpdateIdentifier =
 	| { readonly kind: 'resourceUrl'; readonly resourceUrl: AbsoluteHttpUrl }
@@ -397,7 +400,18 @@ export async function updateCalendarEvent(
 			? embeddedTimeZoneDefinition(current.context.resource, originalTimeZoneId)
 			: undefined;
 	let projectInstant: CalendarEventInstantProjector | undefined;
+	let authoredTimeZoneDefinition: ICalendarComponent | undefined;
 	if (effectiveTimeZone?.timeZoneMode === 'iana') {
+		if (timedCurrent === undefined) {
+			throw new CalDavCalendarEventPatchError(
+				CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
+				'timeZone',
+			);
+		}
+		const interval = {
+			start: requestedStart?.value ?? new Date(timedCurrent.start),
+			end: requestedEnd?.value ?? new Date(timedCurrent.end),
+		};
 		const canUseEmbedded =
 			embeddedDefinition !== undefined &&
 			currentIanaTimeZone !== undefined &&
@@ -405,30 +419,37 @@ export async function updateCalendarEvent(
 			(requestedTimeZone === undefined || originalTimeZoneId === effectiveTimeZone.timeZone);
 		if (canUseEmbedded) {
 			const definition = embeddedDefinition;
+			try {
+				assertVTimeZoneCovers(definition, effectiveTimeZone.timeZone, interval);
+			} catch {
+				throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
+			}
 			projectInstant = (instant, selectedTimeZone) =>
 				projectInstantInTimeZone(instant, selectedTimeZone, definition);
 		} else {
-			if (timeZoneContext === undefined) {
-				throw new CalDavCalendarEventPatchError(
-					CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
-					'timeZone',
-				);
-			}
-			const reference = await timeZoneContext.resolveReference(
-				snapshot.calendarUrl,
-				effectiveTimeZone.timeZone,
-			);
-			const referenceResource = parseICalendarResource(Buffer.from(reference.calendarData, 'utf8'));
-			const definition = referenceResource.calendar.entries.find(
+			const reusableDefinitions = current.context.resource.calendar.entries.filter(
 				(entry): entry is ICalendarComponent =>
-					entry.kind === 'component' && entry.name === 'VTIMEZONE',
+					entry.kind === 'component' &&
+					entry.name.toUpperCase() === 'VTIMEZONE' &&
+					directProperties(entry, 'TZID').length === 1 &&
+					directProperties(entry, 'TZID')[0]!.value.textValues?.length === 1 &&
+					directProperties(entry, 'TZID')[0]!.value.textValues![0] === effectiveTimeZone.timeZone,
 			);
-			if (definition === undefined) {
-				throw new CalDavCalendarEventPatchError(
-					CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
-					'timeZone',
-				);
+			if (reusableDefinitions.length > 1) {
+				throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
 			}
+			const authoringInput = {
+				calendarUrl: snapshot.calendarUrl,
+				timeZone: effectiveTimeZone.timeZone,
+				coverage: { kind: 'finite' as const, interval },
+				...(timeZoneContext === undefined ? {} : { referenceContext: timeZoneContext }),
+				...(reusableDefinitions[0] === undefined
+					? {}
+					: { reusableDefinition: reusableDefinitions[0] }),
+			};
+			const selection = await resolveCalendarEventTimeZoneAuthoring(authoringInput);
+			const definition = selection.definition;
+			if (selection.embed) authoredTimeZoneDefinition = definition;
 			projectInstant = (instant, selectedTimeZone) =>
 				projectInstantInTimeZone(instant, selectedTimeZone, definition);
 		}
@@ -469,7 +490,7 @@ export async function updateCalendarEvent(
 					? { end: { kind: 'set' as const, value: new Date(timedCurrent!.end) } }
 					: {}),
 			}
-		: ({ ...snapshot.patch, timeMode: patchTimeMode } as CalendarEventPatch);
+		: (snapshot.patch as CalendarEventPatch);
 	let patchedResource: ICalendarResource;
 	try {
 		patchedResource = applyCalendarEventPatch(
@@ -478,6 +499,7 @@ export async function updateCalendarEvent(
 			modifiedAt,
 			projectInstant,
 			implicitCurrentTimeZone === undefined ? undefined : originalTimeZoneId,
+			authoredTimeZoneDefinition,
 		);
 	} catch (error) {
 		if (

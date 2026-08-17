@@ -1,4 +1,9 @@
-import type { ICalendarComponent, ICalendarProperty } from './parser';
+import {
+	ICALENDAR_MAX_COMPONENTS,
+	ICALENDAR_MAX_PROPERTIES,
+	ICALENDAR_MAX_RESOURCE_BYTES,
+} from './parser';
+import type { ICalendarComponent, ICalendarProperty, ICalendarValue } from './parser';
 
 export const IANA_TIME_ZONE_DATABASE_VERSION = '2026c' as const;
 
@@ -37,6 +42,37 @@ export type CalendarEventTimeZone =
 	| { readonly timeZoneMode: 'iana'; readonly timeZone: IanaTimeZoneId };
 
 export type TimeZoneRuleSource = 'intl' | 'vtimezone';
+
+export interface FiniteTimeZoneCoverage {
+	readonly start: Date;
+	readonly end: Date;
+}
+
+export const CalDavVTimeZoneGenerationErrorCode = Object.freeze({
+	INVALID_COVERAGE: 'INVALID_COVERAGE',
+	UNREPRESENTABLE_TIME_ZONE: 'UNREPRESENTABLE_TIME_ZONE',
+} as const);
+
+export type CalDavVTimeZoneGenerationErrorCode =
+	(typeof CalDavVTimeZoneGenerationErrorCode)[keyof typeof CalDavVTimeZoneGenerationErrorCode];
+
+const VTIMEZONE_GENERATION_ERROR_MESSAGES: Readonly<
+	Record<CalDavVTimeZoneGenerationErrorCode, string>
+> = {
+	INVALID_COVERAGE: 'The finite time-zone coverage interval is invalid.',
+	UNREPRESENTABLE_TIME_ZONE:
+		'The selected IANA time zone cannot be represented safely for this calendar event.',
+};
+
+export class CalDavVTimeZoneGenerationError extends Error {
+	readonly code: CalDavVTimeZoneGenerationErrorCode;
+
+	constructor(code: CalDavVTimeZoneGenerationErrorCode) {
+		super(VTIMEZONE_GENERATION_ERROR_MESSAGES[code]);
+		this.name = 'CalDavVTimeZoneGenerationError';
+		this.code = code;
+	}
+}
 
 const PRIMARY_ZONES = Object.freeze([
 	'Africa/Algiers',
@@ -770,8 +806,11 @@ function formatter(timeZone: IanaTimeZoneId): Intl.DateTimeFormat {
 	});
 }
 
-function projectedParts(timestamp: number, timeZone: IanaTimeZoneId): DateParts {
-	const parts = formatter(timeZone).formatToParts(new Date(timestamp));
+function projectedPartsWithFormatter(
+	timestamp: number,
+	dateTimeFormatter: Intl.DateTimeFormat,
+): DateParts {
+	const parts = dateTimeFormatter.formatToParts(new Date(timestamp));
 	const values = new Map(parts.map(({ type, value }) => [type, value]));
 	const era = values.get('era');
 	if (era !== undefined && era !== 'AD') return invalidInstant();
@@ -793,6 +832,10 @@ function projectedParts(timestamp: number, timeZone: IanaTimeZoneId): DateParts 
 		return invalidInstant();
 	}
 	return result;
+}
+
+function projectedParts(timestamp: number, timeZone: IanaTimeZoneId): DateParts {
+	return projectedPartsWithFormatter(timestamp, formatter(timeZone));
 }
 
 function pad(value: number, width = 2): string {
@@ -857,6 +900,312 @@ function wallTimestamp(parts: DateParts): number {
 
 function offsetAt(timestamp: number, timeZone: IanaTimeZoneId): number {
 	return wallTimestamp(projectedParts(timestamp, timeZone)) - timestamp;
+}
+
+interface GeneratedTransition {
+	readonly localMilliseconds: number;
+	readonly offsetFromMilliseconds: number;
+	readonly offsetToMilliseconds: number;
+}
+
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000;
+const MAX_GENERATION_PROBES = ICALENDAR_MAX_PROPERTIES * 8;
+
+function invalidCoverage(): never {
+	throw new CalDavVTimeZoneGenerationError(CalDavVTimeZoneGenerationErrorCode.INVALID_COVERAGE);
+}
+
+function unrepresentableTimeZone(): never {
+	throw new CalDavVTimeZoneGenerationError(
+		CalDavVTimeZoneGenerationErrorCode.UNREPRESENTABLE_TIME_ZONE,
+	);
+}
+
+function finiteCoverageTimestamps(coverage: FiniteTimeZoneCoverage): {
+	readonly start: number;
+	readonly end: number;
+	readonly startYear: number;
+	readonly endYear: number;
+} {
+	if (
+		coverage === null ||
+		typeof coverage !== 'object' ||
+		!(coverage.start instanceof Date) ||
+		!(coverage.end instanceof Date)
+	) {
+		return invalidCoverage();
+	}
+	let start: number;
+	let end: number;
+	try {
+		start = DATE_GET_TIME.call(coverage.start);
+		end = DATE_GET_TIME.call(coverage.end);
+	} catch {
+		return invalidCoverage();
+	}
+	if (
+		!Number.isFinite(start) ||
+		!Number.isFinite(end) ||
+		DATE_GET_UTC_MILLISECONDS.call(coverage.start) !== 0 ||
+		DATE_GET_UTC_MILLISECONDS.call(coverage.end) !== 0 ||
+		end < start
+	) {
+		return invalidCoverage();
+	}
+	const startYear = DATE_GET_UTC_FULL_YEAR.call(coverage.start);
+	const endYear = DATE_GET_UTC_FULL_YEAR.call(coverage.end);
+	if (startYear < 1 || startYear > 9999 || endYear < 1 || endYear > 9999) {
+		return invalidCoverage();
+	}
+	return { start, end, startYear, endYear };
+}
+
+function utcYearStart(year: number): number {
+	const date = new Date(0);
+	date.setUTCFullYear(year, 0, 1);
+	date.setUTCHours(0, 0, 0, 0);
+	return DATE_GET_TIME.call(date);
+}
+
+function formatCompactLocal(timestamp: number): string {
+	const date = new Date(timestamp);
+	return `${pad(date.getUTCFullYear(), 4)}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}T${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}`;
+}
+
+function formatUtcOffset(milliseconds: number): string {
+	if (!Number.isSafeInteger(milliseconds) || milliseconds % 1000 !== 0) {
+		return unrepresentableTimeZone();
+	}
+	const seconds = Math.abs(milliseconds / 1000);
+	const hours = Math.floor(seconds / 3600);
+	const minutes = Math.floor((seconds % 3600) / 60);
+	const remainingSeconds = seconds % 60;
+	if (hours > 23 || minutes > 59 || remainingSeconds > 59) {
+		return unrepresentableTimeZone();
+	}
+	const sign = milliseconds < 0 ? '-' : '+';
+	return `${sign}${pad(hours)}${pad(minutes)}${remainingSeconds === 0 ? '' : pad(remainingSeconds)}`;
+}
+
+function generatedValue(
+	valueType: string,
+	raw: string,
+	textValues: readonly string[] | null,
+): ICalendarValue {
+	return { kind: 'value', valueType, raw, textValues };
+}
+
+function generatedProperty(
+	name: string,
+	valueType: string,
+	raw: string,
+	textValues: readonly string[] | null = null,
+): ICalendarProperty {
+	return {
+		kind: 'property',
+		name,
+		parameters: [],
+		value: generatedValue(valueType, raw, textValues),
+	};
+}
+
+function discoverFiniteTransitions(
+	timeZone: IanaTimeZoneId,
+	start: number,
+	end: number,
+): readonly GeneratedTransition[] {
+	const estimatedProbes = Math.ceil((end - start) / MILLISECONDS_PER_DAY) + 3;
+	if (!Number.isSafeInteger(estimatedProbes) || estimatedProbes > MAX_GENERATION_PROBES) {
+		return unrepresentableTimeZone();
+	}
+	const dateTimeFormatter = formatter(timeZone);
+	const projectedOffset = (timestamp: number): number =>
+		wallTimestamp(projectedPartsWithFormatter(timestamp, dateTimeFormatter)) - timestamp;
+	const transitions: GeneratedTransition[] = [];
+	let previousInstant = start;
+	let previousOffset = projectedOffset(previousInstant);
+	transitions.push({
+		localMilliseconds: start + previousOffset,
+		offsetFromMilliseconds: previousOffset,
+		offsetToMilliseconds: previousOffset,
+	});
+	for (let sample = Math.min(start + MILLISECONDS_PER_DAY, end); ;) {
+		const sampleOffset = projectedOffset(sample);
+		if (sampleOffset !== previousOffset) {
+			let lower = previousInstant;
+			let upper = sample;
+			while (upper - lower > 1000) {
+				const midpoint = lower + Math.floor((upper - lower) / 2000) * 1000;
+				if (projectedOffset(midpoint) === previousOffset) lower = midpoint;
+				else upper = midpoint;
+			}
+			const transitionOffset = projectedOffset(upper);
+			transitions.push({
+				localMilliseconds: upper + previousOffset,
+				offsetFromMilliseconds: previousOffset,
+				offsetToMilliseconds: transitionOffset,
+			});
+			previousOffset = transitionOffset;
+		}
+		previousInstant = sample;
+		if (sample === end) break;
+		sample = Math.min(sample + MILLISECONDS_PER_DAY, end);
+	}
+	transitions.push({
+		localMilliseconds: end + previousOffset,
+		offsetFromMilliseconds: previousOffset,
+		offsetToMilliseconds: previousOffset,
+	});
+	return transitions;
+}
+
+function generatedDefinition(
+	timeZone: IanaTimeZoneId,
+	transitions: readonly GeneratedTransition[],
+): ICalendarComponent {
+	const grouped = new Map<string, GeneratedTransition[]>();
+	for (const transition of transitions) {
+		const kind =
+			transition.offsetToMilliseconds > transition.offsetFromMilliseconds ? 'DAYLIGHT' : 'STANDARD';
+		const key = `${kind}:${transition.offsetFromMilliseconds}:${transition.offsetToMilliseconds}`;
+		const group = grouped.get(key) ?? [];
+		group.push(transition);
+		grouped.set(key, group);
+	}
+	const observances: ICalendarComponent[] = [];
+	for (const [key, group] of grouped) {
+		const [kind] = key.split(':');
+		let ordered = [...group].sort(
+			(left, right) => left.localMilliseconds - right.localMilliseconds,
+		);
+		if (
+			grouped.size === 1 &&
+			ordered[0]!.offsetFromMilliseconds === ordered[0]!.offsetToMilliseconds
+		) {
+			ordered = ordered.slice(0, 1);
+		}
+		const first = ordered[0]!;
+		observances.push({
+			kind: 'component',
+			name: kind!,
+			entries: [
+				generatedProperty('DTSTART', 'DATE-TIME', formatCompactLocal(first.localMilliseconds)),
+				generatedProperty(
+					'TZOFFSETFROM',
+					'UTC-OFFSET',
+					formatUtcOffset(first.offsetFromMilliseconds),
+				),
+				generatedProperty('TZOFFSETTO', 'UTC-OFFSET', formatUtcOffset(first.offsetToMilliseconds)),
+				...ordered
+					.slice(1)
+					.map((transition) =>
+						generatedProperty(
+							'RDATE',
+							'DATE-TIME',
+							formatCompactLocal(transition.localMilliseconds),
+						),
+					),
+			],
+		});
+	}
+	observances.sort((left, right) => {
+		const leftStart = definitionRaw(left, 'DTSTART') ?? '';
+		const rightStart = definitionRaw(right, 'DTSTART') ?? '';
+		if (leftStart !== rightStart) return leftStart < rightStart ? -1 : 1;
+		if (left.name === right.name) return 0;
+		return left.name < right.name ? -1 : 1;
+	});
+	const propertyCount = 1 + observances.reduce((count, value) => count + value.entries.length, 0);
+	const approximateBytes =
+		64 +
+		timeZone.length +
+		observances.reduce(
+			(count, value) =>
+				count +
+				32 +
+				value.entries.reduce(
+					(inner, entry) =>
+						inner +
+						(entry.kind === 'property' ? entry.name.length + entry.value.raw.length + 3 : 0),
+					0,
+				),
+			0,
+		);
+	if (
+		observances.length + 1 > ICALENDAR_MAX_COMPONENTS ||
+		propertyCount > ICALENDAR_MAX_PROPERTIES ||
+		approximateBytes > ICALENDAR_MAX_RESOURCE_BYTES
+	) {
+		return unrepresentableTimeZone();
+	}
+	return {
+		kind: 'component',
+		name: 'VTIMEZONE',
+		entries: [generatedProperty('TZID', 'TEXT', timeZone, [timeZone]), ...observances],
+	};
+}
+
+export function assertVTimeZoneCovers(
+	definition: ICalendarComponent,
+	timeZone: IanaTimeZoneId,
+	coverage: FiniteTimeZoneCoverage,
+): void {
+	const snapshot = finiteCoverageTimestamps(coverage);
+	try {
+		const years = [snapshot.startYear, snapshot.endYear];
+		const transitions = definitionTransitions(definition, timeZone, years);
+		if (transitions.length === 0) return unrepresentableTimeZone();
+		const transitionInstants = transitions
+			.map((transition) => transition.localMilliseconds - transition.offsetFromMilliseconds)
+			.sort((left, right) => left - right);
+		const isConstant = transitions.every(
+			(transition) => transition.offsetFromMilliseconds === transition.offsetToMilliseconds,
+		);
+		if (
+			!isConstant &&
+			(transitionInstants[0]! > snapshot.start ||
+				transitionInstants[transitionInstants.length - 1]! < snapshot.end)
+		) {
+			return unrepresentableTimeZone();
+		}
+		for (const instant of [snapshot.start, snapshot.end]) {
+			const offset = transitionOffsetAtInstant(transitions, instant);
+			const parts = new Date(instant + offset);
+			if (parts.getUTCFullYear() < 1 || parts.getUTCFullYear() > 9999) {
+				return unrepresentableTimeZone();
+			}
+		}
+	} catch (error) {
+		if (
+			error instanceof CalDavVTimeZoneGenerationError &&
+			error.code === CalDavVTimeZoneGenerationErrorCode.INVALID_COVERAGE
+		) {
+			throw error;
+		}
+		return unrepresentableTimeZone();
+	}
+}
+
+export function generateFiniteVTimeZone(
+	timeZone: IanaTimeZoneId,
+	coverage: FiniteTimeZoneCoverage,
+): ICalendarComponent {
+	const snapshot = finiteCoverageTimestamps(coverage);
+	const discoveryStartYear = Math.max(1, snapshot.startYear - 1);
+	const discoveryEndYear = Math.min(9999, snapshot.endYear + 1);
+	const transitions = discoverFiniteTransitions(
+		timeZone,
+		utcYearStart(discoveryStartYear),
+		discoveryEndYear === 9999
+			? utcYearStart(9999) + 365 * MILLISECONDS_PER_DAY - 1000
+			: utcYearStart(discoveryEndYear + 1),
+	);
+	const definition = generatedDefinition(timeZone, transitions);
+	assertVTimeZoneCovers(definition, timeZone, {
+		start: new Date(snapshot.start),
+		end: new Date(snapshot.end),
+	});
+	return definition;
 }
 
 interface DefinitionTransition {

@@ -15,6 +15,7 @@ import { joinCalendarCollectionUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import { getCalendarEventByResourceUrl } from './getByResourceUrl';
 import { createCalendarEventResource } from './mutations';
+import { resolveCalendarEventTimeZoneAuthoring } from './timeZoneAuthoring';
 import { resolveCalendarEventUid } from './uid';
 
 interface CalendarEventCreateCommon {
@@ -182,20 +183,20 @@ export async function createCalendarEvent(
 			? (input.timeZone ?? { timeZoneMode: 'utc' as const })
 			: ({ timeZoneMode: 'utc' } as const);
 	let timeZoneDefinition: ICalendarComponent | undefined;
+	let embeddedTimeZoneDefinition: ICalendarComponent | undefined;
 	let projectInstant: CalendarEventInstantProjector | undefined;
 	if (timeZone.timeZoneMode === 'iana') {
-		if (timeZoneContext === undefined) {
+		if (input.timeMode !== 'timed') {
 			throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
 		}
-		const reference = await timeZoneContext.resolveReference(input.calendarUrl, timeZone.timeZone);
-		const referenceResource = parseICalendarResource(Buffer.from(reference.calendarData, 'utf8'));
-		timeZoneDefinition = referenceResource.calendar.entries.find(
-			(entry): entry is ICalendarComponent =>
-				entry.kind === 'component' && entry.name === 'VTIMEZONE',
-		);
-		if (timeZoneDefinition === undefined) {
-			throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
-		}
+		const selection = await resolveCalendarEventTimeZoneAuthoring({
+			calendarUrl: input.calendarUrl,
+			timeZone: timeZone.timeZone,
+			coverage: { kind: 'finite', interval: { start: input.start, end: input.end } },
+			...(timeZoneContext === undefined ? {} : { referenceContext: timeZoneContext }),
+		});
+		timeZoneDefinition = selection.definition;
+		if (selection.embed) embeddedTimeZoneDefinition = selection.definition;
 		const definition = timeZoneDefinition;
 		projectInstant = (instant, selectedTimeZone) =>
 			projectInstantInTimeZone(instant, selectedTimeZone, definition);
@@ -228,6 +229,7 @@ export async function createCalendarEvent(
 						timeZone,
 					},
 					projectInstant,
+					embeddedTimeZoneDefinition,
 				);
 	const normalized = normalizeCreatedEvent(input, resourceUrl, calendarData, timeZoneDefinition);
 	if (

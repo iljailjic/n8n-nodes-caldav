@@ -77,16 +77,28 @@ unrelated components and parameters, and explicit timed/all-day conversions
 never infer a timezone or duration.
 
 `icalendar/timeZones.ts` owns the checked-in IANA TZDB 2026c Zone/Link identity
-oracle and deterministic `Intl` instant/local conversion. Embedded
-`VTIMEZONE` rules remain authoritative when reading an event. Unsupported or
-ambiguous representations project to the read-only event branch rather than
-inventing an instant.
+oracle, deterministic `Intl` instant/local conversion, and the pure synchronous
+finite `VTIMEZONE` generator. Generated definitions contain explicit
+`STANDARD`/`DAYLIGHT` transitions only, stay within parser and serializer
+resource limits, and are returned only after their closed event coverage is
+proved. Embedded `VTIMEZONE` rules remain authoritative when reading an event.
+Unsupported or ambiguous representations project to the read-only event branch
+rather than inventing an instant.
 
 `discovery/timeZoneReferences.ts` owns RFC 7809 capability detection and RFC
 7808 TZDIST lookup. It keeps authenticated CalDAV discovery separate from
 anonymous TZDIST requests, filters untrusted service targets, validates strong
 ETags and calendar content, and scopes positive and negative caches to one
 node execution.
+
+`events/timeZoneAuthoring.ts` is the authoring selection boundary. It prefers a
+verified server reference, falls back to a generated embedded definition only
+for finite coverage, and returns private-safe typed failures when neither route
+can prove a safe representation. Create resolves this selection before UID and
+serialization; Update derives final bounds after its read and resolves only
+when the patch actually changes time. Patching adds at most one newly authored
+definition and removes an old one only when no preserved property still
+references its exact source `TZID`.
 
 ### Provider adapters
 

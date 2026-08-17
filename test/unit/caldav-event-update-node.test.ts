@@ -156,8 +156,10 @@ async function authoringFailure(
 			? ({ kind: 'unbounded' } as const)
 			: ({
 					kind: 'finite',
-					start: new Date('0001-01-01T00:00:00Z'),
-					end: new Date('9999-12-31T23:59:59Z'),
+					interval: {
+						start: new Date('0001-01-01T00:00:00Z'),
+						end: new Date('9999-12-31T23:59:59Z'),
+					},
 				} as const);
 	return await resolveCalendarEventTimeZoneAuthoring({
 		calendarUrl: validateAbsoluteHttpUrl(CALENDAR_URL),

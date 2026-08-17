@@ -1229,6 +1229,85 @@ function applyMetadata(
 	}
 }
 
+function propertyTimeZoneId(property: ICalendarProperty): string | undefined {
+	const parameters = matchingParameters(property, 'TZID');
+	return parameters.length === 1 && parameters[0]!.values.length === 1
+		? parameters[0]!.values[0]!.value
+		: undefined;
+}
+
+function componentTimeZoneId(component: ICalendarComponent): string | undefined {
+	const identifiers = directProperties(component, 'TZID');
+	return identifiers.length === 1 && identifiers[0]!.value.textValues?.length === 1
+		? identifiers[0]!.value.textValues[0]
+		: undefined;
+}
+
+function masterTimeZoneId(component: ICalendarComponent): string | undefined {
+	const starts = directProperties(component, 'DTSTART');
+	const ends = directProperties(component, 'DTEND');
+	if (starts.length !== 1 || ends.length !== 1) return undefined;
+	const start = propertyTimeZoneId(starts[0]!);
+	const end = propertyTimeZoneId(ends[0]!);
+	return start !== undefined && start === end ? start : undefined;
+}
+
+function entryReferencesTimeZone(entry: ICalendarEntry, timeZoneId: string): boolean {
+	if (entry.kind === 'property') return propertyTimeZoneId(entry) === timeZoneId;
+	return entry.entries.some((child) => entryReferencesTimeZone(child, timeZoneId));
+}
+
+function reconcileTimeZoneDefinitions(
+	context: CalendarEventPreservationContext,
+	master: ICalendarComponent,
+	timeZoneDefinition?: ICalendarComponent,
+): readonly ICalendarEntry[] {
+	const oldTimeZoneId = masterTimeZoneId(context.master);
+	const newTimeZoneId = masterTimeZoneId(master);
+	let calendarEntries = context.resource.calendar.entries.map((entry) =>
+		entry === context.master ? master : entry,
+	);
+	if (oldTimeZoneId !== undefined && oldTimeZoneId !== newTimeZoneId) {
+		const retainedReference = calendarEntries.some(
+			(entry) =>
+				!(entry.kind === 'component' && asciiUpperCase(entry.name) === 'VTIMEZONE') &&
+				entryReferencesTimeZone(entry, oldTimeZoneId),
+		);
+		if (!retainedReference) {
+			calendarEntries = calendarEntries.filter(
+				(entry) =>
+					!(
+						entry.kind === 'component' &&
+						asciiUpperCase(entry.name) === 'VTIMEZONE' &&
+						componentTimeZoneId(entry) === oldTimeZoneId
+					),
+			);
+		}
+	}
+	if (timeZoneDefinition !== undefined && newTimeZoneId !== undefined) {
+		const target = canonicalizeIanaTimeZone(newTimeZoneId);
+		const alreadyPresent = calendarEntries.some((entry) => {
+			if (entry.kind !== 'component' || asciiUpperCase(entry.name) !== 'VTIMEZONE') return false;
+			const identifier = componentTimeZoneId(entry);
+			if (identifier === undefined) return false;
+			try {
+				return canonicalizeIanaTimeZone(identifier) === target;
+			} catch {
+				return false;
+			}
+		});
+		if (!alreadyPresent) {
+			const masterIndex = calendarEntries.indexOf(master);
+			calendarEntries.splice(
+				masterIndex < 0 ? calendarEntries.length : masterIndex,
+				0,
+				timeZoneDefinition,
+			);
+		}
+	}
+	return calendarEntries;
+}
+
 function constructResource(
 	context: CalendarEventPreservationContext,
 	patch: ValidatedPatch,
@@ -1237,6 +1316,7 @@ function constructResource(
 	timePlan: TimePatchPlan,
 	projectInstant: CalendarEventInstantProjector,
 	renderedTimeZone?: string,
+	timeZoneDefinition?: ICalendarComponent,
 ): ICalendarResource {
 	const masterEntries = [...context.master.entries];
 	for (const field of PATCH_FIELDS) {
@@ -1267,9 +1347,7 @@ function constructResource(
 		name: context.master.name,
 		entries: masterEntries,
 	});
-	const calendarEntries = context.resource.calendar.entries.map((entry) =>
-		entry === context.master ? master : entry,
-	);
+	const calendarEntries = reconcileTimeZoneDefinitions(context, master, timeZoneDefinition);
 	Object.freeze(calendarEntries);
 	const calendar = Object.freeze({
 		kind: 'component' as const,
@@ -1285,6 +1363,7 @@ export function applyCalendarEventPatch(
 	modifiedAt: Date,
 	projectInstant: CalendarEventInstantProjector = projectInstantInTimeZone,
 	renderedTimeZone?: string,
+	timeZoneDefinition?: ICalendarComponent,
 ): ICalendarResource {
 	const canonicalContext = validateStage(
 		() => snapshotCanonicalContext(context),
@@ -1313,5 +1392,6 @@ export function applyCalendarEventPatch(
 		timePlan,
 		projectInstant,
 		renderedTimeZone,
+		timeZoneDefinition,
 	);
 }

@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { CalendarEventTimeZoneExecutionContext } from '../../nodes/CalDav/discovery/timeZoneReferences';
-import { resolveCalendarEventTimeZoneAuthoring } from '../../nodes/CalDav/events/timeZoneAuthoring';
+import {
+	CalDavCalendarEventTimeZoneAuthoringError,
+	CalendarEventTimeZoneAuthoringErrorCode,
+	resolveCalendarEventTimeZoneAuthoring,
+} from '../../nodes/CalDav/events/timeZoneAuthoring';
+import type { CalendarEventTimeZoneAuthoringRules } from '../../nodes/CalDav/events/timeZoneAuthoring';
 import { parseICalendarResource } from '../../nodes/CalDav/icalendar/parser';
 import { serializeICalendarResource } from '../../nodes/CalDav/icalendar/serializer';
 import { canonicalizeIanaTimeZone } from '../../nodes/CalDav/icalendar/timeZones';
@@ -12,8 +17,10 @@ const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/cale
 const TIME_ZONE = canonicalizeIanaTimeZone('Europe/Prague');
 const FINITE_COVERAGE = Object.freeze({
 	kind: 'finite' as const,
-	start: new Date('2040-01-15T09:00:00Z'),
-	end: new Date('2040-01-15T10:00:00Z'),
+	interval: Object.freeze({
+		start: new Date('2040-01-15T09:00:00Z'),
+		end: new Date('2040-01-15T10:00:00Z'),
+	}),
 });
 const UNBOUNDED_COVERAGE = Object.freeze({ kind: 'unbounded' as const });
 const encoder = new TextEncoder();
@@ -33,9 +40,7 @@ function verifiedReference(): CalendarEventTimeZoneExecutionContext {
 	}));
 }
 
-function componentText(
-	result: Awaited<ReturnType<typeof resolveCalendarEventTimeZoneAuthoring>>,
-): string {
+function componentText(result: CalendarEventTimeZoneAuthoringRules): string {
 	const base = parseICalendarResource(
 		encoder.encode(
 			[
@@ -74,27 +79,27 @@ function componentText(
 
 describe('calendar-event time-zone authoring selection', () => {
 	it('prefers a verified reference for finite authoring and never embeds it', async () => {
-		const timeZoneContext = verifiedReference();
+		const referenceContext = verifiedReference();
 		const result = await resolveCalendarEventTimeZoneAuthoring({
 			calendarUrl: CALENDAR_URL,
 			timeZone: TIME_ZONE,
 			coverage: FINITE_COVERAGE,
-			timeZoneContext,
+			referenceContext,
 		});
 		expect(result).toMatchObject({ source: 'reference', embed: false });
 		expect(result.definition.name).toBe('VTIMEZONE');
-		expect(timeZoneContext.resolveReference).toHaveBeenCalledOnce();
-		expect(timeZoneContext.resolveReference).toHaveBeenCalledWith(CALENDAR_URL, TIME_ZONE);
+		expect(referenceContext.resolveReference).toHaveBeenCalledOnce();
+		expect(referenceContext.resolveReference).toHaveBeenCalledWith(CALENDAR_URL, TIME_ZONE);
 	});
 
 	it('uses a verified reference for unbounded IANA authoring', async () => {
-		const timeZoneContext = verifiedReference();
+		const referenceContext = verifiedReference();
 		await expect(
 			resolveCalendarEventTimeZoneAuthoring({
 				calendarUrl: CALENDAR_URL,
 				timeZone: TIME_ZONE,
 				coverage: UNBOUNDED_COVERAGE,
-				timeZoneContext,
+				referenceContext,
 			}),
 		).resolves.toMatchObject({ source: 'reference', embed: false });
 	});
@@ -117,12 +122,12 @@ describe('calendar-event time-zone authoring selection', () => {
 				ruleSource: 'vtimezone',
 			})),
 		],
-	] as const)('selects finite generated fallback for a %s', async (_label, timeZoneContext) => {
+	] as const)('selects finite generated fallback for a %s', async (_label, referenceContext) => {
 		const result = await resolveCalendarEventTimeZoneAuthoring({
 			calendarUrl: CALENDAR_URL,
 			timeZone: TIME_ZONE,
 			coverage: FINITE_COVERAGE,
-			...(timeZoneContext === undefined ? {} : { timeZoneContext }),
+			...(referenceContext === undefined ? {} : { referenceContext }),
 		});
 		expect(result).toMatchObject({ source: 'generated', embed: true });
 		const serialized = componentText(result);
@@ -132,13 +137,17 @@ describe('calendar-event time-zone authoring selection', () => {
 	});
 
 	it('rejects unbounded fallback with the exact safe message and no generator activity', async () => {
-		const timeZoneContext = context(async () => Promise.reject(new Error('private-reference')));
+		const referenceContext = context(async () => Promise.reject(new Error('private-reference')));
 		const error = await resolveCalendarEventTimeZoneAuthoring({
 			calendarUrl: CALENDAR_URL,
 			timeZone: TIME_ZONE,
 			coverage: UNBOUNDED_COVERAGE,
-			timeZoneContext,
+			referenceContext,
 		}).catch((failure: unknown) => failure);
+		expect(error).toBeInstanceOf(CalDavCalendarEventTimeZoneAuthoringError);
+		expect(CalendarEventTimeZoneAuthoringErrorCode.UNBOUNDED_REQUIRES_REFERENCE).toBe(
+			'UNBOUNDED_REQUIRES_REFERENCE',
+		);
 		expect(error).toMatchObject({
 			code: 'UNBOUNDED_REQUIRES_REFERENCE',
 			message: 'An unbounded IANA recurrence requires server time-zone reference support.',
@@ -148,12 +157,14 @@ describe('calendar-event time-zone authoring selection', () => {
 
 	it('maps every unsafe finite generation or coverage failure to one exact private-safe error', async () => {
 		const error = await resolveCalendarEventTimeZoneAuthoring({
-			calendarUrl: 'https://calendar.example.test/private-calendar/',
+			calendarUrl: validateAbsoluteHttpUrl('https://calendar.example.test/private-calendar/'),
 			timeZone: TIME_ZONE,
 			coverage: {
 				kind: 'finite',
-				start: new Date('0001-01-01T00:00:00Z'),
-				end: new Date('9999-12-31T23:59:59Z'),
+				interval: {
+					start: new Date('0001-01-01T00:00:00Z'),
+					end: new Date('9999-12-31T23:59:59Z'),
+				},
 			},
 		}).catch((failure: unknown) => failure);
 		expect(error).toMatchObject({
@@ -166,8 +177,10 @@ describe('calendar-event time-zone authoring selection', () => {
 	it('canonicalizes alias/case input and returns deterministic definitions for distinct zones', async () => {
 		const coverage = {
 			kind: 'finite' as const,
-			start: new Date('2040-01-01T00:00:00Z'),
-			end: new Date('2041-01-01T00:00:00Z'),
+			interval: {
+				start: new Date('2040-01-01T00:00:00Z'),
+				end: new Date('2041-01-01T00:00:00Z'),
+			},
 		};
 		const aliases = await Promise.all(
 			['europe/prague', 'Europe/Prague'].map((timeZone) =>
