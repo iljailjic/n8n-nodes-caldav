@@ -45,10 +45,13 @@ a standards-compliant UUID. Do not assume an application-specific identifier.
 - UTC and IANA time zones.
 
 IANA identifiers use the checked-in TZDB 2026c Zone/Link oracle. Create and
-timezone-changing Update operations use canonical identifiers and require the
-server-by-reference flow from RFC 7809 and RFC 7808; they do not generate
-`VTIMEZONE`. Reads prefer a referenced event's embedded `VTIMEZONE` rules and
-return unsupported time representations through a read-only event model.
+timezone-changing Update operations use canonical identifiers and prefer the
+server-by-reference flow from RFC 7809 and RFC 7808. When a safe reference is
+unavailable for a finite event, they embed a minimal finite `VTIMEZONE`
+generated from runtime `Intl` rules and prove coverage before mutation.
+Unbounded IANA recurrence authoring requires a verified server reference.
+Reads prefer a referenced event's embedded `VTIMEZONE` rules and return
+unsupported time representations through a read-only event model.
 
 - Summary, description, location, and URL.
 - Categories, status, and transparency.
@@ -58,10 +61,11 @@ return unsupported time representations through a read-only event model.
 - Raw ICS input and output as an interoperability escape hatch.
 
 The 0.5.0 all-day slice authors strict Gregorian `VALUE=DATE` start/end pairs
-with an inclusive start and exclusive end. Timed authoring in this slice stays
-UTC-only. Safely identifiable floating, duration-based, or timezone-dependent
-events remain readable and deletable but are read-only for structured Update;
-IANA authoring and `VTIMEZONE` generation remain separate roadmap work.
+with an inclusive start and exclusive end. Finite timed authoring supports UTC
+and reference-first IANA time zones with generated finite `VTIMEZONE` fallback.
+Safely identifiable floating, duration-based, ambiguous, or otherwise
+unsupported time representations remain readable and deletable but are
+read-only for structured Update.
 
 ### Concurrency and interoperability
 

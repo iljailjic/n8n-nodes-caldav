@@ -63,6 +63,7 @@ import {
 	updateCalendarEvent,
 } from './events/update';
 import type { CalendarEventUpdateInput } from './events/update';
+import { CalDavCalendarEventTimeZoneAuthoringError } from './events/timeZoneAuthoring';
 import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
 import { CalDavCalendarEventReadModelError } from './icalendar/eventReadModel';
 import type { CalendarDateString, CalendarEvent } from './icalendar/eventReadModel';
@@ -686,6 +687,9 @@ function eventCreateSerializationFailure(error: CalDavICalendarSerializeError): 
 }
 
 function eventCreateFailure(error: unknown): EventCreateFailure {
+	if (error instanceof CalDavCalendarEventTimeZoneAuthoringError) {
+		return { message: error.message, configuration: true };
+	}
 	if (error instanceof CalDavTimeZoneReferenceError) {
 		return { message: error.message, configuration: false };
 	}
@@ -814,6 +818,9 @@ function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpd
 function eventUpdateFailure(error: unknown): EventUpdateFailure {
 	if (error instanceof Error && error.message === READ_ONLY_EVENT_UPDATE_MESSAGE) {
 		return { message: READ_ONLY_EVENT_UPDATE_MESSAGE, configuration: true };
+	}
+	if (error instanceof CalDavCalendarEventTimeZoneAuthoringError) {
+		return { message: error.message, configuration: true };
 	}
 	if (error instanceof CalDavTimeZoneReferenceError) {
 		return { message: error.message, configuration: false };

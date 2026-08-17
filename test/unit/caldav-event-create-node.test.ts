@@ -18,6 +18,7 @@ vi.mock('../../nodes/CalDav/transport/http', async (importOriginal) => ({
 }));
 
 import { CalDav } from '../../nodes/CalDav/CalDav.node';
+import { resolveCalendarEventTimeZoneAuthoring } from '../../nodes/CalDav/events/timeZoneAuthoring';
 import {
 	CalDavCalendarEventCreateError,
 	CalendarEventCreateFailureCode,
@@ -40,6 +41,7 @@ import {
 	CalDavTlsError,
 } from '../../nodes/CalDav/transport/http';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import { canonicalizeIanaTimeZone } from '../../nodes/CalDav/icalendar/timeZones';
 
 const NODE: INode = {
 	id: 'event-create-node',
@@ -140,6 +142,26 @@ async function captureError(executionContext: IExecuteFunctions): Promise<Error>
 		return error as Error;
 	}
 	throw new Error('Expected Event Create execution to fail.');
+}
+
+async function authoringFailure(
+	code: 'UNBOUNDED_REQUIRES_REFERENCE' | 'UNREPRESENTABLE_TIME_ZONE',
+): Promise<unknown> {
+	const coverage =
+		code === 'UNBOUNDED_REQUIRES_REFERENCE'
+			? ({ kind: 'unbounded' } as const)
+			: ({
+					kind: 'finite',
+					interval: {
+						start: new Date('0001-01-01T00:00:00Z'),
+						end: new Date('9999-12-31T23:59:59Z'),
+					},
+				} as const);
+	return await resolveCalendarEventTimeZoneAuthoring({
+		calendarUrl: validateAbsoluteHttpUrl('https://calendar.example.test/calendars/work/'),
+		timeZone: canonicalizeIanaTimeZone('Europe/Prague'),
+		coverage,
+	}).catch((error: unknown) => error);
 }
 
 beforeEach(() => {
@@ -541,6 +563,45 @@ describe('CalDAV Event Create multi-item and sanitized failures', () => {
 			message: 'The calendar event exceeds the supported size limit.',
 			context: { itemIndex: 0 },
 		});
+	});
+
+	it.each([
+		[
+			'UNBOUNDED_REQUIRES_REFERENCE',
+			'An unbounded IANA recurrence requires server time-zone reference support.',
+		],
+		[
+			'UNREPRESENTABLE_TIME_ZONE',
+			'The selected IANA time zone cannot be represented safely for this calendar event.',
+		],
+	] as const)(
+		'maps %s authoring failure to an item-indexed local safe error',
+		async (code, message) => {
+			mocks.createCalendarEvent.mockRejectedValueOnce(await authoringFailure(code));
+			const error = await captureError(context([parameters()]));
+			expect(error).toBeInstanceOf(NodeOperationError);
+			expect(error).toMatchObject({ message, context: { itemIndex: 0 } });
+			expect(JSON.stringify(error)).not.toMatch(/Prague|calendar\.example|private|VTIMEZONE/i);
+		},
+	);
+
+	it('returns only the exact authoring message with pairing under continueOnFail', async () => {
+		mocks.createCalendarEvent.mockRejectedValueOnce(
+			await authoringFailure('UNREPRESENTABLE_TIME_ZONE'),
+		);
+		const [output] = await new CalDav().execute.call(
+			context([parameters({ uid: 'private-uid' })], { continueOnFail: true }),
+		);
+		expect(output).toEqual([
+			{
+				json: {
+					error:
+						'The selected IANA time zone cannot be represented safely for this calendar event.',
+				},
+				pairedItem: { item: 0 },
+			},
+		]);
+		expect(JSON.stringify(output)).not.toMatch(/private-uid|Prague|calendar\.example|VTIMEZONE/i);
 	});
 
 	it('uses only the partial-success message and safe status after a successful PUT', async () => {

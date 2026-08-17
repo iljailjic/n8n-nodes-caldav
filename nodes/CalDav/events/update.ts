@@ -25,7 +25,6 @@ import type {
 	ICalendarResource,
 	ICalendarValue,
 } from '../icalendar/parser';
-import { parseICalendarResource } from '../icalendar/parser';
 import {
 	applyCalendarEventPatch,
 	CalDavCalendarEventPatchError,
@@ -34,11 +33,19 @@ import {
 import type { CalendarEventPatch } from '../icalendar/patcher';
 import { serializeICalendarResource } from '../icalendar/serializer';
 import type { CalendarEventInstantProjector } from '../icalendar/serializer';
-import { projectInstantInTimeZone } from '../icalendar/timeZones';
+import {
+	assertVTimeZoneCovers,
+	canonicalizeIanaTimeZone,
+	projectInstantInTimeZone,
+} from '../icalendar/timeZones';
 import { CalDavTransportError, CalDavTransportErrorCode } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import { normalizeCalendarCollectionUrl, validateAbsoluteHttpUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
+import {
+	CalDavCalendarEventTimeZoneAuthoringError,
+	resolveCalendarEventTimeZoneAuthoring,
+} from './timeZoneAuthoring';
 
 export type CalendarEventUpdateIdentifier =
 	| { readonly kind: 'resourceUrl'; readonly resourceUrl: AbsoluteHttpUrl }
@@ -255,12 +262,56 @@ function sameEntry(left: ICalendarEntry, right: ICalendarEntry): boolean {
 		: sameComponent(left, right as ICalendarComponent);
 }
 
+function timeZoneEntryOrderIsInsignificant(component: ICalendarComponent): boolean {
+	return ['VTIMEZONE', 'STANDARD', 'DAYLIGHT'].includes(component.name.toUpperCase());
+}
+
+function semanticKey(parts: readonly string[]): string {
+	return parts.map((part) => `${part.length}:${part}`).join('');
+}
+
+function semanticEntryKey(entry: ICalendarEntry): string {
+	if (entry.kind === 'property') {
+		return semanticKey([
+			entry.kind,
+			entry.name,
+			...entry.parameters.map((parameter) =>
+				semanticKey([
+					parameter.kind,
+					parameter.name,
+					...parameter.values.map(({ value }) => value),
+				]),
+			),
+			entry.value.kind,
+			entry.value.valueType,
+			entry.value.textValues === null
+				? semanticKey(['raw', entry.value.raw])
+				: semanticKey(['text', ...entry.value.textValues]),
+		]);
+	}
+	const entryKeys = entry.entries.map(semanticEntryKey);
+	if (timeZoneEntryOrderIsInsignificant(entry)) entryKeys.sort();
+	return semanticKey([entry.kind, entry.name, ...entryKeys]);
+}
+
+function sameUnorderedEntries(
+	left: readonly ICalendarEntry[],
+	right: readonly ICalendarEntry[],
+): boolean {
+	if (left.length !== right.length) return false;
+	const leftKeys = left.map(semanticEntryKey).sort();
+	const rightKeys = right.map(semanticEntryKey).sort();
+	return sameStrings(leftKeys, rightKeys);
+}
+
 function sameComponent(left: ICalendarComponent, right: ICalendarComponent): boolean {
 	return (
 		left.kind === right.kind &&
 		left.name === right.name &&
 		left.entries.length === right.entries.length &&
-		left.entries.every((entry, index) => sameEntry(entry, right.entries[index]!))
+		(timeZoneEntryOrderIsInsignificant(left)
+			? sameUnorderedEntries(left.entries, right.entries)
+			: left.entries.every((entry, index) => sameEntry(entry, right.entries[index]!)))
 	);
 }
 
@@ -339,6 +390,68 @@ function embeddedTimeZoneDefinition(
 	return matches.length === 1 ? matches[0] : undefined;
 }
 
+type RetainedTimeZoneOwnership = 'clear' | 'referenced' | 'unsafe';
+
+function propertyTargetOwnership(
+	property: ICalendarProperty,
+	timeZone: string,
+): RetainedTimeZoneOwnership {
+	const parameters = property.parameters.filter(
+		(parameter) => parameter.name.toUpperCase() === 'TZID',
+	);
+	if (parameters.length === 0) return 'clear';
+	if (parameters.length !== 1 || parameters[0]!.values.length !== 1) return 'unsafe';
+	try {
+		return canonicalizeIanaTimeZone(parameters[0]!.values[0]!.value) === timeZone
+			? 'referenced'
+			: 'clear';
+	} catch {
+		return 'unsafe';
+	}
+}
+
+function retainedTargetOwnership(
+	resource: ICalendarResource,
+	master: ICalendarComponent,
+	definition: ICalendarComponent,
+	timeZone: string,
+): RetainedTimeZoneOwnership {
+	const inspect = (
+		component: ICalendarComponent,
+		skipMasterBounds: boolean,
+	): RetainedTimeZoneOwnership => {
+		let result: RetainedTimeZoneOwnership = 'clear';
+		for (const entry of component.entries) {
+			if (
+				skipMasterBounds &&
+				entry.kind === 'property' &&
+				['DTSTART', 'DTEND'].includes(entry.name.toUpperCase())
+			) {
+				continue;
+			}
+			const ownership =
+				entry.kind === 'property'
+					? propertyTargetOwnership(entry, timeZone)
+					: inspect(entry, false);
+			if (ownership === 'unsafe') return ownership;
+			if (ownership === 'referenced') result = ownership;
+		}
+		return result;
+	};
+
+	let result: RetainedTimeZoneOwnership = 'clear';
+	for (const entry of resource.calendar.entries) {
+		if (entry === definition) continue;
+		const ownership =
+			entry.kind === 'property'
+				? propertyTargetOwnership(entry, timeZone)
+				: inspect(entry, entry === master);
+		if (ownership === 'unsafe') return ownership;
+		if (ownership === 'referenced') result = ownership;
+	}
+	return result;
+}
+
 export async function updateCalendarEvent(
 	transport: CalDavTransport,
 	input: CalendarEventUpdateInput,
@@ -397,7 +510,20 @@ export async function updateCalendarEvent(
 			? embeddedTimeZoneDefinition(current.context.resource, originalTimeZoneId)
 			: undefined;
 	let projectInstant: CalendarEventInstantProjector | undefined;
+	let authoredTimeZoneDefinition: ICalendarComponent | undefined;
+	let removedTimeZoneDefinition: ICalendarComponent | undefined;
+	let renderedAuthoredTimeZone: string | undefined;
 	if (effectiveTimeZone?.timeZoneMode === 'iana') {
+		if (timedCurrent === undefined) {
+			throw new CalDavCalendarEventPatchError(
+				CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
+				'timeZone',
+			);
+		}
+		const interval = {
+			start: requestedStart?.value ?? new Date(timedCurrent.start),
+			end: requestedEnd?.value ?? new Date(timedCurrent.end),
+		};
 		const canUseEmbedded =
 			embeddedDefinition !== undefined &&
 			currentIanaTimeZone !== undefined &&
@@ -405,29 +531,71 @@ export async function updateCalendarEvent(
 			(requestedTimeZone === undefined || originalTimeZoneId === effectiveTimeZone.timeZone);
 		if (canUseEmbedded) {
 			const definition = embeddedDefinition;
+			try {
+				assertVTimeZoneCovers(definition, effectiveTimeZone.timeZone, interval);
+			} catch {
+				throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
+			}
 			projectInstant = (instant, selectedTimeZone) =>
 				projectInstantInTimeZone(instant, selectedTimeZone, definition);
 		} else {
-			if (timeZoneContext === undefined) {
-				throw new CalDavCalendarEventPatchError(
-					CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
-					'timeZone',
-				);
+			const reusableDefinitions = current.context.resource.calendar.entries.filter(
+				(entry): entry is ICalendarComponent => {
+					if (entry.kind !== 'component' || entry.name.toUpperCase() !== 'VTIMEZONE') {
+						return false;
+					}
+					const identifiers = directProperties(entry, 'TZID');
+					if (identifiers.length !== 1 || identifiers[0]!.value.textValues?.length !== 1) {
+						return false;
+					}
+					try {
+						return (
+							canonicalizeIanaTimeZone(identifiers[0]!.value.textValues[0]!) ===
+							effectiveTimeZone.timeZone
+						);
+					} catch {
+						return false;
+					}
+				},
+			);
+			if (reusableDefinitions.length > 1) {
+				throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
 			}
-			const reference = await timeZoneContext.resolveReference(
-				snapshot.calendarUrl,
-				effectiveTimeZone.timeZone,
-			);
-			const referenceResource = parseICalendarResource(Buffer.from(reference.calendarData, 'utf8'));
-			const definition = referenceResource.calendar.entries.find(
-				(entry): entry is ICalendarComponent =>
-					entry.kind === 'component' && entry.name === 'VTIMEZONE',
-			);
-			if (definition === undefined) {
-				throw new CalDavCalendarEventPatchError(
-					CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
-					'timeZone',
-				);
+			if (reusableDefinitions[0] !== undefined) {
+				try {
+					assertVTimeZoneCovers(reusableDefinitions[0], effectiveTimeZone.timeZone, interval);
+				} catch {
+					throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
+				}
+			}
+			const authoringInput = {
+				calendarUrl: snapshot.calendarUrl,
+				timeZone: effectiveTimeZone.timeZone,
+				coverage: { kind: 'finite' as const, interval },
+				...(timeZoneContext === undefined ? {} : { referenceContext: timeZoneContext }),
+				...(reusableDefinitions[0] === undefined
+					? {}
+					: { reusableDefinition: reusableDefinitions[0] }),
+			};
+			const selection = await resolveCalendarEventTimeZoneAuthoring(authoringInput);
+			const definition = selection.definition;
+			if (selection.embed) {
+				authoredTimeZoneDefinition = definition;
+				if (definition === reusableDefinitions[0]) {
+					renderedAuthoredTimeZone = directProperties(definition, 'TZID')[0]!.value.textValues![0];
+				}
+			} else if (reusableDefinitions[0] !== undefined) {
+				if (
+					retainedTargetOwnership(
+						current.context.resource,
+						current.context.master,
+						reusableDefinitions[0],
+						effectiveTimeZone.timeZone,
+					) !== 'clear'
+				) {
+					throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
+				}
+				removedTimeZoneDefinition = reusableDefinitions[0];
 			}
 			projectInstant = (instant, selectedTimeZone) =>
 				projectInstantInTimeZone(instant, selectedTimeZone, definition);
@@ -469,7 +637,7 @@ export async function updateCalendarEvent(
 					? { end: { kind: 'set' as const, value: new Date(timedCurrent!.end) } }
 					: {}),
 			}
-		: ({ ...snapshot.patch, timeMode: patchTimeMode } as CalendarEventPatch);
+		: (snapshot.patch as CalendarEventPatch);
 	let patchedResource: ICalendarResource;
 	try {
 		patchedResource = applyCalendarEventPatch(
@@ -477,7 +645,9 @@ export async function updateCalendarEvent(
 			effectivePatch,
 			modifiedAt,
 			projectInstant,
-			implicitCurrentTimeZone === undefined ? undefined : originalTimeZoneId,
+			implicitCurrentTimeZone === undefined ? renderedAuthoredTimeZone : originalTimeZoneId,
+			authoredTimeZoneDefinition,
+			removedTimeZoneDefinition,
 		);
 	} catch (error) {
 		if (

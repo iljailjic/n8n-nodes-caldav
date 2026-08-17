@@ -25,6 +25,7 @@ import {
 	CalendarEventMutationFailureCode,
 } from '../../nodes/CalDav/events/mutations';
 import { CalDavICalendarSerializeError } from '../../nodes/CalDav/icalendar/serializer';
+import { canonicalizeIanaTimeZone } from '../../nodes/CalDav/icalendar/timeZones';
 import { CalDavAuthorizationError, CalDavMethod } from '../../nodes/CalDav/transport/http';
 import type {
 	CalDavResponseHeaders,
@@ -238,6 +239,36 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(created.uid).not.toBe(created.resourceUrl);
 	});
 
+	it('rejects unrepresentable finite IANA fallback before UID generation, clock, serialization, or mutation', async () => {
+		const requests = transport(async (request) => response(201, request.url));
+		const resolveReference = vi.fn().mockRejectedValue(new Error('private-reference-failure'));
+		const clock = vi.fn(() => FIXED_CLOCK);
+		const error = await captureError(
+			createCalendarEvent(
+				requests,
+				omittedUidInput({
+					start: new Date('0001-01-01T00:00:00Z'),
+					end: new Date('9999-12-31T23:59:59Z'),
+					timeZone: {
+						timeZoneMode: 'iana',
+						timeZone: canonicalizeIanaTimeZone('Europe/Prague'),
+					},
+				}),
+				clock,
+				{ resolveReference },
+			),
+		);
+		expect(error).toMatchObject({
+			code: 'UNREPRESENTABLE_TIME_ZONE',
+			message: 'The selected IANA time zone cannot be represented safely for this calendar event.',
+		});
+		expect(resolveReference).toHaveBeenCalledOnce();
+		expect(mocks.randomUUID).not.toHaveBeenCalled();
+		expect(clock).not.toHaveBeenCalled();
+		expect(requests.request).not.toHaveBeenCalled();
+		expect(JSON.stringify(error)).not.toMatch(/Prague|calendar\.example|0001|9999|private/i);
+	});
+
 	it('reuses one generated UID across all-day DATE serialization, resource identity, authoritative GET, and output', async () => {
 		const authoritativeBody = [
 			'BEGIN:VCALENDAR',
@@ -434,6 +465,25 @@ describe('calendar-event Create coordinator public contract', () => {
 			'https://calendar.example.test/calendars/selected/canonical-created.ics',
 		);
 		expect(result.etag).toBe('');
+	});
+
+	it('returns a safe read-only authoritative projection after a completed mutation', async () => {
+		const readOnlyBody = eventData('opaque ../UID/🚀?one')
+			.replace('DTSTART:20400102T100000Z', 'DTSTART:20400102T100000')
+			.replace('DTEND:20400102T110000Z', 'DTEND:20400102T110000');
+		const requests = transport(async (request) =>
+			request.method === CalDavMethod.PUT
+				? response(201, request.url)
+				: response(200, request.url, { etag: '"read-only-etag"', body: readOnlyBody }),
+		);
+		await expect(createCalendarEvent(requests, input(), () => FIXED_CLOCK)).resolves.toMatchObject({
+			uid: 'opaque ../UID/🚀?one',
+			etag: '"read-only-etag"',
+			timeMode: 'unsupported',
+			accessMode: 'readOnly',
+			readOnlyReason: 'unsupportedTimeRepresentation',
+		});
+		expect(requests.request).toHaveBeenCalledTimes(2);
 	});
 
 	it('does not repair malformed PUT ETag metadata with GET', async () => {

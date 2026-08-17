@@ -16,6 +16,7 @@ import {
 import type { BasicTimedEventSerializationInput } from '../../nodes/CalDav/icalendar/serializer';
 import {
 	canonicalizeIanaTimeZone,
+	generateFiniteVTimeZone,
 	projectInstantInTimeZone,
 } from '../../nodes/CalDav/icalendar/timeZones';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
@@ -360,6 +361,21 @@ describe('safe unsupported and hard-failure boundaries', () => {
 		);
 		expect(event).toMatchObject({ timeMode: 'timed', accessMode: 'editable', timeZoneMode: 'utc' });
 	});
+
+	it('maps duplicate referenced definitions to read-only without destructive deduplication', () => {
+		const event = map(
+			timedEventIcs(
+				'DTSTART;TZID=Europe/Prague:20400715T100000',
+				'DTEND;TZID=Europe/Prague:20400715T110000',
+				[PRAGUE_VTIMEZONE, PRAGUE_VTIMEZONE],
+			),
+		);
+		expect(event).toMatchObject({
+			timeMode: 'unsupported',
+			accessMode: 'readOnly',
+			readOnlyReason: 'unsupportedTimeRepresentation',
+		});
+	});
 });
 
 describe('atomic timezone updates and preservation', () => {
@@ -448,5 +464,84 @@ describe('atomic timezone updates and preservation', () => {
 			'DTSTART;TZID=Europe/Prague:20400715T090000\r\nDTEND;TZID=Europe/Prague:20400715T110000',
 		);
 		expect(serialized).not.toMatch(/DT(?:START|END):\d{8}T\d{6}Z/);
+	});
+
+	it('embeds exactly one generated canonical definition for finite fallback serialization', () => {
+		const timeZone = canonicalizeIanaTimeZone('europe/prague');
+		const start = new Date('2040-01-15T09:00:00Z');
+		const end = new Date('2040-01-15T10:00:00Z');
+		const definition = generateFiniteVTimeZone(timeZone, { start, end });
+		const serialized = serializeBasicTimedEvent(
+			basicTimedInput({
+				start,
+				end,
+				timeZone: { timeZoneMode: 'iana', timeZone },
+			}),
+			(instant, selectedTimeZone) =>
+				projectInstantInTimeZone(instant, selectedTimeZone, definition),
+			definition,
+		);
+		expect(serialized.match(/BEGIN:VTIMEZONE/g)).toHaveLength(1);
+		expect(serialized.match(/TZID:Europe\/Prague/g)).toHaveLength(1);
+		expect(serialized).toContain(
+			'DTSTART;TZID=Europe/Prague:20400115T100000\r\nDTEND;TZID=Europe/Prague:20400115T110000',
+		);
+	});
+
+	it('atomically replaces an orphaned old definition on an explicit zone change', () => {
+		const context = createCalendarEventPreservationContext(parse(SUPPORTED_EMBEDDED_IANA_EVENT));
+		const target = canonicalizeIanaTimeZone('America/New_York');
+		const start = new Date('2040-07-15T07:00:00Z');
+		const end = new Date('2040-07-15T08:00:00Z');
+		const definition = generateFiniteVTimeZone(target, { start, end });
+		const patched = applyCalendarEventPatch(
+			context,
+			{
+				timeZone: { kind: 'set', value: { timeZoneMode: 'iana', timeZone: target } },
+				start: { kind: 'set', value: start },
+				end: { kind: 'set', value: end },
+			},
+			new Date('2040-01-02T00:00:00Z'),
+			(instant, selectedTimeZone) =>
+				projectInstantInTimeZone(instant, selectedTimeZone, definition),
+			undefined,
+			definition,
+		);
+		const serialized = serializeICalendarResource(patched);
+		expect(serialized).toContain('TZID:America/New_York');
+		expect(serialized).toContain('TZID=America/New_York');
+		expect(serialized).not.toContain('TZID:Europe/Prague');
+		expect(serialized).not.toContain('TZID=Europe/Prague');
+		expect(serialized.match(/BEGIN:VTIMEZONE/g)).toHaveLength(1);
+	});
+
+	it('retains an old definition still referenced by preserved content during zone replacement', () => {
+		const source = SUPPORTED_EMBEDDED_IANA_EVENT.replace(
+			'X-SYNTHETIC-PRESERVE:opaque-value',
+			'X-SYNTHETIC-PRESERVE:opaque-value\r\nX-RELATED;TZID=Europe/Prague:20400715T120000',
+		);
+		const context = createCalendarEventPreservationContext(parse(source));
+		const target = canonicalizeIanaTimeZone('America/New_York');
+		const start = new Date('2040-07-15T07:00:00Z');
+		const end = new Date('2040-07-15T08:00:00Z');
+		const definition = generateFiniteVTimeZone(target, { start, end });
+		const patched = applyCalendarEventPatch(
+			context,
+			{
+				timeZone: { kind: 'set', value: { timeZoneMode: 'iana', timeZone: target } },
+				start: { kind: 'set', value: start },
+				end: { kind: 'set', value: end },
+			},
+			new Date('2040-01-02T00:00:00Z'),
+			(instant, selectedTimeZone) =>
+				projectInstantInTimeZone(instant, selectedTimeZone, definition),
+			undefined,
+			definition,
+		);
+		const serialized = serializeICalendarResource(patched);
+		expect(serialized).toContain('X-RELATED;TZID=Europe/Prague:20400715T120000');
+		expect(serialized).toContain('TZID:Europe/Prague');
+		expect(serialized).toContain('TZID:America/New_York');
+		expect(serialized.match(/BEGIN:VTIMEZONE/g)).toHaveLength(2);
 	});
 });

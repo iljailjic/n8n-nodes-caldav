@@ -606,7 +606,14 @@ function ianaDateTimeProperty(name: string, raw: string, timeZone: string): ICal
 function basicResource(
 	input: BasicInputSnapshot,
 	projectInstant: CalendarEventInstantProjector = projectInstantInTimeZone,
+	timeZoneDefinition?: ICalendarComponent,
 ): ICalendarResource {
+	if (
+		timeZoneDefinition !== undefined &&
+		(input.timeMode !== 'timed' || input.timeZone.timeZoneMode !== 'iana')
+	) {
+		fail('INVALID_INPUT');
+	}
 	const timeProperties =
 		input.timeMode === 'allDay'
 			? [
@@ -651,6 +658,7 @@ function basicResource(
 			entries: [
 				textProperty('VERSION', '2.0'),
 				textProperty('PRODID', CALDAV_ICALENDAR_PRODID),
+				...(timeZoneDefinition === undefined ? [] : [timeZoneDefinition]),
 				{ kind: 'component', name: 'VEVENT', entries: eventEntries },
 			],
 		},
@@ -927,11 +935,12 @@ export function serializeBasicUtcEvent(input: BasicUtcEventSerializationInput): 
 export function serializeBasicTimedEvent(
 	input: BasicTimedEventSerializationInput,
 	projectInstant: CalendarEventInstantProjector = projectInstantInTimeZone,
+	timeZoneDefinition?: ICalendarComponent,
 ): string {
 	try {
 		if (!isRecord(input.timeZone)) fail('INVALID_INPUT');
 		return serializeICalendarResource(
-			basicResource(snapshotBasicInput(input, input.timeZone), projectInstant),
+			basicResource(snapshotBasicInput(input, input.timeZone), projectInstant, timeZoneDefinition),
 		);
 	} catch (error) {
 		if (error instanceof CalDavICalendarSerializeError) throw error;

@@ -50,6 +50,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/events/timeRangeQuery.d.ts',
 	'dist/nodes/CalDav/events/timeRangeQuery.js',
 	'dist/nodes/CalDav/events/timeRangeQuery.js.map',
+	'dist/nodes/CalDav/events/timeZoneAuthoring.d.ts',
+	'dist/nodes/CalDav/events/timeZoneAuthoring.js',
+	'dist/nodes/CalDav/events/timeZoneAuthoring.js.map',
 	'dist/nodes/CalDav/events/uid.d.ts',
 	'dist/nodes/CalDav/events/uid.js',
 	'dist/nodes/CalDav/events/uid.js.map',
@@ -153,6 +156,12 @@ const timeZoneReferenceArtifactPaths = [
 	'dist/nodes/CalDav/discovery/timeZoneReferences.js.map',
 ] as const;
 
+const timeZoneAuthoringArtifactPaths = [
+	'dist/nodes/CalDav/events/timeZoneAuthoring.d.ts',
+	'dist/nodes/CalDav/events/timeZoneAuthoring.js',
+	'dist/nodes/CalDav/events/timeZoneAuthoring.js.map',
+] as const;
+
 interface PackResultOverrides {
 	bundled?: unknown;
 	entryCount?: unknown;
@@ -178,7 +187,7 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(106);
+		expect(expectedPackageFiles).toHaveLength(109);
 		expect(expectedPackageFiles.filter((path) => path.includes('/events/create.'))).toEqual(
 			createArtifactPaths,
 		);
@@ -200,6 +209,9 @@ describe('package contents verifier', () => {
 		expect(
 			expectedPackageFiles.filter((path) => path.includes('/discovery/timeZoneReferences.')),
 		).toEqual(timeZoneReferenceArtifactPaths);
+		expect(
+			expectedPackageFiles.filter((path) => path.includes('/events/timeZoneAuthoring.')),
+		).toEqual(timeZoneAuthoringArtifactPaths);
 		expect(() => verifyPackOutput(packOutput)).not.toThrow();
 	});
 
