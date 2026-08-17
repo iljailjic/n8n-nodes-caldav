@@ -773,7 +773,8 @@ function formatter(timeZone: IanaTimeZoneId): Intl.DateTimeFormat {
 function projectedParts(timestamp: number, timeZone: IanaTimeZoneId): DateParts {
 	const parts = formatter(timeZone).formatToParts(new Date(timestamp));
 	const values = new Map(parts.map(({ type, value }) => [type, value]));
-	if (values.get('era') !== 'AD') return invalidInstant();
+	const era = values.get('era');
+	if (era !== undefined && era !== 'AD') return invalidInstant();
 	const result = {
 		year: Number(values.get('year')),
 		month: Number(values.get('month')),
@@ -786,7 +787,8 @@ function projectedParts(timestamp: number, timeZone: IanaTimeZoneId): DateParts 
 		!Number.isInteger(result.year) ||
 		result.year < 1 ||
 		result.year > 9999 ||
-		!validParts(result)
+		!validParts(result) ||
+		Math.abs(wallTimestamp(result) - timestamp) > 24 * 60 * 60 * 1_000
 	) {
 		return invalidInstant();
 	}
