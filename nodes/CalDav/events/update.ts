@@ -401,7 +401,8 @@ export async function updateCalendarEvent(
 		const canUseEmbedded =
 			embeddedDefinition !== undefined &&
 			currentIanaTimeZone !== undefined &&
-			effectiveTimeZone.timeZone === currentIanaTimeZone;
+			effectiveTimeZone.timeZone === currentIanaTimeZone &&
+			(requestedTimeZone === undefined || originalTimeZoneId === effectiveTimeZone.timeZone);
 		if (canUseEmbedded) {
 			const definition = embeddedDefinition;
 			projectInstant = (instant, selectedTimeZone) =>
