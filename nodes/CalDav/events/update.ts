@@ -15,7 +15,7 @@ import {
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
 } from './resolveByUid';
-import type { CalendarEvent } from '../icalendar/eventReadModel';
+import type { CalendarEvent, CalendarEventReadResult } from '../icalendar/eventReadModel';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type {
 	ICalendarComponent,
@@ -201,6 +201,20 @@ function assertSnapshotResourceUrl(
 	);
 }
 
+export function assertResolvedCalendarEventUidIdentity(
+	selectedCalendarUrl: AbsoluteHttpUrl,
+	expectedUid: string,
+	current: CalendarEventReadResult,
+): void {
+	assertSnapshotResourceUrl(
+		{ kind: 'uid', uid: expectedUid },
+		selectedCalendarUrl,
+		current.event.calendarUrl,
+		current.event.resourceUrl,
+		current.event.uid,
+	);
+}
+
 function updateClockValue(clock: CalendarEventUpdateClock): Date {
 	try {
 		const value = clock();
@@ -317,6 +331,41 @@ function sameComponent(left: ICalendarComponent, right: ICalendarComponent): boo
 
 function semanticallyEquivalent(left: ICalendarResource, right: ICalendarResource): boolean {
 	return left.kind === right.kind && sameComponent(left.calendar, right.calendar);
+}
+
+function sameComponentIgnoringRevisionMetadata(
+	left: ICalendarComponent,
+	right: ICalendarComponent,
+): boolean {
+	if (left.kind !== right.kind || left.name !== right.name) return false;
+	if (timeZoneEntryOrderIsInsignificant(left)) return sameComponent(left, right);
+	const withoutRevision = (component: ICalendarComponent): readonly ICalendarEntry[] =>
+		component.entries.filter(
+			(entry) =>
+				component.name.toUpperCase() !== 'VEVENT' ||
+				entry.kind !== 'property' ||
+				!['DTSTAMP', 'LAST-MODIFIED'].includes(entry.name.toUpperCase()),
+		);
+	const leftEntries = withoutRevision(left);
+	const rightEntries = withoutRevision(right);
+	return (
+		leftEntries.length === rightEntries.length &&
+		leftEntries.every((entry, index) => {
+			const candidate = rightEntries[index]!;
+			return entry.kind === 'component' && candidate.kind === 'component'
+				? sameComponentIgnoringRevisionMetadata(entry, candidate)
+				: sameEntry(entry, candidate);
+		})
+	);
+}
+
+function semanticallyEquivalentIgnoringRevisionMetadata(
+	left: ICalendarResource,
+	right: ICalendarResource,
+): boolean {
+	return (
+		left.kind === right.kind && sameComponentIgnoringRevisionMetadata(left.calendar, right.calendar)
+	);
 }
 
 function safeStatusCode(error: unknown): number | undefined {
@@ -452,15 +501,17 @@ function retainedTargetOwnership(
 	return result;
 }
 
-export async function updateCalendarEvent(
+async function updateCalendarEventInternal(
 	transport: CalDavTransport,
 	input: CalendarEventUpdateInput,
 	clock: CalendarEventUpdateClock,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
+	resolvedCurrent?: CalendarEventReadResult,
 ): Promise<UpdatedCalendarEvent> {
 	const snapshot = snapshotInput(input);
 	const current =
-		snapshot.identifier.kind === 'resourceUrl'
+		resolvedCurrent ??
+		(snapshot.identifier.kind === 'resourceUrl'
 			? await getCalendarEventByResourceUrl(
 					transport,
 					snapshot.calendarUrl,
@@ -473,14 +524,18 @@ export async function updateCalendarEvent(
 			: await resolveCalendarEventByUid(transport, snapshot.calendarUrl, snapshot.identifier.uid, {
 					allowMissingEtag: true,
 					timeZoneContext,
-				});
-	assertSnapshotResourceUrl(
-		snapshot.identifier,
-		snapshot.calendarUrl,
-		current.event.calendarUrl,
-		current.event.resourceUrl,
-		current.event.uid,
-	);
+				}));
+	if (snapshot.identifier.kind === 'uid') {
+		assertResolvedCalendarEventUidIdentity(snapshot.calendarUrl, snapshot.identifier.uid, current);
+	} else {
+		assertSnapshotResourceUrl(
+			snapshot.identifier,
+			snapshot.calendarUrl,
+			current.event.calendarUrl,
+			current.event.resourceUrl,
+			current.event.uid,
+		);
+	}
 	if (current.event.accessMode === 'readOnly') {
 		throw new CalDavCalendarEventUpdateError(CalendarEventUpdateFailureCode.READ_ONLY);
 	}
@@ -614,7 +669,6 @@ export async function updateCalendarEvent(
 		throw new CalDavCalendarEventMutationError(CalendarEventMutationFailureCode.MISSING_ETAG);
 	}
 
-	const modifiedAt = updateClockValue(clock);
 	const zoneChanges =
 		requestedTimeZone !== undefined &&
 		timedCurrent !== undefined &&
@@ -638,9 +692,8 @@ export async function updateCalendarEvent(
 					: {}),
 			}
 		: (snapshot.patch as CalendarEventPatch);
-	let patchedResource: ICalendarResource;
-	try {
-		patchedResource = applyCalendarEventPatch(
+	const applyPatch = (modifiedAt: Date): ICalendarResource =>
+		applyCalendarEventPatch(
 			current.context,
 			effectivePatch,
 			modifiedAt,
@@ -649,6 +702,15 @@ export async function updateCalendarEvent(
 			authoredTimeZoneDefinition,
 			removedTimeZoneDefinition,
 		);
+	let patchedResource: ICalendarResource;
+	try {
+		// Resolved-resource Upsert probes for a semantic no-op before reading the mutation clock.
+		// The public Update path retains its established single clock read before patching.
+		const probeTime =
+			resolvedCurrent === undefined ? updateClockValue(clock) : new Date('2040-01-01T00:00:00Z');
+		applyPatch(probeTime);
+		patchedResource =
+			resolvedCurrent === undefined ? applyPatch(probeTime) : applyPatch(updateClockValue(clock));
 	} catch (error) {
 		if (
 			error instanceof CalDavCalendarEventPatchError &&
@@ -697,7 +759,12 @@ export async function updateCalendarEvent(
 			!isDirectCalendarChild(current.event.calendarUrl, confirmed.event.resourceUrl) ||
 			confirmed.event.uid !== current.event.uid ||
 			(confirmed.event.accessMode === 'editable' &&
-				!semanticallyEquivalent(patchedResource, confirmed.context.resource))
+				!semanticallyEquivalent(patchedResource, confirmed.context.resource) &&
+				(resolvedCurrent === undefined ||
+					!semanticallyEquivalentIgnoringRevisionMetadata(
+						patchedResource,
+						confirmed.context.resource,
+					)))
 		) {
 			return confirmationFailed();
 		}
@@ -706,4 +773,58 @@ export async function updateCalendarEvent(
 		if (error instanceof CalDavCalendarEventUpdateError) throw error;
 		return confirmationFailed(error);
 	}
+}
+
+export interface CalendarEventResolvedUpdateInput {
+	readonly calendarUrl: AbsoluteHttpUrl;
+	readonly current: CalendarEventReadResult;
+	readonly patch: CalendarEventPatch;
+	readonly etag: string;
+}
+
+export type CalendarEventResolvedUpdateResult =
+	| { readonly kind: 'noChange'; readonly event: UpdatedCalendarEvent }
+	| { readonly kind: 'updated'; readonly event: UpdatedCalendarEvent };
+
+export async function updateResolvedCalendarEvent(
+	transport: CalDavTransport,
+	input: CalendarEventResolvedUpdateInput,
+	clock: CalendarEventUpdateClock,
+	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
+): Promise<CalendarEventResolvedUpdateResult> {
+	try {
+		const event = await updateCalendarEventInternal(
+			transport,
+			{
+				calendarUrl: input.calendarUrl,
+				identifier: { kind: 'uid', uid: input.current.event.uid },
+				patch: input.patch,
+				etag: input.etag,
+			},
+			clock,
+			timeZoneContext,
+			input.current,
+		);
+		return Object.freeze({ kind: 'updated', event });
+	} catch (error) {
+		if (
+			error instanceof CalDavCalendarEventPatchError &&
+			error.code === CalendarEventPatchErrorCode.NO_CHANGES
+		) {
+			return Object.freeze({
+				kind: 'noChange',
+				event: Object.freeze({ ...input.current.event, etag: input.etag }),
+			});
+		}
+		throw error;
+	}
+}
+
+export async function updateCalendarEvent(
+	transport: CalDavTransport,
+	input: CalendarEventUpdateInput,
+	clock: CalendarEventUpdateClock,
+	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
+): Promise<UpdatedCalendarEvent> {
+	return await updateCalendarEventInternal(transport, input, clock, timeZoneContext);
 }

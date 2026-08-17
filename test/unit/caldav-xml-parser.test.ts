@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	CalDavXmlParseError,
 	CalDavXmlProtocolError,
+	hasCalDavNoUidConflict,
 	parseDavMultiStatus,
 } from '../../nodes/CalDav/xml/parser';
 
@@ -35,6 +36,35 @@ function expectProtocolError(xml: string, code: CalDavXmlProtocolError['code']):
 		expect(error).toMatchObject({ name: 'CalDavXmlProtocolError', code });
 	}
 }
+
+describe('hasCalDavNoUidConflict', () => {
+	it('accepts an exact CalDAV precondition as a direct child of a DAV error', () => {
+		expect(
+			hasCalDavNoUidConflict(
+				'<x:error xmlns:x="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><c:no-uid-conflict><x:href>/private/event.ics</x:href></c:no-uid-conflict></x:error>',
+			),
+		).toBe(true);
+	});
+
+	it.each([
+		[
+			'arbitrary root',
+			'<x:response xmlns:x="urn:arbitrary" xmlns:c="urn:ietf:params:xml:ns:caldav"><c:no-uid-conflict/></x:response>',
+		],
+		[
+			'nested precondition',
+			'<d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:responsedescription><c:no-uid-conflict/></d:responsedescription></d:error>',
+		],
+		[
+			'oversized document',
+			`<d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><c:no-uid-conflict/>${' '.repeat(
+				8 * 1024,
+			)}</d:error>`,
+		],
+	] as const)('rejects an exact QName in an invalid %s placement', (_label, xml) => {
+		expect(hasCalDavNoUidConflict(xml)).toBe(false);
+	});
+});
 
 describe('parseDavMultiStatus', () => {
 	it.each([

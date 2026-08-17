@@ -38,6 +38,12 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/events/create.d.ts',
 	'dist/nodes/CalDav/events/create.js',
 	'dist/nodes/CalDav/events/create.js.map',
+	'dist/nodes/CalDav/events/createErrors.d.ts',
+	'dist/nodes/CalDav/events/createErrors.js',
+	'dist/nodes/CalDav/events/createErrors.js.map',
+	'dist/nodes/CalDav/events/createPreparation.d.ts',
+	'dist/nodes/CalDav/events/createPreparation.js',
+	'dist/nodes/CalDav/events/createPreparation.js.map',
 	'dist/nodes/CalDav/events/getByResourceUrl.d.ts',
 	'dist/nodes/CalDav/events/getByResourceUrl.js',
 	'dist/nodes/CalDav/events/getByResourceUrl.js.map',
@@ -53,12 +59,18 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/events/timeZoneAuthoring.d.ts',
 	'dist/nodes/CalDav/events/timeZoneAuthoring.js',
 	'dist/nodes/CalDav/events/timeZoneAuthoring.js.map',
+	'dist/nodes/CalDav/events/timeZoneExecutionContext.d.ts',
+	'dist/nodes/CalDav/events/timeZoneExecutionContext.js',
+	'dist/nodes/CalDav/events/timeZoneExecutionContext.js.map',
 	'dist/nodes/CalDav/events/uid.d.ts',
 	'dist/nodes/CalDav/events/uid.js',
 	'dist/nodes/CalDav/events/uid.js.map',
 	'dist/nodes/CalDav/events/update.d.ts',
 	'dist/nodes/CalDav/events/update.js',
 	'dist/nodes/CalDav/events/update.js.map',
+	'dist/nodes/CalDav/events/upsert.d.ts',
+	'dist/nodes/CalDav/events/upsert.js',
+	'dist/nodes/CalDav/events/upsert.js.map',
 	'dist/nodes/CalDav/icalendar/eventReadModel.d.ts',
 	'dist/nodes/CalDav/icalendar/eventReadModel.js',
 	'dist/nodes/CalDav/icalendar/eventReadModel.js.map',
@@ -74,6 +86,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/icalendar/timeZones.d.ts',
 	'dist/nodes/CalDav/icalendar/timeZones.js',
 	'dist/nodes/CalDav/icalendar/timeZones.js.map',
+	'dist/nodes/CalDav/icalendar/uri.d.ts',
+	'dist/nodes/CalDav/icalendar/uri.js',
+	'dist/nodes/CalDav/icalendar/uri.js.map',
 	'dist/nodes/CalDav/methods/credentialTest.d.ts',
 	'dist/nodes/CalDav/methods/credentialTest.js',
 	'dist/nodes/CalDav/methods/credentialTest.js.map',
@@ -144,6 +159,12 @@ const updateArtifactPaths = [
 	'dist/nodes/CalDav/events/update.js.map',
 ] as const;
 
+const upsertArtifactPaths = [
+	'dist/nodes/CalDav/events/upsert.d.ts',
+	'dist/nodes/CalDav/events/upsert.js',
+	'dist/nodes/CalDav/events/upsert.js.map',
+] as const;
+
 const timeZoneArtifactPaths = [
 	'dist/nodes/CalDav/icalendar/timeZones.d.ts',
 	'dist/nodes/CalDav/icalendar/timeZones.js',
@@ -187,7 +208,7 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(109);
+		expect(expectedPackageFiles).toHaveLength(124);
 		expect(expectedPackageFiles.filter((path) => path.includes('/events/create.'))).toEqual(
 			createArtifactPaths,
 		);
@@ -202,6 +223,9 @@ describe('package contents verifier', () => {
 		);
 		expect(expectedPackageFiles.filter((path) => path.includes('/events/update.'))).toEqual(
 			updateArtifactPaths,
+		);
+		expect(expectedPackageFiles.filter((path) => path.includes('/events/upsert.'))).toEqual(
+			upsertArtifactPaths,
 		);
 		expect(expectedPackageFiles.filter((path) => path.includes('/icalendar/timeZones.'))).toEqual(
 			timeZoneArtifactPaths,

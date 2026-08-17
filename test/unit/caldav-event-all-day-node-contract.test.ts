@@ -160,7 +160,7 @@ beforeEach(() => {
 });
 
 describe('issue #41 exact Event node surface', () => {
-	it('keeps operation order/default and adds no Upsert', () => {
+	it('keeps the default and exposes Upsert in the accepted operation order', () => {
 		const operation = new CalDav().description.properties.find(
 			(property) =>
 				property.name === 'operation' && property.displayOptions?.show?.resource?.includes('event'),
@@ -168,7 +168,7 @@ describe('issue #41 exact Event node surface', () => {
 		expect(operation?.default).toBe('get');
 		expect(
 			operation?.options?.map((option) => ('value' in option ? option.value : undefined)),
-		).toEqual(['create', 'get', 'getMany', 'update', 'delete']);
+		).toEqual(['create', 'get', 'getMany', 'update', 'upsert', 'delete']);
 	});
 
 	it('exposes exact Create order and mode-specific required date pickers', () => {

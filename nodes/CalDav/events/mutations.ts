@@ -1,5 +1,10 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The accepted application-service contract propagates sanitized transport errors outside the n8n UI boundary. */
-import { CalDavMethod, CalDavPreconditionFailedError } from '../transport/http';
+import {
+	CalDavAuthorizationError,
+	CalDavMethod,
+	CalDavNotFoundError,
+	CalDavPreconditionFailedError,
+} from '../transport/http';
 import type {
 	CalDavResponseHeaders,
 	CalDavTransport,
@@ -11,6 +16,7 @@ import {
 	validateAbsoluteHttpUrl,
 } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
+import { hasCalDavNoUidConflict } from '../xml/parser';
 
 export const CalendarEventMutationFailureCode = Object.freeze({
 	OUTSIDE_CALENDAR: 'CALENDAR_EVENT_RESOURCE_OUTSIDE_CALENDAR',
@@ -289,6 +295,13 @@ export async function createCalendarEventResource(
 			return fail(CalendarEventMutationFailureCode.CREATE_CONFLICT);
 		}
 		throw error;
+	}
+	if (response.statusCode === 403) {
+		throw new CalDavAuthorizationError(403, hasCalDavNoUidConflict(response.body.toString('utf8')));
+	}
+	if (response.statusCode === 404) throw new CalDavNotFoundError(404);
+	if (response.statusCode === 412) {
+		return fail(CalendarEventMutationFailureCode.CREATE_CONFLICT);
 	}
 
 	return mutationResult(response, target.calendarUrl, new Set([201]));

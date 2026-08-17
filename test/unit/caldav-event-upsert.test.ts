@@ -12,6 +12,12 @@ import type {
 	CalendarEventUpsertResult,
 } from '../../nodes/CalDav/events/upsert';
 import {
+	CalDavCalendarEventUidResolutionError,
+	CalendarEventUidResolutionFailureCode,
+} from '../../nodes/CalDav/events/resolveByUid';
+import { bindCalendarEventTimeZoneExecutionContext } from '../../nodes/CalDav/events/timeZoneExecutionContext';
+import { canonicalizeIanaTimeZone } from '../../nodes/CalDav/icalendar/timeZones';
+import {
 	CalDavAuthorizationError,
 	CalDavMethod,
 	CalDavNotFoundError,
@@ -24,6 +30,10 @@ import type {
 	CalDavTransportResponse,
 } from '../../nodes/CalDav/transport/http';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import {
+	SUPPORTED_BARE_IANA_EVENT,
+	TZDIST_ZONE_RESPONSE,
+} from './fixtures/time-zones/synthetic-time-zone-fixtures';
 
 const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/selected/');
 const CLOCK_VALUE = new Date('2040-01-03T00:00:00.987Z');
@@ -418,6 +428,83 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 		expect(deps.clock).toHaveBeenCalledOnce();
 	});
 
+	it('resolves a reference-only IANA match before applying a requested UTC update', async () => {
+		const current = SUPPORTED_BARE_IANA_EVENT.replace(
+			'UID:synthetic-time-zone-event',
+			`UID:${SUPPLIED_UID}`,
+		).replace('SUMMARY:Synthetic event', 'SUMMARY:Reference-only source');
+		const resourceUrl = new URL('reference-only.ics', CALENDAR_URL).href;
+		let submitted = '';
+		const requests = transport(async (request) => {
+			if (request.method === CalDavMethod.REPORT) {
+				return response(207, CALENDAR_URL, {
+					body: multistatus(
+						eventResponse('reference-only.ics', SUPPLIED_UID, {
+							etag: '"reference-only"',
+							ics: current,
+						}),
+					),
+				});
+			}
+			if (request.method === CalDavMethod.PUT) {
+				submitted = request.body!;
+				return response(204, resourceUrl, { etag: '"put"' });
+			}
+			return response(200, resourceUrl, {
+				etag: '"confirmed"',
+				body: submitted,
+			});
+		});
+		const timeZone = canonicalizeIanaTimeZone('Europe/Prague');
+		const resolveReference = vi.fn().mockResolvedValue({
+			timeZone,
+			etag: '"reference"',
+			calendarData: TZDIST_ZONE_RESPONSE,
+			ruleSource: 'vtimezone' as const,
+		});
+		bindCalendarEventTimeZoneExecutionContext(requests, { resolveReference });
+		const deps = dependencies();
+
+		const result = await upsertCalendarEvent(
+			requests,
+			timedInput({
+				start: new Date('2040-01-15T08:00:00Z'),
+				end: new Date('2040-01-15T09:00:00Z'),
+				timeZone: { timeZoneMode: 'utc' },
+				summary: 'Converted to UTC',
+			}),
+			deps,
+		);
+
+		expect(result).toMatchObject({
+			action: 'update',
+			event: {
+				resourceUrl,
+				uid: SUPPLIED_UID,
+				etag: '"confirmed"',
+				summary: 'Converted to UTC',
+				accessMode: 'editable',
+				timeZoneMode: 'utc',
+				start: '2040-01-15T08:00:00Z',
+				end: '2040-01-15T09:00:00Z',
+			},
+		});
+		expect(resolveReference).toHaveBeenCalledOnce();
+		expect(resolveReference).toHaveBeenCalledWith(CALENDAR_URL, timeZone);
+		expect(methods(requests)).toEqual(['REPORT', 'PUT', 'GET']);
+		expect(methods(requests).filter((method) => method === CalDavMethod.REPORT)).toHaveLength(1);
+		expect(methods(requests)).not.toContain(CalDavMethod.DELETE);
+		expect(requests.request.mock.calls[1]![0]).toMatchObject({
+			url: resourceUrl,
+			headers: { 'If-Match': '"reference-only"' },
+		});
+		expect(submitted).toContain('X-SYNTHETIC-PRESERVE:opaque-value');
+		expect(submitted).toContain('DTSTART:20400115T080000Z');
+		expect(submitted).not.toContain('TZID=Europe/Prague');
+		expect(deps.uidFactory).not.toHaveBeenCalled();
+		expect(deps.clock).toHaveBeenCalledOnce();
+	});
+
 	it('authors all-day DATE values through the same generated-UID Create branch', async () => {
 		const requests = transport(async (request) => response(201, request.url!, { etag: '"date"' }));
 		const deps = dependencies();
@@ -435,7 +522,7 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 		const body = requests.request.mock.calls[0]![0].body as string;
 		expect(body).toContain('DTSTART;VALUE=DATE:20400228');
 		expect(body).toContain('DTEND;VALUE=DATE:20400301');
-		expect(body).not.toMatch(/TZID|T000000Z/);
+		expect(body).not.toMatch(/DT(?:START|END)[^\r\n]*(?:TZID|T000000Z)/);
 		expect(result).toMatchObject({
 			action: 'create',
 			event: {
@@ -446,6 +533,34 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 			},
 		});
 		expect(allDayIcs(GENERATED_UID)).toContain('DTEND;VALUE=DATE:20400301');
+	});
+
+	it('uses the execution-scoped reference-first IANA authoring context', async () => {
+		const requests = transport(async (request) => response(201, request.url!, { etag: '"iana"' }));
+		const timeZone = canonicalizeIanaTimeZone('Europe/Prague');
+		const resolveReference = vi.fn().mockResolvedValue({
+			timeZone,
+			etag: '"reference"',
+			calendarData: TZDIST_ZONE_RESPONSE,
+			ruleSource: 'vtimezone' as const,
+		});
+		bindCalendarEventTimeZoneExecutionContext(requests, { resolveReference });
+		const deps = dependencies();
+
+		await upsertCalendarEvent(
+			requests,
+			omittedUidInput({ timeZone: { timeZoneMode: 'iana', timeZone } }),
+			deps,
+		);
+
+		expect(resolveReference).toHaveBeenCalledOnce();
+		expect(resolveReference).toHaveBeenCalledWith(CALENDAR_URL, timeZone);
+		expect(resolveReference.mock.invocationCallOrder[0]).toBeLessThan(
+			deps.uidFactory.mock.invocationCallOrder[0]!,
+		);
+		const body = requests.request.mock.calls[0]![0].body as string;
+		expect(body).toMatch(/DTSTART;TZID=Europe\/Prague:\d{8}T\d{6}/);
+		expect(body).not.toContain('BEGIN:VTIMEZONE');
 	});
 });
 
@@ -492,6 +607,37 @@ describe('calendar-event Upsert branch guards and exact side effects', () => {
 		expect(methods(requests)).toEqual(['REPORT']);
 		expect(deps.clock).not.toHaveBeenCalled();
 	});
+
+	it.each([
+		[
+			'foreign read-only resource',
+			'https://calendar.example.test/calendars/foreign/floating.ics',
+			{ ics: eventIcs(SUPPLIED_UID, { floating: true }) },
+		],
+		['non-direct-child resource without ETag', 'nested/missing-etag.ics', { includeEtag: false }],
+	] as const)(
+		'rejects a same-UID %s before access and ETag classification',
+		async (_label, href, options) => {
+			const requests = transport(async () =>
+				response(207, CALENDAR_URL, {
+					body: multistatus(eventResponse(href, SUPPLIED_UID, options)),
+				}),
+			);
+			const deps = dependencies();
+
+			const error = await captureError(upsertCalendarEvent(requests, timedInput(), deps));
+
+			expect(error).toBeInstanceOf(CalDavCalendarEventUidResolutionError);
+			expect(error).toMatchObject({
+				code: CalendarEventUidResolutionFailureCode.INVALID_RESPONSE,
+				message: 'The CalDAV server returned an invalid calendar-event UID response.',
+			});
+			expect(methods(requests)).toEqual(['REPORT']);
+			expect(deps.clock).not.toHaveBeenCalled();
+			expect(deps.uidFactory).not.toHaveBeenCalled();
+			expect(JSON.stringify(error)).not.toMatch(/foreign|nested|floating|missing-etag/i);
+		},
+	);
 
 	it('requires a unique editable lookup ETag, including preserving empty-string presence', async () => {
 		const missing = transport(async () =>
@@ -545,6 +691,11 @@ describe('calendar-event Upsert branch guards and exact side effects', () => {
 			{ url: { kind: 'set', value: '' } },
 			'URL must be a valid absolute URI without a fragment.',
 		],
+		[
+			'empty-fragment URL Set',
+			{ url: { kind: 'set', value: 'urn:example:#' } },
+			'URL must be a valid absolute URI without a fragment.',
+		],
 	] as const)(
 		'rejects %s in local preflight before factory, clock, or I/O',
 		async (_label, overrides, message) => {
@@ -560,6 +711,25 @@ describe('calendar-event Upsert branch guards and exact side effects', () => {
 			expect(deps.clock).not.toHaveBeenCalled();
 		},
 	);
+
+	it('reports Summary before the deferred final range consistency check', async () => {
+		const requests = transport(async (request) => response(201, request.url!));
+		const deps = dependencies();
+
+		await expect(
+			upsertCalendarEvent(
+				requests,
+				timedInput({
+					end: new Date('2040-01-02T09:00:00Z'),
+					summary: '\u0000private-summary',
+				}),
+				deps,
+			),
+		).rejects.toMatchObject({ message: 'Summary must be a valid iCalendar text value.' });
+		expect(requests.request).not.toHaveBeenCalled();
+		expect(deps.uidFactory).not.toHaveBeenCalled();
+		expect(deps.clock).not.toHaveBeenCalled();
+	});
 });
 
 describe('calendar-event Upsert races, strict preconditions, and partial success', () => {
@@ -623,6 +793,14 @@ describe('calendar-event Upsert races, strict preconditions, and partial success
 
 	it.each([
 		['text mention', '<d:error xmlns:d="DAV:">no-uid-conflict</d:error>'],
+		[
+			'arbitrary root',
+			'<x:response xmlns:x="urn:arbitrary" xmlns:c="urn:ietf:params:xml:ns:caldav"><c:no-uid-conflict/></x:response>',
+		],
+		[
+			'nested below DAV error',
+			'<d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:responsedescription><c:no-uid-conflict/></d:responsedescription></d:error>',
+		],
 		[
 			'wrong namespace',
 			'<d:error xmlns:d="DAV:" xmlns:x="urn:not-caldav"><x:no-uid-conflict/></d:error>',

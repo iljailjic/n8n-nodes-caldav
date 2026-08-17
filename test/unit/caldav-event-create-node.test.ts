@@ -214,6 +214,12 @@ describe('CalDAV Event Create metadata', () => {
 					action: 'Update a calendar event',
 				},
 				{
+					name: 'Upsert',
+					value: 'upsert',
+					description: 'Create or update a calendar event by UID',
+					action: 'Upsert a calendar event',
+				},
+				{
 					name: 'Delete',
 					value: 'delete',
 					description: 'Delete a calendar event',

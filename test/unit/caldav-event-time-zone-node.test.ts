@@ -209,7 +209,7 @@ describe('CalDAV timed event timezone UI', () => {
 		expect(operation?.default).toBe('get');
 		expect(
 			operation?.options?.map((option) => ('value' in option ? option.value : undefined)),
-		).toEqual(['create', 'get', 'getMany', 'update', 'delete']);
+		).toEqual(['create', 'get', 'getMany', 'update', 'upsert', 'delete']);
 		const properties = createProperties();
 		expect(properties.map(({ displayName }) => displayName)).toEqual([
 			'Calendar',

@@ -30,6 +30,7 @@ import {
 	CalDavCalendarEventUidResolutionError,
 	CalendarEventUidResolutionFailureCode,
 } from '../../nodes/CalDav/events/resolveByUid';
+import { calendarEventTimeZoneExecutionContext } from '../../nodes/CalDav/events/timeZoneExecutionContext';
 import {
 	CalDavCalendarEventUpdateError,
 	CalendarEventUpdateFailureCode,
@@ -382,6 +383,39 @@ describe('CalDAV Event Upsert extraction and flat output', () => {
 			expect(execution.getNodeParameter).not.toHaveBeenCalledWith(inactive, 0);
 		}
 	});
+
+	it('binds a lazy shared timezone context for supplied UTC lookup but not omitted all-day Create', async () => {
+		const suppliedTransport = {
+			serverUrl: 'https://calendar.example.test/',
+			request: vi.fn(),
+		};
+		const omittedTransport = {
+			serverUrl: 'https://calendar.example.test/',
+			request: vi.fn(),
+		};
+		mocks.createN8nCalDavTransport
+			.mockResolvedValueOnce(suppliedTransport)
+			.mockResolvedValueOnce(omittedTransport);
+
+		await new CalDav().execute.call(context([parameters({ uid: 'supplied-utc' })]));
+		expect(calendarEventTimeZoneExecutionContext(suppliedTransport)).toBeDefined();
+
+		await new CalDav().execute.call(
+			context([
+				parameters({
+					uid: '',
+					timeMode: 'allDay',
+					timeZoneMode: undefined,
+					start: undefined,
+					end: undefined,
+					startDate: '2040-02-28',
+					endDate: '2040-03-01',
+				}),
+			]),
+		);
+		expect(calendarEventTimeZoneExecutionContext(omittedTransport)).toBeUndefined();
+		expect(mocks.upsertCalendarEvent).toHaveBeenCalledTimes(2);
+	});
 });
 
 describe('CalDAV Event Upsert local validation and item behavior', () => {
@@ -416,6 +450,11 @@ describe('CalDAV Event Upsert local validation and item behavior', () => {
 			{ additionalFields: { url: { change: { action: 'set', value: '' } } } },
 			'URL must be a valid absolute URI without a fragment.',
 		],
+		[
+			'URL empty fragment',
+			{ additionalFields: { url: { change: { action: 'set', value: 'urn:example:#' } } } },
+			'URL must be a valid absolute URI without a fragment.',
+		],
 		['Range', { end: '2040-01-02T10:00:00+01:00' }, 'End must be later than Start.'],
 	] as const)(
 		'rejects %s before transport creation or coordinator execution',
@@ -442,6 +481,20 @@ describe('CalDAV Event Upsert local validation and item behavior', () => {
 			]),
 		);
 		expect(error.message).toBe('UID must be a non-empty valid iCalendar text value.');
+		expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
+		expect(mocks.upsertCalendarEvent).not.toHaveBeenCalled();
+	});
+
+	it('reports Summary before the deferred final range consistency check', async () => {
+		const error = await captureError(
+			context([
+				parameters({
+					end: '2040-01-02T10:00:00+01:00',
+					summary: '\u0000private-summary',
+				}),
+			]),
+		);
+		expect(error.message).toBe('Summary must be a valid iCalendar text value.');
 		expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
 		expect(mocks.upsertCalendarEvent).not.toHaveBeenCalled();
 	});
@@ -516,6 +569,13 @@ describe('CalDAV Event Upsert closed error adapter and privacy', () => {
 			undefined,
 		],
 		[
+			new CalDavCalendarEventUidResolutionError(
+				CalendarEventUidResolutionFailureCode.INVALID_RESPONSE,
+			),
+			'The CalDAV server returned an invalid calendar-event upsert response.',
+			undefined,
+		],
+		[
 			new CalDavCalendarEventMutationError(CalendarEventMutationFailureCode.MISSING_ETAG),
 			'The calendar event does not provide an ETag required for a safe mutation.',
 			undefined,
@@ -529,6 +589,11 @@ describe('CalDAV Event Upsert closed error adapter and privacy', () => {
 			new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED, 404),
 			'The event was created, but its required ETag could not be retrieved.',
 			'404',
+		],
+		[
+			new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.INVALID_CLOCK),
+			'Event Upsert failed.',
+			undefined,
 		],
 		[
 			new CalDavCalendarEventUpdateError(CalendarEventUpdateFailureCode.CONFIRMATION_FAILED, 404),

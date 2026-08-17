@@ -27,6 +27,7 @@ import {
 	updateCalendarEventResource,
 } from '../../nodes/CalDav/events/mutations';
 import { queryCalendarEventsByTimeRange } from '../../nodes/CalDav/events/timeRangeQuery';
+import { bindCalendarEventTimeZoneExecutionContext } from '../../nodes/CalDav/events/timeZoneExecutionContext';
 import { updateCalendarEvent } from '../../nodes/CalDav/events/update';
 import type { CalendarEventUpdateInput } from '../../nodes/CalDav/events/update';
 import { upsertCalendarEvent } from '../../nodes/CalDav/events/upsert';
@@ -2263,6 +2264,129 @@ describe('Radicale deterministic Event Upsert', () => {
 			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=MiXeD:preserved-by-upsert');
 			expect(storedBody).toContain('SUMMARY:Upsert second version');
 			expect(storedBody).not.toContain('LOCATION:Remove this location');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('creates then updates an IANA event with one finite fallback definition and no DELETE', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'event-upsert-iana', 'Event Upsert IANA'),
+			);
+			const uid = `upsert-iana-${run.identity}@example.test`;
+			const expectedResourceUrl = new URL(
+				`${Buffer.from(uid, 'utf8').toString('base64url')}.ics`,
+				calendarUrl,
+			).href;
+			const prague = canonicalizeIanaTimeZone('Europe/Prague');
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+			const resolveReference = vi.fn().mockRejectedValue(new Error('synthetic unavailable'));
+			bindCalendarEventTimeZoneExecutionContext(inspectedTransport, { resolveReference });
+			const clock = vi
+				.fn()
+				.mockReturnValueOnce(new Date('2040-07-01T00:00:00Z'))
+				.mockReturnValueOnce(new Date('2040-07-01T00:00:01Z'));
+			const uidFactory = vi.fn(() => '00000000-0000-4000-8000-000000000015');
+
+			const created = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-07-15T08:00:00Z'),
+					end: new Date('2040-07-15T09:00:00Z'),
+					timeZone: { timeZoneMode: 'iana', timeZone: prague },
+					summary: 'IANA Upsert first version',
+					description: { kind: 'set', value: 'Preserve IANA description' },
+				},
+				{ clock, uidFactory },
+			);
+			expect(created).toMatchObject({
+				action: 'create',
+				event: {
+					resourceUrl: expectedResourceUrl,
+					uid,
+					timeZoneMode: 'iana',
+					timeZone: 'Europe/Prague',
+					startLocal: '2040-07-15T10:00:00',
+					endLocal: '2040-07-15T11:00:00',
+				},
+			});
+			expect(resolveReference).toHaveBeenCalledOnce();
+			expect(uidFactory).not.toHaveBeenCalled();
+			const createRequests = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
+			expect(createRequests.map(({ method }) => method)).toEqual(['REPORT', 'PUT']);
+			expect(createRequests[1]).toMatchObject({
+				url: expectedResourceUrl,
+				headers: { 'If-None-Match': '*' },
+			});
+
+			const seeded = await authenticatedFetch(run, expectedResourceUrl);
+			const seededBody = (await seeded.text()).replace(
+				'END:VEVENT',
+				'X-UNKNOWN;X-SOURCE=IANA:preserved-by-upsert\r\nEND:VEVENT',
+			);
+			expect((await authenticatedFetch(run, expectedResourceUrl, 'PUT', seededBody)).status).toBe(
+				204,
+			);
+			const beforeUpdate = await authenticatedFetch(run, expectedResourceUrl);
+			const beforeEtag = beforeUpdate.headers.get('etag');
+			expect(beforeEtag).not.toBeNull();
+			const updateStart = request.mock.calls.length;
+
+			const updated = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-07-15T08:30:00Z'),
+					end: new Date('2040-07-15T09:30:00Z'),
+					timeZone: { timeZoneMode: 'iana', timeZone: prague },
+					summary: 'IANA Upsert second version',
+				},
+				{ clock, uidFactory },
+			);
+			expect(updated).toMatchObject({
+				action: 'update',
+				event: {
+					resourceUrl: expectedResourceUrl,
+					uid,
+					summary: 'IANA Upsert second version',
+					description: 'Preserve IANA description',
+					timeZoneMode: 'iana',
+					timeZone: 'Europe/Prague',
+					start: '2040-07-15T08:30:00Z',
+					end: '2040-07-15T09:30:00Z',
+					startLocal: '2040-07-15T10:30:00',
+					endLocal: '2040-07-15T11:30:00',
+				},
+			});
+			expect(resolveReference).toHaveBeenCalledOnce();
+			const updateRequests = request.mock.calls
+				.slice(updateStart)
+				.map(([input]) => input as CalDavTransportRequest);
+			expect(updateRequests.map(({ method }) => method)).toEqual(['REPORT', 'PUT', 'GET']);
+			expect(updateRequests[1]).toMatchObject({
+				url: expectedResourceUrl,
+				headers: { 'If-Match': beforeEtag },
+			});
+			const allRequests = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
+			expect(allRequests.filter(({ method }) => method === 'DELETE')).toHaveLength(0);
+
+			const storedBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
+			expect(storedBody.match(/BEGIN:VTIMEZONE/g)).toHaveLength(1);
+			expect(storedBody.match(/END:VTIMEZONE/g)).toHaveLength(1);
+			expect(storedBody).toContain('TZID:Europe/Prague');
+			expect(storedBody).toContain('DTSTART;TZID=Europe/Prague:20400715T103000');
+			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=IANA:preserved-by-upsert');
+			expect(storedBody).toContain('DESCRIPTION:Preserve IANA description');
+			expect(JSON.stringify(updated)).not.toMatch(/synthetic unavailable|BEGIN:VTIMEZONE/);
 		} finally {
 			await teardownRun(run);
 		}
