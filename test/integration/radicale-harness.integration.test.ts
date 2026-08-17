@@ -962,6 +962,7 @@ describe('Radicale collision-safe Event Create', () => {
 			const execution = eventCreateContext(run, {
 				calendar: { __rl: true, mode: 'url', value: calendarUrl },
 				uid: '',
+				timeMode: 'timed',
 				start: '2040-02-03T10:00:00Z',
 				end: '2040-02-03T11:00:00Z',
 				summary: 'Generated UID round trip',
