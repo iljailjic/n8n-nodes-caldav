@@ -158,6 +158,12 @@ describe('CalDAV Event Get Many metadata', () => {
 					action: 'Update a calendar event',
 				},
 				{
+					name: 'Upsert',
+					value: 'upsert',
+					description: 'Create or update a calendar event by UID',
+					action: 'Upsert a calendar event',
+				},
+				{
 					name: 'Delete',
 					value: 'delete',
 					description: 'Delete a calendar event',
@@ -171,7 +177,7 @@ describe('CalDAV Event Get Many metadata', () => {
 			displayOptions: {
 				show: {
 					resource: ['calendar', 'event'],
-					operation: ['create', 'get', 'getMany', 'update', 'delete'],
+					operation: ['create', 'get', 'getMany', 'update', 'upsert', 'delete'],
 				},
 				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},

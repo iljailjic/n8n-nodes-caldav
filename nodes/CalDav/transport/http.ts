@@ -159,12 +159,15 @@ export class CalDavAuthenticationError extends CalDavTransportError {
 }
 
 export class CalDavAuthorizationError extends CalDavTransportError {
-	constructor(statusCode?: number) {
+	readonly noUidConflict: boolean;
+
+	constructor(statusCode?: number, noUidConflict = false) {
 		super(
 			CalDavTransportErrorCode.AUTHORIZATION_FAILED,
 			'The CalDAV request is not authorized.',
 			statusCode,
 		);
+		this.noUidConflict = noUidConflict === true;
 	}
 }
 
@@ -523,15 +526,26 @@ function sanitizeErrorExcerpt(excerpt: Buffer): Buffer {
 	return Buffer.from(redactedAuthorization, 'utf8').subarray(0, CALDAV_MAX_ERROR_EXCERPT_BYTES);
 }
 
-async function consumeErrorExcerpt(stream: Readable, statusCode: number): Promise<void> {
+interface ErrorExcerpt {
+	readonly body: Buffer;
+	readonly complete: boolean;
+}
+
+async function consumeErrorExcerpt(stream: Readable, statusCode: number): Promise<ErrorExcerpt> {
 	const chunks: Buffer[] = [];
 	let retainedBytes = 0;
+	let complete = true;
 
 	try {
 		for await (const rawChunk of stream) {
 			const chunk = bufferStreamChunk(rawChunk);
 			if (chunk.length === 0) {
 				continue;
+			}
+			if (retainedBytes === CALDAV_MAX_ERROR_EXCERPT_BYTES) {
+				complete = false;
+				safeDestroy(stream);
+				break;
 			}
 
 			const remainingBytes = CALDAV_MAX_ERROR_EXCERPT_BYTES - retainedBytes;
@@ -543,7 +557,8 @@ async function consumeErrorExcerpt(stream: Readable, statusCode: number): Promis
 				retainedBytes += retainedChunk.length;
 			}
 
-			if (retainedBytes === CALDAV_MAX_ERROR_EXCERPT_BYTES) {
+			if (chunk.length > remainingBytes) {
+				complete = false;
 				safeDestroy(stream);
 				break;
 			}
@@ -555,15 +570,17 @@ async function consumeErrorExcerpt(stream: Readable, statusCode: number): Promis
 		throw new CalDavRemoteProtocolError(statusCode);
 	}
 
-	void sanitizeErrorExcerpt(Buffer.concat(chunks, retainedBytes));
+	const body = Buffer.concat(chunks, retainedBytes);
+	void sanitizeErrorExcerpt(body);
+	return { body, complete };
 }
 
-function mapHttpFailure(statusCode: number): CalDavTransportError {
+function mapHttpFailure(statusCode: number, noUidConflict = false): CalDavTransportError {
 	if (statusCode === 401) {
 		return new CalDavAuthenticationError(statusCode);
 	}
 	if (statusCode === 403) {
-		return new CalDavAuthorizationError(statusCode);
+		return new CalDavAuthorizationError(statusCode, noUidConflict);
 	}
 	if (statusCode === 404) {
 		return new CalDavNotFoundError(statusCode);
@@ -664,8 +681,13 @@ async function consumeFinalResponse(
 
 	try {
 		if (statusCode < 200 || statusCode > 299) {
-			await consumeErrorExcerpt(stream, statusCode);
-			throw mapHttpFailure(statusCode);
+			const excerpt = await consumeErrorExcerpt(stream, statusCode);
+			const hasNoUidConflict =
+				statusCode === 403 && excerpt.complete
+					? (await import('../xml/parser')).hasCalDavNoUidConflict(excerpt.body.toString('utf8'))
+					: false;
+			const noUidConflict = statusCode === 403 && excerpt.complete && hasNoUidConflict;
+			throw mapHttpFailure(statusCode, noUidConflict);
 		}
 
 		const headers = envelope.getHeaders();

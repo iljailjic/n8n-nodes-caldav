@@ -57,12 +57,20 @@ import {
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
 } from './events/resolveByUid';
+import { resolveCalendarEventUid } from './events/uid';
 import {
 	CalDavCalendarEventUpdateError,
 	CalendarEventUpdateFailureCode,
 	updateCalendarEvent,
 } from './events/update';
 import type { CalendarEventUpdateInput } from './events/update';
+import {
+	CalDavCalendarEventUpsertError,
+	CalendarEventUpsertFailureCode,
+	upsertCalendarEvent,
+} from './events/upsert';
+import type { CalendarEventUpsertInput } from './events/upsert';
+import { bindCalendarEventTimeZoneExecutionContext } from './events/timeZoneExecutionContext';
 import { CalDavCalendarEventTimeZoneAuthoringError } from './events/timeZoneAuthoring';
 import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
 import { CalDavCalendarEventReadModelError } from './icalendar/eventReadModel';
@@ -73,7 +81,6 @@ import type { CalendarEventPatch, OptionalFieldPatch } from './icalendar/patcher
 import {
 	CalDavICalendarSerializeError,
 	CalDavICalendarSerializeErrorCode,
-	serializeBasicUtcEvent,
 } from './icalendar/serializer';
 import {
 	CalDavIanaTimeZoneError,
@@ -84,6 +91,7 @@ import {
 	resolveLocalDateTimeInTimeZone,
 } from './icalendar/timeZones';
 import type { CalendarEventTimeZone } from './icalendar/timeZones';
+import { isAbsoluteICalendarUri } from './icalendar/uri';
 import { testCalDavApiCredentials } from './methods/credentialTest';
 import { defaultCalDavProviderRegistry } from './providers/registry';
 import type { CalDavProviderAdapter } from './providers/types';
@@ -108,6 +116,7 @@ const GET_OPERATION = 'get';
 const GET_MANY_OPERATION = 'getMany';
 const CREATE_OPERATION = 'create';
 const UPDATE_OPERATION = 'update';
+const UPSERT_OPERATION = 'upsert';
 const DELETE_OPERATION = 'delete';
 const RESOURCE_URL_IDENTIFIER_MODE = 'resourceUrl';
 const UID_IDENTIFIER_MODE = 'uid';
@@ -297,6 +306,23 @@ const EVENT_UPDATE_MESSAGES = {
 	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event update response.',
 	CONFIRMATION: 'The event was updated, but its current state could not be verified.',
 	GENERIC: 'Event Update failed.',
+} as const;
+
+const EVENT_UPSERT_MESSAGES = {
+	...EVENT_CREATE_MESSAGES,
+	AUTHENTICATION: 'Event Upsert authentication failed.',
+	AUTHORIZATION: 'Event Upsert is not authorized for the selected calendar.',
+	NOT_FOUND: 'The selected calendar was not found.',
+	AMBIGUOUS:
+		'More than one calendar event with the requested UID was found in the selected calendar.',
+	MISSING_ETAG: 'The calendar event does not provide an ETag required for a safe mutation.',
+	CONCURRENCY: 'The calendar changed while Event Upsert was in progress.',
+	TIMEOUT: 'Event Upsert timed out.',
+	RESPONSE_LIMIT: 'The Event Upsert response exceeded the size limit.',
+	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event upsert response.',
+	CREATE_PARTIAL_SUCCESS: 'The event was created, but its required ETag could not be retrieved.',
+	UPDATE_PARTIAL_SUCCESS: 'The event was updated, but its current state could not be verified.',
+	GENERIC: 'Event Upsert failed.',
 } as const;
 
 interface SafeNodeFailure {
@@ -892,6 +918,139 @@ function eventUpdateFailure(error: unknown): EventUpdateFailure {
 	return { message: EVENT_UPDATE_MESSAGES.GENERIC, configuration: false };
 }
 
+function eventUpsertTransportFailure(error: CalDavTransportError): SafeNodeFailure {
+	switch (error.code) {
+		case CalDavTransportErrorCode.AUTHENTICATION_FAILED:
+			return apiFailure(EVENT_UPSERT_MESSAGES.AUTHENTICATION, error);
+		case CalDavTransportErrorCode.AUTHORIZATION_FAILED:
+			return apiFailure(EVENT_UPSERT_MESSAGES.AUTHORIZATION, error);
+		case CalDavTransportErrorCode.NOT_FOUND:
+			return apiFailure(EVENT_UPSERT_MESSAGES.NOT_FOUND, error);
+		case CalDavTransportErrorCode.PRECONDITION_FAILED:
+			return apiFailure(EVENT_UPSERT_MESSAGES.CONCURRENCY, error);
+		case CalDavTransportErrorCode.TLS_VALIDATION_FAILED:
+			return apiFailure(EVENT_UPSERT_MESSAGES.TLS, error);
+		case CalDavTransportErrorCode.TIMEOUT:
+			return apiFailure(EVENT_UPSERT_MESSAGES.TIMEOUT, error);
+		case CalDavTransportErrorCode.RESPONSE_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_UPSERT_MESSAGES.RESPONSE_LIMIT, error);
+		case CalDavTransportErrorCode.INVALID_REDIRECT:
+		case CalDavTransportErrorCode.INSECURE_REDIRECT:
+		case CalDavTransportErrorCode.REDIRECT_LOOP:
+		case CalDavTransportErrorCode.REDIRECT_LIMIT_EXCEEDED:
+			return apiFailure(EVENT_UPSERT_MESSAGES.REDIRECT, error);
+		case CalDavTransportErrorCode.UNTRUSTED_TARGET:
+			return apiFailure(EVENT_UPSERT_MESSAGES.UNTRUSTED, error);
+		case CalDavTransportErrorCode.NETWORK_ERROR:
+			return apiFailure(EVENT_UPSERT_MESSAGES.NETWORK, error);
+		case CalDavTransportErrorCode.REMOTE_PROTOCOL_ERROR:
+			return apiFailure(EVENT_UPSERT_MESSAGES.INVALID_RESPONSE, error);
+	}
+}
+
+function eventUpsertFailure(error: unknown): EventUpdateFailure {
+	if (
+		error instanceof CalDavCalendarEventUpsertError &&
+		error.code === CalendarEventUpsertFailureCode.CONCURRENCY_CONFLICT
+	) {
+		return { message: EVENT_UPSERT_MESSAGES.CONCURRENCY, configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventCreateError) {
+		if (error.code === CalendarEventCreateFailureCode.RESOURCE_NAME_TOO_LONG) {
+			return { message: EVENT_UPSERT_MESSAGES.RESOURCE_NAME_TOO_LONG, configuration: true };
+		}
+		if (error.code === CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED) {
+			return {
+				message: EVENT_UPSERT_MESSAGES.CREATE_PARTIAL_SUCCESS,
+				configuration: false,
+				...(error.statusCode === undefined ? {} : { httpCode: String(error.statusCode) }),
+			};
+		}
+		if (error.code === CalendarEventCreateFailureCode.INVALID_CLOCK) {
+			return { message: EVENT_UPSERT_MESSAGES.GENERIC, configuration: false };
+		}
+		return { message: EVENT_UPSERT_MESSAGES.INVALID_RESPONSE, configuration: false };
+	}
+	if (
+		error instanceof CalDavCalendarEventUpdateError &&
+		error.code === CalendarEventUpdateFailureCode.CONFIRMATION_FAILED
+	) {
+		return {
+			message: EVENT_UPSERT_MESSAGES.UPDATE_PARTIAL_SUCCESS,
+			configuration: false,
+			...(error.statusCode === undefined ? {} : { httpCode: String(error.statusCode) }),
+		};
+	}
+	if (error instanceof CalDavCalendarEventUidResolutionError) {
+		return {
+			message:
+				error.code === CalendarEventUidResolutionFailureCode.AMBIGUOUS
+					? EVENT_UPSERT_MESSAGES.AMBIGUOUS
+					: EVENT_UPSERT_MESSAGES.INVALID_RESPONSE,
+			configuration: false,
+		};
+	}
+	if (error instanceof CalDavCalendarEventMutationError) {
+		return {
+			message:
+				error.code === CalendarEventMutationFailureCode.MISSING_ETAG
+					? EVENT_UPSERT_MESSAGES.MISSING_ETAG
+					: EVENT_UPSERT_MESSAGES.INVALID_RESPONSE,
+			configuration: false,
+		};
+	}
+	if (error instanceof CalDavTransportError) {
+		return { ...eventUpsertTransportFailure(error), configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventPatchError) {
+		const failure = eventUpdatePatchFailure(error);
+		return {
+			...failure,
+			message:
+				failure.message === EVENT_UPDATE_MESSAGES.GENERIC
+					? EVENT_UPSERT_MESSAGES.GENERIC
+					: failure.message,
+		};
+	}
+	if (error instanceof CalDavCalendarEventUpdateError) {
+		return error.code === CalendarEventUpdateFailureCode.READ_ONLY
+			? { message: EVENT_UPDATE_MESSAGES.READ_ONLY, configuration: false }
+			: { message: EVENT_UPSERT_MESSAGES.GENERIC, configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventTimeZoneAuthoringError) {
+		return { message: error.message, configuration: true };
+	}
+	if (error instanceof CalDavTimeZoneReferenceError) {
+		return { message: error.message, configuration: false };
+	}
+	if (error instanceof CalDavICalendarSerializeError) {
+		const failure = eventCreateSerializationFailure(error);
+		return {
+			...failure,
+			message:
+				failure.message === EVENT_CREATE_MESSAGES.GENERIC
+					? EVENT_UPSERT_MESSAGES.GENERIC
+					: failure.message,
+		};
+	}
+	if (error instanceof CalDavICalendarParseError) {
+		return { message: EVENT_UPDATE_MESSAGES.MALFORMED_ICALENDAR, configuration: false };
+	}
+	if (error instanceof CalDavCalendarEventReadModelError) {
+		return { message: EVENT_UPDATE_MESSAGES.UNSUPPORTED_EVENT, configuration: false };
+	}
+	if (
+		error instanceof CalDavCalendarEventResourceGetError ||
+		error instanceof CalDavXmlParseError ||
+		error instanceof CalDavXmlProtocolError ||
+		error instanceof CalDavUrlValidationError ||
+		error instanceof XmlBuildError
+	) {
+		return { message: EVENT_UPSERT_MESSAGES.INVALID_RESPONSE, configuration: false };
+	}
+	return { message: EVENT_UPSERT_MESSAGES.GENERIC, configuration: false };
+}
+
 function eventDeleteValidator(
 	uiEtag: string | undefined,
 	serverEtag: string | undefined,
@@ -1080,24 +1239,8 @@ function createResourceNameFits(uid: string): boolean {
 	return unpaddedBase64Length + '.ics'.length <= 255;
 }
 
-const CREATE_VALIDATION_DTSTAMP = new Date('2040-01-01T00:00:00Z');
-const CREATE_VALIDATION_START = new Date('2040-01-01T01:00:00Z');
-const CREATE_VALIDATION_END = new Date('2040-01-01T02:00:00Z');
-
 function isValidCreateUrl(value: string): boolean {
-	try {
-		serializeBasicUtcEvent({
-			uid: 'validation@example.test',
-			dtstamp: CREATE_VALIDATION_DTSTAMP,
-			start: CREATE_VALIDATION_START,
-			end: CREATE_VALIDATION_END,
-			summary: '',
-			url: value,
-		});
-		return true;
-	} catch {
-		return false;
-	}
+	return isAbsoluteICalendarUri(value);
 }
 
 function createDateTimeInstant(value: unknown): Date | undefined {
@@ -1404,6 +1547,150 @@ function optionalUpdatePatch(
 	} catch {
 		return { error: invalidValueMessage };
 	}
+}
+
+function eventUpsertInput(
+	execution: IExecuteFunctions,
+	itemIndex: number,
+): CalendarEventUpsertInput | string {
+	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
+	if (calendarUrl === undefined) return EVENT_UPSERT_MESSAGES.INVALID_CALENDAR_URL;
+
+	const uidValue = nodeParameter(execution, 'uid', itemIndex);
+	if (typeof uidValue !== 'string' || (uidValue.length > 0 && !isValidICalendarText(uidValue))) {
+		return EVENT_UPSERT_MESSAGES.INVALID_UID;
+	}
+	const timeMode = nodeParameter(execution, 'timeMode', itemIndex);
+	if (timeMode !== 'timed' && timeMode !== 'allDay') {
+		return EVENT_UPSERT_MESSAGES.INVALID_TIME_MODE;
+	}
+
+	let timeInput:
+		| {
+				readonly timeMode: 'timed';
+				readonly start: Date;
+				readonly end: Date;
+				readonly timeZone: CalendarEventTimeZone;
+		  }
+		| {
+				readonly timeMode: 'allDay';
+				readonly startDate: CalendarDateString;
+				readonly endDate: CalendarDateString;
+		  };
+	if (timeMode === 'timed') {
+		const timeZoneMode = nodeParameter(execution, 'timeZoneMode', itemIndex);
+		let timeZone: CalendarEventTimeZone;
+		if (timeZoneMode === 'utc') {
+			timeZone = { timeZoneMode: 'utc' };
+		} else if (timeZoneMode === 'iana') {
+			const value = nodeParameter(execution, 'timeZone', itemIndex);
+			try {
+				if (typeof value !== 'string') return EVENT_UPSERT_MESSAGES.INVALID_TIME_ZONE;
+				timeZone = { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(value) };
+			} catch (error) {
+				return error instanceof CalDavIanaTimeZoneError &&
+					error.code === CalDavIanaTimeZoneErrorCode.UTC_EQUIVALENT
+					? EVENT_UPSERT_MESSAGES.UTC_TIME_ZONE
+					: EVENT_UPSERT_MESSAGES.INVALID_TIME_ZONE;
+			}
+		} else {
+			return EVENT_UPSERT_MESSAGES.INVALID_TIME_ZONE_MODE;
+		}
+		const start = createDateTimeInstant(nodeParameter(execution, 'start', itemIndex));
+		if (start === undefined) return EVENT_UPSERT_MESSAGES.INVALID_START;
+		const end = createDateTimeInstant(nodeParameter(execution, 'end', itemIndex));
+		if (end === undefined) return EVENT_UPSERT_MESSAGES.INVALID_END;
+		timeInput = { timeMode, start, end, timeZone };
+	} else {
+		const startDate = workflowCalendarDate(
+			execution,
+			nodeParameter(execution, 'startDate', itemIndex),
+		);
+		if (startDate === undefined) return EVENT_UPSERT_MESSAGES.INVALID_START_DATE;
+		const endDate = workflowCalendarDate(execution, nodeParameter(execution, 'endDate', itemIndex));
+		if (endDate === undefined) return EVENT_UPSERT_MESSAGES.INVALID_END_DATE;
+		timeInput = { timeMode, startDate, endDate };
+	}
+
+	const summary = nodeParameter(execution, 'summary', itemIndex);
+	if (typeof summary !== 'string' || !isValidICalendarText(summary)) {
+		return EVENT_UPSERT_MESSAGES.INVALID_SUMMARY;
+	}
+	const additionalValue = nodeParameter(execution, 'additionalFields', itemIndex);
+	if (
+		typeof additionalValue !== 'object' ||
+		additionalValue === null ||
+		Array.isArray(additionalValue)
+	) {
+		return EVENT_UPSERT_MESSAGES.INVALID_ADDITIONAL_FIELDS;
+	}
+	let descriptors: Readonly<Record<string, PropertyDescriptor>>;
+	try {
+		if (Object.getOwnPropertySymbols(additionalValue).length !== 0) {
+			return EVENT_UPSERT_MESSAGES.INVALID_ADDITIONAL_FIELDS;
+		}
+		descriptors = Object.getOwnPropertyDescriptors(additionalValue);
+	} catch {
+		return EVENT_UPSERT_MESSAGES.INVALID_ADDITIONAL_FIELDS;
+	}
+	if (
+		Object.keys(descriptors).some(
+			(key) =>
+				!['description', 'location', 'url'].includes(key) ||
+				!descriptors[key]!.enumerable ||
+				!('value' in descriptors[key]!),
+		)
+	) {
+		return EVENT_UPSERT_MESSAGES.INVALID_ADDITIONAL_FIELDS;
+	}
+	const patches: {
+		description?: OptionalFieldPatch<string>;
+		location?: OptionalFieldPatch<string>;
+		url?: OptionalFieldPatch<string>;
+	} = {};
+	for (const [name, message, validator] of [
+		['description', EVENT_UPSERT_MESSAGES.INVALID_DESCRIPTION, isValidICalendarText],
+		['location', EVENT_UPSERT_MESSAGES.INVALID_LOCATION, isValidICalendarText],
+		['url', EVENT_UPSERT_MESSAGES.INVALID_URL, isValidCreateUrl],
+	] as const) {
+		if (descriptors[name] === undefined) continue;
+		const extracted = optionalUpdatePatch(descriptors[name].value, message, validator);
+		if ('error' in extracted) return extracted.error;
+		patches[name] = extracted.patch;
+	}
+	if (timeInput.timeMode === 'timed') {
+		if (timeInput.end.getTime() <= timeInput.start.getTime()) {
+			return EVENT_UPSERT_MESSAGES.INVALID_RANGE;
+		}
+		if (timeInput.timeZone.timeZoneMode === 'iana') {
+			if (
+				resolveLocalDateTimeInTimeZone(
+					projectInstantInTimeZone(timeInput.start, timeInput.timeZone.timeZone),
+					timeInput.timeZone.timeZone,
+				).getTime() !== timeInput.start.getTime()
+			) {
+				return EVENT_UPSERT_MESSAGES.UNREPRESENTABLE_START;
+			}
+			if (
+				resolveLocalDateTimeInTimeZone(
+					projectInstantInTimeZone(timeInput.end, timeInput.timeZone.timeZone),
+					timeInput.timeZone.timeZone,
+				).getTime() !== timeInput.end.getTime()
+			) {
+				return EVENT_UPSERT_MESSAGES.UNREPRESENTABLE_END;
+			}
+		}
+	} else if (timeInput.endDate <= timeInput.startDate) {
+		return EVENT_UPSERT_MESSAGES.INVALID_RANGE;
+	}
+
+	return Object.freeze({
+		calendarUrl,
+		...(uidValue.length === 0 ? {} : { uid: uidValue }),
+		...timeInput,
+		summary,
+		...patches,
+	}) as CalendarEventUpsertInput;
 }
 
 function eventUpdatePatch(
@@ -2079,6 +2366,12 @@ export class CalDav implements INodeType {
 						action: 'Update a calendar event',
 					},
 					{
+						name: 'Upsert',
+						value: UPSERT_OPERATION,
+						description: 'Create or update a calendar event by UID',
+						action: 'Upsert a calendar event',
+					},
+					{
 						name: 'Delete',
 						value: DELETE_OPERATION,
 						description: 'Delete a calendar event',
@@ -2126,6 +2419,7 @@ export class CalDav implements INodeType {
 							GET_OPERATION,
 							GET_MANY_OPERATION,
 							UPDATE_OPERATION,
+							UPSERT_OPERATION,
 							DELETE_OPERATION,
 						],
 					},
@@ -2311,6 +2605,185 @@ export class CalDav implements INodeType {
 						type: 'string',
 						default: '',
 					},
+				],
+			},
+			{
+				displayName: 'UID',
+				name: 'uid',
+				type: 'string',
+				default: '',
+				description:
+					'Leave blank to generate a new UID; this always creates a new resource. A supplied UID is looked up in the selected calendar to choose Create or Update.',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Time Mode',
+				name: 'timeMode',
+				type: 'options',
+				required: true,
+				noDataExpression: true,
+				options: [
+					{ name: 'Timed', value: 'timed' },
+					{ name: 'All-Day', value: 'allDay' },
+				],
+				default: 'timed',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Time Zone Mode',
+				name: 'timeZoneMode',
+				type: 'options',
+				required: true,
+				noDataExpression: true,
+				default: 'utc',
+				options: [
+					{ name: 'UTC', value: 'utc' },
+					{ name: 'IANA', value: 'iana' },
+				],
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						timeMode: ['timed'],
+					},
+				},
+			},
+			{
+				// eslint-disable-next-line n8n-nodes-base/node-param-display-name-wrong-for-dynamic-options -- accepted Upsert contract fixes this exact label.
+				displayName: 'Time Zone',
+				name: 'timeZone',
+				// eslint-disable-next-line n8n-nodes-base/node-param-description-missing-from-dynamic-options -- the accepted descriptor is intentionally minimal.
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getIanaTimeZones' },
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						timeMode: ['timed'],
+						timeZoneMode: ['iana'],
+					},
+				},
+			},
+			{
+				displayName: 'Start',
+				name: 'start',
+				type: 'dateTime',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						timeMode: ['timed'],
+					},
+				},
+			},
+			{
+				displayName: 'End',
+				name: 'end',
+				type: 'dateTime',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						timeMode: ['timed'],
+					},
+				},
+			},
+			{
+				displayName: 'Start Date',
+				name: 'startDate',
+				type: 'dateTime',
+				typeOptions: { dateOnly: true },
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						timeMode: ['allDay'],
+					},
+				},
+			},
+			{
+				displayName: 'End Date',
+				name: 'endDate',
+				type: 'dateTime',
+				typeOptions: { dateOnly: true },
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						timeMode: ['allDay'],
+					},
+				},
+			},
+			{
+				displayName: 'Summary',
+				name: 'summary',
+				type: 'string',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Additional Fields',
+				name: 'additionalFields',
+				type: 'collection',
+				placeholder: 'Add Field',
+				default: {},
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
+				},
+				options: [
+					...(['description', 'location', 'url'] as const).map((name) => ({
+						displayName: name === 'url' ? 'URL' : `${name[0]!.toUpperCase()}${name.slice(1)}`,
+						name,
+						type: 'fixedCollection' as const,
+						typeOptions: { multipleValues: false },
+						default: {},
+						required: true,
+						options: [
+							{
+								displayName: 'Change',
+								name: 'change',
+								values: [
+									{
+										displayName: 'Action',
+										name: 'action',
+										type: 'options' as const,
+										required: true,
+										noDataExpression: true,
+										options: [
+											{ name: 'Set', value: 'set' },
+											{ name: 'Remove', value: 'remove' },
+										],
+										default: 'set',
+									},
+									{
+										displayName: 'Value',
+										name: 'value',
+										type: 'string' as const,
+										...(name === 'description' ? { typeOptions: { rows: 4 } } : {}),
+										default: '',
+										displayOptions: { show: { action: ['set'] } },
+									},
+								],
+							},
+						],
+					})),
 				],
 			},
 			{
@@ -2673,6 +3146,7 @@ export class CalDav implements INodeType {
 			const isEventGet = resource === EVENT_RESOURCE && operation === GET_OPERATION;
 			const isEventGetMany = resource === EVENT_RESOURCE && operation === GET_MANY_OPERATION;
 			const isEventUpdate = resource === EVENT_RESOURCE && operation === UPDATE_OPERATION;
+			const isEventUpsert = resource === EVENT_RESOURCE && operation === UPSERT_OPERATION;
 			const isEventDelete = resource === EVENT_RESOURCE && operation === DELETE_OPERATION;
 			if (
 				!isCalendarOperation &&
@@ -2680,6 +3154,7 @@ export class CalDav implements INodeType {
 				!isEventGet &&
 				!isEventGetMany &&
 				!isEventUpdate &&
+				!isEventUpsert &&
 				!isEventDelete
 			) {
 				if (this.continueOnFail()) {
@@ -2723,6 +3198,54 @@ export class CalDav implements INodeType {
 					returnData.push({ json: eventJson(created), pairedItem: { item: itemIndex } });
 				} catch (error) {
 					const failure = eventCreateFailure(error);
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: { error: failure.message },
+							pairedItem: { item: itemIndex },
+						});
+						continue;
+					}
+					if (failure.configuration) {
+						throw new NodeOperationError(this.getNode(), failure.message, { itemIndex });
+					}
+					throw eventDeleteApiError(this.getNode(), failure, itemIndex);
+				}
+				continue;
+			}
+
+			if (isEventUpsert) {
+				const input = eventUpsertInput(this, itemIndex);
+				if (typeof input === 'string') {
+					if (this.continueOnFail()) {
+						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), input, { itemIndex });
+				}
+
+				try {
+					if (getTransport === undefined) {
+						getTransport = await createN8nCalDavTransport(this);
+					}
+					if (
+						input.uid !== undefined ||
+						(input.timeMode === 'timed' && input.timeZone?.timeZoneMode === 'iana')
+					) {
+						bindCalendarEventTimeZoneExecutionContext(
+							getTransport,
+							ensureTimeZoneContext(getTransport),
+						);
+					}
+					const result = await upsertCalendarEvent(getTransport, input, {
+						clock: () => new Date(),
+						uidFactory: () => resolveCalendarEventUid(undefined),
+					});
+					returnData.push({
+						json: { action: result.action, ...eventJson(result.event) },
+						pairedItem: { item: itemIndex },
+					});
+				} catch (error) {
+					const failure = eventUpsertFailure(error);
 					if (this.continueOnFail()) {
 						returnData.push({
 							json: { error: failure.message },

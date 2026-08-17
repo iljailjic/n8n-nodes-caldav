@@ -1078,6 +1078,58 @@ describe('HTTP, network, and malformed-response errors', () => {
 		expect(`${error.stack}${JSON.stringify(error)}`).not.toContain('private-response');
 	});
 
+	it.each([
+		[
+			'CalDAV expanded name',
+			'<d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><c:no-uid-conflict><d:href>/private/event.ics</d:href></c:no-uid-conflict></d:error>',
+			true,
+		],
+		[
+			'wrong namespace',
+			'<d:error xmlns:d="DAV:" xmlns:x="urn:not-caldav"><x:no-uid-conflict/></d:error>',
+			false,
+		],
+		[
+			'arbitrary well-formed root',
+			'<x:response xmlns:x="urn:arbitrary" xmlns:c="urn:ietf:params:xml:ns:caldav"><c:no-uid-conflict/></x:response>',
+			false,
+		],
+		[
+			'nested below DAV error',
+			'<d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:responsedescription><c:no-uid-conflict/></d:responsedescription></d:error>',
+			false,
+		],
+		[
+			'oversized DAV error',
+			`<d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><c:no-uid-conflict/>${' '.repeat(
+				CALDAV_MAX_ERROR_EXCERPT_BYTES,
+			)}</d:error>`,
+			false,
+		],
+		['text mention', '<d:error xmlns:d="DAV:">no-uid-conflict</d:error>', false],
+		[
+			'forbidden DTD',
+			'<!DOCTYPE d:error [<!ENTITY private "secret">]><d:error xmlns:d="DAV:">&private;</d:error>',
+			false,
+		],
+	] as const)(
+		'exposes only the safe structural no-uid-conflict marker for a 403 %s response',
+		async (_label, body, expected) => {
+			const error = await captureError(
+				createCalDavTransport(
+					'https://calendar.example.test/',
+					mockAdapter(async () => response(403, Buffer.from(body))),
+				).request({ method: CalDavMethod.PUT }),
+			);
+
+			expect(error).toBeInstanceOf(CalDavAuthorizationError);
+			expect((error as CalDavAuthorizationError).noUidConflict).toBe(expected);
+			expect(`${error.stack}${JSON.stringify(error)}`).not.toMatch(
+				/private\/event|no-uid-conflict|DOCTYPE|ENTITY|secret/i,
+			);
+		},
+	);
+
 	it('maps HTTP 412 to its more-specific sanitized precondition category', async () => {
 		const error = await captureError(
 			createCalDavTransport(

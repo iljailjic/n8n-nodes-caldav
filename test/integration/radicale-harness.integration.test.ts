@@ -27,8 +27,10 @@ import {
 	updateCalendarEventResource,
 } from '../../nodes/CalDav/events/mutations';
 import { queryCalendarEventsByTimeRange } from '../../nodes/CalDav/events/timeRangeQuery';
+import { bindCalendarEventTimeZoneExecutionContext } from '../../nodes/CalDav/events/timeZoneExecutionContext';
 import { updateCalendarEvent } from '../../nodes/CalDav/events/update';
 import type { CalendarEventUpdateInput } from '../../nodes/CalDav/events/update';
+import { upsertCalendarEvent } from '../../nodes/CalDav/events/upsert';
 import {
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
@@ -2159,6 +2161,397 @@ describe('Radicale issue #41 all-day event interoperability', () => {
 			expect(await (await authenticatedFetch(run, created.resourceUrl)).text()).not.toContain(
 				'Forbidden stale update',
 			);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+});
+
+describe('Radicale deterministic Event Upsert', () => {
+	it('creates then updates one supplied UID with preservation-first conditional requests and no DELETE', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'event-upsert-supplied', 'Event Upsert Supplied'),
+			);
+			const uid = `upsert-supplied-${run.identity}@example.test`;
+			const expectedResourceUrl = new URL(
+				`${Buffer.from(uid, 'utf8').toString('base64url')}.ics`,
+				calendarUrl,
+			).href;
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+			const clock = vi
+				.fn()
+				.mockReturnValueOnce(new Date('2040-03-01T00:00:00Z'))
+				.mockReturnValueOnce(new Date('2040-03-01T00:00:01Z'));
+			const uidFactory = vi.fn(() => '00000000-0000-4000-8000-000000000001');
+
+			const created = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-03-02T10:00:00Z'),
+					end: new Date('2040-03-02T11:00:00Z'),
+					summary: 'Upsert first version',
+					description: { kind: 'set', value: 'Preserve this description' },
+					location: { kind: 'set', value: 'Remove this location' },
+					url: { kind: 'set', value: 'urn:example:upsert:first' },
+				},
+				{ clock, uidFactory },
+			);
+			expect(created).toMatchObject({
+				action: 'create',
+				event: { resourceUrl: expectedResourceUrl, uid, summary: 'Upsert first version' },
+			});
+			expect(uidFactory).not.toHaveBeenCalled();
+
+			const seeded = await authenticatedFetch(run, expectedResourceUrl);
+			const seededBody = (await seeded.text()).replace(
+				'END:VEVENT',
+				'X-UNKNOWN;X-SOURCE=MiXeD:preserved-by-upsert\r\nEND:VEVENT',
+			);
+			expect((await authenticatedFetch(run, expectedResourceUrl, 'PUT', seededBody)).status).toBe(
+				204,
+			);
+			const beforeUpdate = await authenticatedFetch(run, expectedResourceUrl);
+			const beforeEtag = beforeUpdate.headers.get('etag');
+			expect(beforeEtag).not.toBeNull();
+			const updateStart = request.mock.calls.length;
+
+			const updated = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-03-02T10:00:00Z'),
+					end: new Date('2040-03-02T11:00:00Z'),
+					summary: 'Upsert second version',
+					location: { kind: 'remove' },
+					url: { kind: 'set', value: 'urn:example:upsert:second' },
+				},
+				{ clock, uidFactory },
+			);
+			expect(updated).toMatchObject({
+				action: 'update',
+				event: {
+					resourceUrl: expectedResourceUrl,
+					uid,
+					summary: 'Upsert second version',
+					description: 'Preserve this description',
+					url: 'urn:example:upsert:second',
+				},
+			});
+			expect(updated.event).not.toHaveProperty('location');
+
+			const updateRequests = request.mock.calls
+				.slice(updateStart)
+				.map(([input]) => input as CalDavTransportRequest);
+			expect(updateRequests.map(({ method }) => method)).toEqual(['REPORT', 'PUT', 'GET']);
+			expect(updateRequests[1]).toMatchObject({
+				url: expectedResourceUrl,
+				headers: { 'If-Match': beforeEtag },
+			});
+			const allRequests = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
+			expect(allRequests.filter(({ method }) => method === 'DELETE')).toHaveLength(0);
+			expect(allRequests.filter(({ method }) => method === 'REPORT')).toHaveLength(2);
+			const stored = await authenticatedFetch(run, expectedResourceUrl);
+			const storedBody = await stored.text();
+			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=MiXeD:preserved-by-upsert');
+			expect(storedBody).toContain('SUMMARY:Upsert second version');
+			expect(storedBody).not.toContain('LOCATION:Remove this location');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('creates then updates an IANA event with one finite fallback definition and no DELETE', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'event-upsert-iana', 'Event Upsert IANA'),
+			);
+			const uid = `upsert-iana-${run.identity}@example.test`;
+			const expectedResourceUrl = new URL(
+				`${Buffer.from(uid, 'utf8').toString('base64url')}.ics`,
+				calendarUrl,
+			).href;
+			const prague = canonicalizeIanaTimeZone('Europe/Prague');
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+			const resolveReference = vi.fn().mockRejectedValue(new Error('synthetic unavailable'));
+			bindCalendarEventTimeZoneExecutionContext(inspectedTransport, { resolveReference });
+			const clock = vi
+				.fn()
+				.mockReturnValueOnce(new Date('2040-07-01T00:00:00Z'))
+				.mockReturnValueOnce(new Date('2040-07-01T00:00:01Z'));
+			const uidFactory = vi.fn(() => '00000000-0000-4000-8000-000000000015');
+
+			const created = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-07-15T08:00:00Z'),
+					end: new Date('2040-07-15T09:00:00Z'),
+					timeZone: { timeZoneMode: 'iana', timeZone: prague },
+					summary: 'IANA Upsert first version',
+					description: { kind: 'set', value: 'Preserve IANA description' },
+				},
+				{ clock, uidFactory },
+			);
+			expect(created).toMatchObject({
+				action: 'create',
+				event: {
+					resourceUrl: expectedResourceUrl,
+					uid,
+					timeZoneMode: 'iana',
+					timeZone: 'Europe/Prague',
+					startLocal: '2040-07-15T10:00:00',
+					endLocal: '2040-07-15T11:00:00',
+				},
+			});
+			expect(resolveReference).toHaveBeenCalledOnce();
+			expect(uidFactory).not.toHaveBeenCalled();
+			const createRequests = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
+			expect(createRequests.map(({ method }) => method)).toEqual(['REPORT', 'PUT']);
+			expect(createRequests[1]).toMatchObject({
+				url: expectedResourceUrl,
+				headers: { 'If-None-Match': '*' },
+			});
+
+			const seeded = await authenticatedFetch(run, expectedResourceUrl);
+			const seededBody = (await seeded.text()).replace(
+				'END:VEVENT',
+				'X-UNKNOWN;X-SOURCE=IANA:preserved-by-upsert\r\nEND:VEVENT',
+			);
+			expect((await authenticatedFetch(run, expectedResourceUrl, 'PUT', seededBody)).status).toBe(
+				204,
+			);
+			const beforeUpdate = await authenticatedFetch(run, expectedResourceUrl);
+			const beforeEtag = beforeUpdate.headers.get('etag');
+			expect(beforeEtag).not.toBeNull();
+			const updateStart = request.mock.calls.length;
+
+			const updated = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-07-15T08:30:00Z'),
+					end: new Date('2040-07-15T09:30:00Z'),
+					timeZone: { timeZoneMode: 'iana', timeZone: prague },
+					summary: 'IANA Upsert second version',
+				},
+				{ clock, uidFactory },
+			);
+			expect(updated).toMatchObject({
+				action: 'update',
+				event: {
+					resourceUrl: expectedResourceUrl,
+					uid,
+					summary: 'IANA Upsert second version',
+					description: 'Preserve IANA description',
+					timeZoneMode: 'iana',
+					timeZone: 'Europe/Prague',
+					start: '2040-07-15T08:30:00Z',
+					end: '2040-07-15T09:30:00Z',
+					startLocal: '2040-07-15T10:30:00',
+					endLocal: '2040-07-15T11:30:00',
+				},
+			});
+			expect(resolveReference).toHaveBeenCalledOnce();
+			const updateRequests = request.mock.calls
+				.slice(updateStart)
+				.map(([input]) => input as CalDavTransportRequest);
+			expect(updateRequests.map(({ method }) => method)).toEqual(['REPORT', 'PUT', 'GET']);
+			expect(updateRequests[1]).toMatchObject({
+				url: expectedResourceUrl,
+				headers: { 'If-Match': beforeEtag },
+			});
+			const allRequests = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
+			expect(allRequests.filter(({ method }) => method === 'DELETE')).toHaveLength(0);
+
+			const storedBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
+			expect(storedBody.match(/BEGIN:VTIMEZONE/g)).toHaveLength(1);
+			expect(storedBody.match(/END:VTIMEZONE/g)).toHaveLength(1);
+			expect(storedBody).toContain('TZID:Europe/Prague');
+			expect(storedBody).toContain('DTSTART;TZID=Europe/Prague:20400715T103000');
+			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=IANA:preserved-by-upsert');
+			expect(storedBody).toContain('DESCRIPTION:Preserve IANA description');
+			expect(JSON.stringify(updated)).not.toMatch(/synthetic unavailable|BEGIN:VTIMEZONE/);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('creates two omitted-UID resources through conditional PUTs for timed UTC and all-day input', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'event-upsert-generated', 'Event Upsert Generated'),
+			);
+			const generated = [
+				'00000000-0000-4000-8000-000000000011',
+				'00000000-0000-4000-8000-000000000012',
+			];
+			const uidFactory = vi
+				.fn()
+				.mockReturnValueOnce(generated[0])
+				.mockReturnValueOnce(generated[1]);
+			const clock = vi.fn(() => new Date('2040-03-01T00:00:00Z'));
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+
+			const first = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					timeMode: 'timed',
+					start: new Date('2040-03-02T10:00:00Z'),
+					end: new Date('2040-03-02T11:00:00Z'),
+					summary: 'Generated UTC Upsert',
+				},
+				{ clock, uidFactory },
+			);
+			const second = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					timeMode: 'allDay',
+					startDate: '2040-02-28',
+					endDate: '2040-03-01',
+					summary: 'Generated all-day Upsert',
+				},
+				{ clock, uidFactory },
+			);
+
+			expect([first.action, second.action]).toEqual(['create', 'create']);
+			expect([first.event.uid, second.event.uid]).toEqual(generated);
+			expect(new Set([first.event.resourceUrl, second.event.resourceUrl]).size).toBe(2);
+			expect(uidFactory).toHaveBeenCalledTimes(2);
+			expect(clock).toHaveBeenCalledTimes(2);
+			const observed = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
+			expect(observed.filter(({ method }) => method === 'REPORT')).toHaveLength(0);
+			expect(observed.filter(({ method }) => method === 'DELETE')).toHaveLength(0);
+			const puts = observed.filter(({ method }) => method === 'PUT');
+			expect(puts).toHaveLength(2);
+			for (const put of puts) expect(put.headers?.['If-None-Match']).toBe('*');
+			expect(puts[1]?.body).toContain('DTSTART;VALUE=DATE:20400228');
+			expect(puts[1]?.body).toContain('DTEND;VALUE=DATE:20400301');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('maps a REPORT-to-PUT stale race to one conflict and leaves the winner intact', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'event-upsert-race', 'Event Upsert Race'),
+			);
+			const uid = `upsert-race-${run.identity}@example.test`;
+			const deps = {
+				clock: vi.fn(() => new Date('2040-03-01T00:00:00Z')),
+				uidFactory: vi.fn(() => '00000000-0000-4000-8000-000000000013'),
+			};
+			const liveTransport = transport(run);
+			const created = await upsertCalendarEvent(
+				liveTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-03-02T10:00:00Z'),
+					end: new Date('2040-03-02T11:00:00Z'),
+					summary: 'Before Upsert race',
+				},
+				deps,
+			);
+			const resourceUrl = created.event.resourceUrl;
+			const before = await authenticatedFetch(run, resourceUrl);
+			const winnerBody = (await before.text()).replace(
+				'SUMMARY:Before Upsert race',
+				'SUMMARY:Upsert race winner',
+			);
+			let raced = false;
+			const request = vi.fn(async (input: CalDavTransportRequest) => {
+				if (input.method === 'PUT' && !raced) {
+					raced = true;
+					expect((await authenticatedFetch(run, resourceUrl, 'PUT', winnerBody)).status).toBe(204);
+				}
+				return await liveTransport.request(input);
+			});
+			const racingTransport: CalDavTransport = { ...liveTransport, request };
+
+			await expect(
+				upsertCalendarEvent(
+					racingTransport,
+					{
+						calendarUrl,
+						uid,
+						timeMode: 'timed',
+						start: new Date('2040-03-02T10:00:00Z'),
+						end: new Date('2040-03-02T11:00:00Z'),
+						summary: 'Forbidden Upsert race loser',
+					},
+					deps,
+				),
+			).rejects.toMatchObject({
+				code: 'UPSERT_CONCURRENCY_CONFLICT',
+				message: 'The calendar changed while Event Upsert was in progress.',
+			});
+			const observed = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
+			expect(observed.map(({ method }) => method)).toEqual(['REPORT', 'PUT']);
+			expect(observed.filter(({ method }) => method === 'DELETE')).toHaveLength(0);
+			const retained = await authenticatedFetch(run, resourceUrl);
+			const retainedBody = await retained.text();
+			expect(retainedBody).toContain('SUMMARY:Upsert race winner');
+			expect(retainedBody).not.toContain('Forbidden Upsert race loser');
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('uses one conditional Create attempt on a read-only calendar and never DELETEs', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'event-upsert-read-only', 'Event Upsert Read Only'),
+			);
+			await harness.makeCalendarReadOnly(run, calendarUrl);
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+
+			await expect(
+				upsertCalendarEvent(
+					inspectedTransport,
+					{
+						calendarUrl,
+						timeMode: 'timed',
+						start: new Date('2040-03-02T10:00:00Z'),
+						end: new Date('2040-03-02T11:00:00Z'),
+						summary: 'Must not be created',
+					},
+					{
+						clock: () => new Date('2040-03-01T00:00:00Z'),
+						uidFactory: () => '00000000-0000-4000-8000-000000000014',
+					},
+				),
+			).rejects.toBeInstanceOf(CalDavAuthorizationError);
+			const observed = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
+			expect(observed.map(({ method }) => method)).toEqual(['PUT']);
+			expect(observed[0]?.headers?.['If-None-Match']).toBe('*');
+			expect(observed.filter(({ method }) => method === 'DELETE')).toHaveLength(0);
 		} finally {
 			await teardownRun(run);
 		}

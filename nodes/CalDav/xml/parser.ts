@@ -3,6 +3,7 @@ const XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace';
 const XMLNS_NAMESPACE = 'http://www.w3.org/2000/xmlns/';
 const MAX_DEPTH = 64;
 const MAX_ELEMENTS = 100_000;
+const MAX_CALDAV_ERROR_DOCUMENT_BYTES = 8 * 1024;
 
 export interface XmlExpandedName {
 	readonly namespaceUri: string | null;
@@ -998,4 +999,19 @@ export function parseDavMultiStatus(xml: string): DavMultiStatus {
 	return {
 		responses: directDavElements(root, 'response').map(parseResponse),
 	};
+}
+
+export function hasCalDavNoUidConflict(xml: string): boolean {
+	try {
+		if (Buffer.byteLength(xml, 'utf8') > MAX_CALDAV_ERROR_DOCUMENT_BYTES) return false;
+		const normalized = normalizeAndValidateDocument(xml);
+		preflightForbiddenDeclarations(normalized);
+		const root = new XmlCursorParser(normalized).parseDocument();
+		if (!isExpandedName(root, DAV_NAMESPACE, 'error')) return false;
+		return directElements(root).some((child) =>
+			isExpandedName(child, 'urn:ietf:params:xml:ns:caldav', 'no-uid-conflict'),
+		);
+	} catch {
+		return false;
+	}
 }
