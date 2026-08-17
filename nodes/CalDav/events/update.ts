@@ -262,12 +262,56 @@ function sameEntry(left: ICalendarEntry, right: ICalendarEntry): boolean {
 		: sameComponent(left, right as ICalendarComponent);
 }
 
+function timeZoneEntryOrderIsInsignificant(component: ICalendarComponent): boolean {
+	return ['VTIMEZONE', 'STANDARD', 'DAYLIGHT'].includes(component.name.toUpperCase());
+}
+
+function semanticKey(parts: readonly string[]): string {
+	return parts.map((part) => `${part.length}:${part}`).join('');
+}
+
+function semanticEntryKey(entry: ICalendarEntry): string {
+	if (entry.kind === 'property') {
+		return semanticKey([
+			entry.kind,
+			entry.name,
+			...entry.parameters.map((parameter) =>
+				semanticKey([
+					parameter.kind,
+					parameter.name,
+					...parameter.values.map(({ value }) => value),
+				]),
+			),
+			entry.value.kind,
+			entry.value.valueType,
+			entry.value.textValues === null
+				? semanticKey(['raw', entry.value.raw])
+				: semanticKey(['text', ...entry.value.textValues]),
+		]);
+	}
+	const entryKeys = entry.entries.map(semanticEntryKey);
+	if (timeZoneEntryOrderIsInsignificant(entry)) entryKeys.sort();
+	return semanticKey([entry.kind, entry.name, ...entryKeys]);
+}
+
+function sameUnorderedEntries(
+	left: readonly ICalendarEntry[],
+	right: readonly ICalendarEntry[],
+): boolean {
+	if (left.length !== right.length) return false;
+	const leftKeys = left.map(semanticEntryKey).sort();
+	const rightKeys = right.map(semanticEntryKey).sort();
+	return sameStrings(leftKeys, rightKeys);
+}
+
 function sameComponent(left: ICalendarComponent, right: ICalendarComponent): boolean {
 	return (
 		left.kind === right.kind &&
 		left.name === right.name &&
 		left.entries.length === right.entries.length &&
-		left.entries.every((entry, index) => sameEntry(entry, right.entries[index]!))
+		(timeZoneEntryOrderIsInsignificant(left)
+			? sameUnorderedEntries(left.entries, right.entries)
+			: left.entries.every((entry, index) => sameEntry(entry, right.entries[index]!)))
 	);
 }
 

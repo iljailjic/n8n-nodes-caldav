@@ -34,7 +34,7 @@ import type { CalendarEventUpdateInput } from '../../nodes/CalDav/events/update'
 import { mapCalendarEventResource } from '../../nodes/CalDav/icalendar/eventReadModel';
 import type { CalendarEventReadResult } from '../../nodes/CalDav/icalendar/eventReadModel';
 import { parseICalendarResource } from '../../nodes/CalDav/icalendar/parser';
-import type { ICalendarComponent } from '../../nodes/CalDav/icalendar/parser';
+import type { ICalendarComponent, ICalendarEntry } from '../../nodes/CalDav/icalendar/parser';
 import { applyCalendarEventPatch } from '../../nodes/CalDav/icalendar/patcher';
 import type { CalendarEventPatch } from '../../nodes/CalDav/icalendar/patcher';
 import { serializeICalendarResource } from '../../nodes/CalDav/icalendar/serializer';
@@ -119,6 +119,44 @@ function timeZoneDefinitionText(calendarText: string): string {
 	const end = calendarText.indexOf(marker, start);
 	if (start < 0 || end < 0) throw new Error('Expected one serialized synthetic VTIMEZONE.');
 	return calendarText.slice(start, end + marker.length);
+}
+
+function reorderGeneratedTimeZoneLikeVObject(calendarText: string): string {
+	const resource = parseICalendarResource(Buffer.from(calendarText, 'utf8'));
+	const propertyOrder = new Map([
+		['DTSTART', 0],
+		['RDATE', 1],
+		['TZOFFSETFROM', 2],
+		['TZOFFSETTO', 3],
+	]);
+	const componentOrder = new Map([
+		['STANDARD', 0],
+		['DAYLIGHT', 1],
+	]);
+	const reorderObservance = (entry: ICalendarEntry): ICalendarEntry =>
+		entry.kind === 'component' && ['STANDARD', 'DAYLIGHT'].includes(entry.name)
+			? {
+					...entry,
+					entries: [...entry.entries].sort(
+						(left, right) =>
+							(propertyOrder.get(left.name) ?? 4) - (propertyOrder.get(right.name) ?? 4),
+					),
+				}
+			: entry;
+	const entries = resource.calendar.entries.map((entry): ICalendarEntry => {
+		if (entry.kind !== 'component' || entry.name !== 'VTIMEZONE') return entry;
+		return {
+			...entry,
+			entries: entry.entries.map(reorderObservance).sort((left, right) => {
+				if (left.kind !== 'component' || right.kind !== 'component') return 0;
+				return (componentOrder.get(left.name) ?? 2) - (componentOrder.get(right.name) ?? 2);
+			}),
+		};
+	});
+	return serializeICalendarResource({
+		...resource,
+		calendar: { ...resource.calendar, entries },
+	});
 }
 
 function calendarDataWithTimeZone(
@@ -266,6 +304,83 @@ describe('calendar event Update coordinator requests and authoritative result', 
 		expect(mocks.updateCalendarEventResource.mock.invocationCallOrder[0]).toBeLessThan(
 			mocks.getCalendarEventByResourceUrl.mock.invocationCallOrder[1]!,
 		);
+	});
+
+	it('accepts Radicale vobject reordering of a generated VTIMEZONE during confirmation', async () => {
+		const current = readResult(SUPPORTED_EMBEDDED_IANA_EVENT, { etag: '"snapshot"' });
+		const resolveReference = vi.fn().mockRejectedValue(new Error('unavailable'));
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(current)
+			.mockImplementationOnce(async () => {
+				const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+				const reordered = reorderGeneratedTimeZoneLikeVObject(sent);
+				expect(reordered).not.toBe(sent);
+				return readResult(reordered, { etag: '"confirmed"' });
+			});
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: RESOURCE_URL,
+		});
+
+		await expect(
+			updateCalendarEvent(
+				TRANSPORT,
+				resourceInput({
+					timeZone: {
+						kind: 'set',
+						value: { timeZoneMode: 'iana', timeZone: 'America/New_York' },
+					},
+				}),
+				() => CLOCK,
+				{ resolveReference },
+			),
+		).resolves.toMatchObject({
+			etag: '"confirmed"',
+			timeZoneMode: 'iana',
+			timeZone: 'America/New_York',
+		});
+		expect(resolveReference).toHaveBeenCalledOnce();
+		expect(mocks.updateCalendarEventResource).toHaveBeenCalledOnce();
+		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledTimes(2);
+	});
+
+	it('rejects changed VTIMEZONE data even when its entries are reordered', async () => {
+		const current = readResult(SUPPORTED_EMBEDDED_IANA_EVENT, { etag: '"snapshot"' });
+		const resolveReference = vi.fn().mockRejectedValue(new Error('unavailable'));
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(current)
+			.mockImplementationOnce(async () => {
+				const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+				const reordered = reorderGeneratedTimeZoneLikeVObject(sent);
+				const changed = reordered.replace(
+					/RDATE:(\d{8}T\d{5})\d/,
+					(_match, prefix: string) => `RDATE:${prefix}1`,
+				);
+				expect(changed).not.toBe(reordered);
+				const readBack = readResult(changed, { etag: '"changed"' });
+				expect(readBack.event.accessMode).toBe('editable');
+				return readBack;
+			});
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: RESOURCE_URL,
+		});
+
+		await expect(
+			updateCalendarEvent(
+				TRANSPORT,
+				resourceInput({
+					timeZone: {
+						kind: 'set',
+						value: { timeZoneMode: 'iana', timeZone: 'America/New_York' },
+					},
+				}),
+				() => CLOCK,
+				{ resolveReference },
+			),
+		).rejects.toMatchObject({ code: CalendarEventUpdateFailureCode.CONFIRMATION_FAILED });
+		expect(mocks.updateCalendarEventResource).toHaveBeenCalledOnce();
+		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledTimes(2);
 	});
 
 	it('preserves embedded IANA authority and representation when a bound changes without a timezone patch', async () => {
