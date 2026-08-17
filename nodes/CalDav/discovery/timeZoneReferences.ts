@@ -7,7 +7,11 @@ import { discoverCalendarHome } from './calendarHome';
 import { discoverCurrentUserPrincipal } from './currentUserPrincipal';
 import { parseICalendarResource } from '../icalendar/parser';
 import type { ICalendarComponent } from '../icalendar/parser';
-import { canonicalizeIanaTimeZone, type IanaTimeZoneId } from '../icalendar/timeZones';
+import {
+	canonicalizeIanaTimeZone,
+	projectInstantInTimeZone,
+	type IanaTimeZoneId,
+} from '../icalendar/timeZones';
 import {
 	CalDavMethod,
 	type CalDavTransport,
@@ -456,9 +460,37 @@ function validCapabilities(response: CalDavTransportResponse): boolean {
 }
 
 function componentProperties(component: ICalendarComponent, name: string): readonly string[] {
+	const expected = name.toUpperCase();
 	return component.entries
-		.filter((entry) => entry.kind === 'property' && entry.name === name)
+		.filter((entry) => entry.kind === 'property' && entry.name.toUpperCase() === expected)
 		.map((entry) => (entry.kind === 'property' ? entry.value.raw : ''));
+}
+
+function hasSupportedZoneRules(definition: ICalendarComponent, timeZone: IanaTimeZoneId): boolean {
+	const observances = definition.entries.filter(
+		(entry): entry is ICalendarComponent => entry.kind === 'component',
+	);
+	if (observances.length === 0) return false;
+	const years: number[] = [];
+	for (const observance of observances) {
+		const starts = componentProperties(observance, 'DTSTART');
+		if (starts.length !== 1) return false;
+		const match = /^(\d{4})\d{4}T\d{6}$/.exec(starts[0]!);
+		if (match === null) return false;
+		const year = Number(match[1]);
+		if (year < 1 || year > 9999) return false;
+		years.push(year);
+	}
+
+	const validationInstant = new Date(0);
+	validationInstant.setUTCFullYear(Math.max(...years), 6, 1);
+	validationInstant.setUTCHours(0, 0, 0, 0);
+	try {
+		projectInstantInTimeZone(validationInstant, timeZone, definition);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function validateZoneResponse(
@@ -498,6 +530,9 @@ function validateZoneResponse(
 		return fail(TimeZoneReferenceFailureCode.INVALID_RESPONSE);
 	}
 	if (canonical !== timeZone) return fail(TimeZoneReferenceFailureCode.INVALID_RESPONSE);
+	if (!hasSupportedZoneRules(definitions[0], timeZone)) {
+		return fail(TimeZoneReferenceFailureCode.INVALID_RESPONSE);
+	}
 	return Object.freeze({
 		timeZone,
 		etag: etags[0],

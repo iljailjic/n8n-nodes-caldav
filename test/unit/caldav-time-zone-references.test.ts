@@ -335,6 +335,40 @@ describe('RFC 7809 capability and RFC 7808 TZDIST resolution', () => {
 			{ 'content-type': 'text/calendar', etag: '"strong"' },
 			'private-response-body',
 		],
+		[
+			'missing TZOFFSETTO',
+			{ 'content-type': 'text/calendar', etag: '"strong"' },
+			TZDIST_ZONE_RESPONSE.replace('TZOFFSETTO:+0200\r\n', ''),
+		],
+		[
+			'invalid RDATE',
+			{ 'content-type': 'text/calendar', etag: '"strong"' },
+			TZDIST_ZONE_RESPONSE.replace('RDATE:20401028T030000', 'RDATE:20401340T250000'),
+		],
+		[
+			'unsupported RRULE COUNT clause',
+			{ 'content-type': 'text/calendar', etag: '"strong"' },
+			TZDIST_ZONE_RESPONSE.replace(
+				'RDATE:20401028T030000',
+				'RRULE:FREQ=YEARLY;COUNT=2;BYMONTH=10;BYDAY=-1SU',
+			),
+		],
+		[
+			'duplicate RRULE FREQ clause',
+			{ 'content-type': 'text/calendar', etag: '"strong"' },
+			TZDIST_ZONE_RESPONSE.replace(
+				'RDATE:20401028T030000',
+				'RRULE:FREQ=YEARLY;FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU',
+			),
+		],
+		[
+			'insufficient non-recurring transition coverage',
+			{ 'content-type': 'text/calendar', etag: '"strong"' },
+			TZDIST_ZONE_RESPONSE.replace('RDATE:20401028T030000\r\n', '').replace(
+				'RDATE:20410331T020000\r\n',
+				'',
+			),
+		],
 	] as const)('rejects %s as an invalid TZDIST zone response', async (_label, headers, body) => {
 		const transport = transportForServices(['https://tzdist.example.test/']);
 		const request = vi

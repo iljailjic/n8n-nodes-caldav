@@ -815,6 +815,9 @@ function eventUpdateFailure(error: unknown): EventUpdateFailure {
 	if (error instanceof Error && error.message === READ_ONLY_EVENT_UPDATE_MESSAGE) {
 		return { message: READ_ONLY_EVENT_UPDATE_MESSAGE, configuration: true };
 	}
+	if (error instanceof CalDavTimeZoneReferenceError) {
+		return { message: error.message, configuration: false };
+	}
 	if (error instanceof CalDavCalendarEventUpdateError) {
 		if (error.code === CalendarEventUpdateFailureCode.READ_ONLY) {
 			return { message: EVENT_UPDATE_MESSAGES.READ_ONLY, configuration: false };

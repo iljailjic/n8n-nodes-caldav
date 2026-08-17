@@ -451,7 +451,8 @@ export async function updateCalendarEvent(
 		timedCurrent !== undefined &&
 		(requestedTimeZone.timeZoneMode !== timedCurrent.timeZoneMode ||
 			(requestedTimeZone.timeZoneMode === 'iana' &&
-				requestedTimeZone.timeZone !== timedCurrent.timeZone));
+				(requestedTimeZone.timeZone !== timedCurrent.timeZone ||
+					originalTimeZoneId !== requestedTimeZone.timeZone)));
 	const needsAtomicBounds = zoneChanges || (effectiveTimeZone !== undefined && hasTimePatch);
 	const effectivePatch: CalendarEventPatch = needsAtomicBounds
 		? {
@@ -529,8 +530,6 @@ export async function updateCalendarEvent(
 		) {
 			return confirmationFailed();
 		}
-		if (confirmed.event.accessMode === 'readOnly') return confirmationFailed();
-
 		return Object.freeze({ ...confirmed.event, etag: confirmed.event.etag });
 	} catch (error) {
 		if (error instanceof CalDavCalendarEventUpdateError) throw error;

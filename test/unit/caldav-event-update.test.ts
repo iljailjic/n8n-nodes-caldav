@@ -130,6 +130,59 @@ beforeEach(() => {
 });
 
 describe('calendar event Update coordinator requests and authoritative result', () => {
+	it('preserves a source TZID alias when timezone is omitted and canonicalizes it when explicit', async () => {
+		const aliased = SUPPORTED_EMBEDDED_IANA_EVENT.replaceAll('Europe/Prague', 'US/Eastern');
+		const current = readResult(aliased, { etag: '"snapshot"' });
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(current)
+			.mockImplementationOnce(async () => {
+				const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+				return readResult(sent, { etag: '"implicit-confirmed"' });
+			});
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: RESOURCE_URL,
+		});
+
+		await updateCalendarEvent(
+			TRANSPORT,
+			resourceInput({ start: { kind: 'set', value: new Date('2040-07-15T06:00:00Z') } }),
+			() => CLOCK,
+		);
+
+		const implicit = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+		expect(implicit).toContain(
+			'DTSTART;TZID=US/Eastern:20400715T090000\r\nDTEND;TZID=US/Eastern:20400715T110000',
+		);
+
+		mocks.getCalendarEventByResourceUrl
+			.mockReset()
+			.mockResolvedValueOnce(current)
+			.mockImplementationOnce(async () => {
+				const sent = mocks.updateCalendarEventResource.mock.calls[1]![3] as string;
+				return readResult(sent, { etag: '"explicit-confirmed"' });
+			});
+
+		await expect(
+			updateCalendarEvent(
+				TRANSPORT,
+				resourceInput({
+					timeZone: {
+						kind: 'set',
+						value: { timeZoneMode: 'iana', timeZone: 'America/New_York' },
+					},
+				}),
+				() => CLOCK,
+			),
+		).resolves.toMatchObject({ accessMode: 'readOnly', etag: '"explicit-confirmed"' });
+		const explicit = mocks.updateCalendarEventResource.mock.calls[1]![3] as string;
+		expect(explicit).toContain(
+			'DTSTART;TZID=America/New_York:20400715T100000\r\nDTEND;TZID=America/New_York:20400715T110000',
+		);
+		expect(explicit).not.toContain('DTSTART;TZID=US/Eastern:');
+		expect(explicit).not.toContain('DTEND;TZID=US/Eastern:');
+	});
+
 	it('preserves embedded IANA authority and representation when a bound changes without a timezone patch', async () => {
 		const current = readResult(SUPPORTED_EMBEDDED_IANA_EVENT, { etag: '"snapshot"' });
 		mocks.getCalendarEventByResourceUrl
@@ -225,6 +278,38 @@ describe('calendar event Update coordinator requests and authoritative result', 
 		expect(Object.isFrozen(result)).toBe(true);
 		expect(confirmed.calendarData).toContain('X-UNKNOWN;X-SOURCE=MiXeD:opaque-value');
 		expect(confirmed.calendarData).toContain('BEGIN:VALARM');
+	});
+
+	it('returns the authoritative safe read-only projection after a successful PUT and GET', async () => {
+		const patch: CalendarEventPatch = { summary: { kind: 'set', value: 'After update' } };
+		const current = readResult(calendarData(), { etag: '"snapshot"' });
+		const confirmed = updatedRead(current, patch, { etag: '"authoritative"' });
+		const readOnlyConfirmed: CalendarEventReadResult = {
+			...confirmed.result,
+			event: Object.freeze({
+				calendarUrl: confirmed.result.event.calendarUrl,
+				resourceUrl: confirmed.result.event.resourceUrl,
+				etag: confirmed.result.event.etag,
+				uid: confirmed.result.event.uid,
+				summary: confirmed.result.event.summary,
+				timeMode: 'unsupported',
+				accessMode: 'readOnly',
+				readOnlyReason: 'unsupportedTimeRepresentation',
+			}),
+		};
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(current)
+			.mockResolvedValueOnce(readOnlyConfirmed);
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: RESOURCE_URL,
+		});
+
+		await expect(
+			updateCalendarEvent(TRANSPORT, resourceInput(patch), () => CLOCK),
+		).resolves.toEqual(readOnlyConfirmed.event);
+		expect(mocks.updateCalendarEventResource).toHaveBeenCalledTimes(1);
+		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledTimes(2);
 	});
 
 	it('uses one UID REPORT snapshot, a server-derived empty ETag, and one GET read-back', async () => {
