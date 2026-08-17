@@ -41,6 +41,7 @@ import { CalDavNotFoundError, CalDavResponseLimitError } from '../../nodes/CalDa
 import type { CalDavTransport } from '../../nodes/CalDav/transport/http';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 import type { AbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import { SUPPORTED_EMBEDDED_IANA_EVENT } from './fixtures/time-zones/synthetic-time-zone-fixtures';
 
 const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/work/');
 const RESOURCE_URL = validateAbsoluteHttpUrl(
@@ -129,6 +130,38 @@ beforeEach(() => {
 });
 
 describe('calendar event Update coordinator requests and authoritative result', () => {
+	it('preserves embedded IANA authority and representation when a bound changes without a timezone patch', async () => {
+		const current = readResult(SUPPORTED_EMBEDDED_IANA_EVENT, { etag: '"snapshot"' });
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(current)
+			.mockImplementationOnce(async () => {
+				const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+				return readResult(sent, { etag: '"confirmed"' });
+			});
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: RESOURCE_URL,
+		});
+
+		const result = await updateCalendarEvent(
+			TRANSPORT,
+			resourceInput({ start: { kind: 'set', value: new Date('2040-07-15T06:00:00Z') } }),
+			() => CLOCK,
+		);
+
+		const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+		expect(sent).toContain('BEGIN:VTIMEZONE');
+		expect(sent).toContain(
+			'DTSTART;TZID=Europe/Prague:20400715T090000\r\nDTEND;TZID=Europe/Prague:20400715T110000',
+		);
+		expect(result).toMatchObject({
+			start: '2040-07-15T06:00:00Z',
+			end: '2040-07-15T08:00:00Z',
+			timeZoneMode: 'iana',
+			timeZone: 'Europe/Prague',
+		});
+	});
+
 	it('performs URL GET -> conditional PUT -> GET, preserves unknown data, and returns frozen read-back', async () => {
 		const patch: CalendarEventPatch = {
 			summary: { kind: 'set', value: 'After update' },
@@ -185,6 +218,9 @@ describe('calendar event Update coordinator requests and authoritative result', 
 			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T10:30:00Z',
+			timeZoneMode: 'utc',
+			startLocal: '2040-01-02T10:00:00',
+			endLocal: '2040-01-02T10:30:00',
 		});
 		expect(Object.isFrozen(result)).toBe(true);
 		expect(confirmed.calendarData).toContain('X-UNKNOWN;X-SOURCE=MiXeD:opaque-value');

@@ -225,6 +225,9 @@ describe('calendar-event direct-resource request and mapping', () => {
 			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T10:30:00Z',
+			timeZoneMode: 'utc',
+			startLocal: '2040-01-02T10:00:00',
+			endLocal: '2040-01-02T10:30:00',
 		});
 		expect(result.context.resource.originalIcs).toBe(ics.toString('utf8'));
 		expect(result.context.exceptions).toEqual([]);

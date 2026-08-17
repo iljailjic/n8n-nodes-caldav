@@ -157,14 +157,17 @@ describe('CalDAV timed event timezone UI', () => {
 		expect(properties.map(({ displayName }) => displayName)).toEqual([
 			'Calendar',
 			'UID',
+			'Time Mode',
 			'Time Zone Mode',
 			'Time Zone',
 			'Start',
 			'End',
+			'Start Date',
+			'End Date',
 			'Summary',
 			'Additional Fields',
 		]);
-		expect(properties[2]).toMatchObject({
+		expect(properties[3]).toMatchObject({
 			name: 'timeZoneMode',
 			type: 'options',
 			required: true,
@@ -174,7 +177,7 @@ describe('CalDAV timed event timezone UI', () => {
 				{ name: 'IANA', value: 'iana' },
 			],
 		});
-		expect(properties[3]).toMatchObject({
+		expect(properties[4]).toMatchObject({
 			name: 'timeZone',
 			type: 'options',
 			required: true,
@@ -194,6 +197,8 @@ describe('CalDAV timed event timezone UI', () => {
 			'timeZone',
 			'start',
 			'end',
+			'startDate',
+			'endDate',
 			'summary',
 			'description',
 			'location',

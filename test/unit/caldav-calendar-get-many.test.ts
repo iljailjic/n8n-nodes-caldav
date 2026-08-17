@@ -181,6 +181,8 @@ describe('Calendar Get Many node description', () => {
 			'calendar',
 			'uid',
 			'timeMode',
+			'timeZoneMode',
+			'timeZone',
 			'start',
 			'end',
 			'startDate',

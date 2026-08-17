@@ -1,7 +1,14 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The accepted application-service contract exposes sanitized domain failures outside the n8n UI boundary. */
 
+import { mapCalendarEventResource } from '../icalendar/eventReadModel';
 import type { CalendarDateString, CalendarEvent } from '../icalendar/eventReadModel';
-import { serializeBasicUtcEvent } from '../icalendar/serializer';
+import { parseICalendarResource } from '../icalendar/parser';
+import type { ICalendarComponent } from '../icalendar/parser';
+import { serializeBasicTimedEvent, serializeBasicUtcEvent } from '../icalendar/serializer';
+import type { CalendarEventInstantProjector } from '../icalendar/serializer';
+import { projectInstantInTimeZone } from '../icalendar/timeZones';
+import type { CalendarEventTimeZone } from '../icalendar/timeZones';
+import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import { CalDavTransportError } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import { joinCalendarCollectionUrl } from '../transport/url';
@@ -25,6 +32,7 @@ export type CalendarEventCreateInput = CalendarEventCreateCommon &
 				readonly timeMode: 'timed';
 				readonly start: Date;
 				readonly end: Date;
+				readonly timeZone?: CalendarEventTimeZone;
 		  }
 		| {
 				readonly timeMode: 'allDay';
@@ -114,6 +122,34 @@ function readClock(clock: CalendarEventCreateClock): Date {
 	}
 }
 
+function normalizeCreatedEvent(
+	input: CalendarEventCreateInput,
+	resourceUrl: AbsoluteHttpUrl,
+	calendarData: string,
+	timeZoneDefinition?: ICalendarComponent,
+): CalendarEvent {
+	try {
+		const resource = parseICalendarResource(Buffer.from(calendarData, 'utf8'));
+		const event = mapCalendarEventResource({
+			calendarUrl: input.calendarUrl,
+			resourceUrl,
+			resource,
+			...(timeZoneDefinition === undefined ? {} : { timeZoneDefinition }),
+		}).event;
+		if (event.summary === undefined || event.accessMode !== 'editable') {
+			throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
+		}
+		return event;
+	} catch (error) {
+		if (
+			error instanceof CalDavCalendarEventCreateError &&
+			error.code === CalendarEventCreateFailureCode.NORMALIZATION_FAILED
+		) {
+			throw error;
+		}
+		throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
+	}
+}
 function safeStatusCode(error: unknown): number | undefined {
 	return error instanceof CalDavTransportError ? error.statusCode : undefined;
 }
@@ -139,7 +175,31 @@ export async function createCalendarEvent(
 	transport: CalDavTransport,
 	input: CalendarEventCreateInput,
 	clock: CalendarEventCreateClock,
+	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 ): Promise<CreatedCalendarEvent> {
+	const timeZone =
+		input.timeMode === 'timed'
+			? (input.timeZone ?? { timeZoneMode: 'utc' as const })
+			: ({ timeZoneMode: 'utc' } as const);
+	let timeZoneDefinition: ICalendarComponent | undefined;
+	let projectInstant: CalendarEventInstantProjector | undefined;
+	if (timeZone.timeZoneMode === 'iana') {
+		if (timeZoneContext === undefined) {
+			throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
+		}
+		const reference = await timeZoneContext.resolveReference(input.calendarUrl, timeZone.timeZone);
+		const referenceResource = parseICalendarResource(Buffer.from(reference.calendarData, 'utf8'));
+		timeZoneDefinition = referenceResource.calendar.entries.find(
+			(entry): entry is ICalendarComponent =>
+				entry.kind === 'component' && entry.name === 'VTIMEZONE',
+		);
+		if (timeZoneDefinition === undefined) {
+			throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
+		}
+		const definition = timeZoneDefinition;
+		projectInstant = (instant, selectedTimeZone) =>
+			projectInstantInTimeZone(instant, selectedTimeZone, definition);
+	}
 	const uid = resolveCalendarEventUid(input.uid);
 	const resourceUrl = joinCalendarCollectionUrl(input.calendarUrl, resourceNameForUid(uid));
 	const dtstamp = readClock(clock);
@@ -159,12 +219,29 @@ export async function createCalendarEvent(
 					startDate: input.startDate,
 					endDate: input.endDate,
 				})
-			: serializeBasicUtcEvent({
-					...common,
-					timeMode: 'timed',
-					start: input.start,
-					end: input.end,
-				});
+			: serializeBasicTimedEvent(
+					{
+						...common,
+						timeMode: 'timed',
+						start: input.start,
+						end: input.end,
+						timeZone,
+					},
+					projectInstant,
+				);
+	const normalized = normalizeCreatedEvent(input, resourceUrl, calendarData, timeZoneDefinition);
+	if (
+		(input.timeMode === 'timed' &&
+			(normalized.timeMode !== 'timed' ||
+				normalized.start !== input.start.toISOString().replace('.000Z', 'Z') ||
+				normalized.end !== input.end.toISOString().replace('.000Z', 'Z'))) ||
+		(input.timeMode === 'allDay' &&
+			(normalized.timeMode !== 'allDay' ||
+				normalized.startDate !== input.startDate ||
+				normalized.endDate !== input.endDate))
+	) {
+		throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
+	}
 	const created = await createCalendarEventResource(
 		transport,
 		input.calendarUrl,
@@ -177,6 +254,7 @@ export async function createCalendarEvent(
 			transport,
 			input.calendarUrl,
 			created.resourceUrl,
+			{ ...(timeZoneContext === undefined ? {} : { timeZoneContext }) },
 		);
 		if (
 			confirmed.event.etag === undefined ||

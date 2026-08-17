@@ -232,6 +232,7 @@ describe('CalDAV Event Update metadata', () => {
 			displayOptions: { show: { resource: ['event'], operation: ['update'] } },
 		});
 		expect(fields.options?.map((option) => option.name)).toEqual([
+			'timeZone',
 			'start',
 			'end',
 			'startDate',

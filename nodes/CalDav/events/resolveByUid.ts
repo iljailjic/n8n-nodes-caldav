@@ -1,5 +1,6 @@
-import { mapCalendarEventResource } from '../icalendar/eventReadModel';
+import { mapCalendarEventResourceWithTimeZoneContext } from '../icalendar/eventReadModel';
 import type { CalendarEventReadResult } from '../icalendar/eventReadModel';
+import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import { parseICalendarResource } from '../icalendar/parser';
 import { CalDavMethod } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
@@ -114,6 +115,7 @@ function requestedProperties(
 
 export interface CalendarEventUidResolutionOptions {
 	readonly allowMissingEtag?: boolean;
+	readonly timeZoneContext?: CalendarEventTimeZoneExecutionContext;
 }
 
 export async function resolveCalendarEventByUid(
@@ -149,12 +151,15 @@ export async function resolveCalendarEventByUid(
 		const properties = requestedProperties(davResponse, options.allowMissingEtag === true);
 		const resourceUrl = resolveCalDavHref(response.effectiveUrl, davResponse.hrefs[0]);
 		const resource = parseICalendarResource(Buffer.from(properties.calendarData, 'utf8'));
-		const result = mapCalendarEventResource({
-			calendarUrl,
-			resourceUrl,
-			...(properties.etag === undefined ? {} : { etag: properties.etag }),
-			resource,
-		});
+		const result = await mapCalendarEventResourceWithTimeZoneContext(
+			{
+				calendarUrl,
+				resourceUrl,
+				...(properties.etag === undefined ? {} : { etag: properties.etag }),
+				resource,
+			},
+			options.timeZoneContext,
+		);
 
 		const existing = canonicalResources.get(resourceUrl);
 		if (existing !== undefined) {

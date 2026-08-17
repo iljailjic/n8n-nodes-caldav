@@ -69,6 +69,20 @@ For Event Create, supply a UID to preserve that exact event identity, or leave
 UID blank to generate a standards-compliant UUID. Each separate Create with a
 blank UID generates a new identity; omission is not an idempotency mechanism.
 
+Timed events default to UTC. In IANA mode, choose a canonical zone from the
+node's bundled IANA TZDB 2026c list. Instants are serialized as local
+`DTSTART`/`DTEND` values with one canonical `TZID`; the node does not generate
+`VTIMEZONE` definitions. A server must advertise RFC 7809
+`calendar-no-timezone` support and a usable RFC 7808 time-zone distribution
+service before an IANA event is created. Requests to that service are
+anonymous and never reuse CalDAV credentials.
+
+For existing events, an embedded `VTIMEZONE` is authoritative. Time
+representations that cannot be interpreted safely remain available as
+read-only output and can still be deleted, but cannot be updated. UTC-equivalent
+identifiers belong in UTC mode. During a daylight-saving overlap, use UTC mode
+for the second occurrence of an ambiguous local time.
+
 See [docs/MVP.md](docs/MVP.md) for the complete version 1.0.0 scope and
 acceptance criteria.
 

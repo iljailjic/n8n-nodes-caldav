@@ -17,6 +17,14 @@ import {
 } from './actions/calendar/get';
 import { discoverCalendarsForCurrentUser } from './discovery/calendarDiscovery';
 import {
+	CalDavTimeZoneReferenceError,
+	createCalendarEventTimeZoneExecutionContext,
+} from './discovery/timeZoneReferences';
+import type {
+	CalendarEventTimeZoneExecutionContext,
+	TimeZoneDistributionRequestInput,
+} from './discovery/timeZoneReferences';
+import {
 	CalDavCalendarCollectionDiscoveryError,
 	type CalendarCollection,
 } from './discovery/calendarCollections';
@@ -58,6 +66,15 @@ import {
 	CalDavICalendarSerializeErrorCode,
 	serializeBasicUtcEvent,
 } from './icalendar/serializer';
+import {
+	CalDavIanaTimeZoneError,
+	CalDavIanaTimeZoneErrorCode,
+	canonicalizeIanaTimeZone,
+	listCanonicalIanaTimeZones,
+	projectInstantInTimeZone,
+	resolveLocalDateTimeInTimeZone,
+} from './icalendar/timeZones';
+import type { CalendarEventTimeZone } from './icalendar/timeZones';
 import { testCalDavApiCredentials } from './methods/credentialTest';
 import { defaultCalDavProviderRegistry } from './providers/registry';
 import type { CalDavProviderAdapter } from './providers/types';
@@ -202,6 +219,13 @@ const EVENT_CREATE_MESSAGES = {
 	INVALID_LOCATION: 'Location must be a valid iCalendar text value.',
 	INVALID_URL: 'URL must be a valid absolute URI without a fragment.',
 	INVALID_ADDITIONAL_FIELDS: 'Additional Fields must be an object.',
+	INVALID_TIME_ZONE_MODE: 'Time Zone Mode must be UTC or IANA.',
+	INVALID_TIME_ZONE: 'Time Zone must be a valid IANA time zone identifier.',
+	UTC_TIME_ZONE: 'Time Zone resolves to UTC. Use UTC Time Zone Mode.',
+	UNREPRESENTABLE_START:
+		'Start cannot be represented unambiguously in the selected IANA time zone. Use UTC mode for this instant.',
+	UNREPRESENTABLE_END:
+		'End cannot be represented unambiguously in the selected IANA time zone. Use UTC mode for this instant.',
 	RESOURCE_LIMIT: 'The calendar event exceeds the supported size limit.',
 	AUTHENTICATION: 'Event Create authentication failed.',
 	AUTHORIZATION: 'Event Create is not authorized for the selected calendar.',
@@ -227,6 +251,10 @@ const EVENT_UPDATE_MESSAGES = {
 	INVALID_ETAG: 'ETag must be a string.',
 	INVALID_TIME_MODE: 'Time Mode must be Timed or All-Day.',
 	INVALID_FIELDS: 'Fields to Update must be an object.',
+	INVALID_TIME_ZONE_MODE: 'Time Zone Mode must be UTC or IANA.',
+	INVALID_TIME_ZONE: 'Time Zone must be a valid IANA time zone identifier.',
+	UTC_TIME_ZONE: 'Time Zone resolves to UTC. Use UTC Time Zone Mode.',
+	READ_ONLY: 'The calendar event is read-only because its time representation is unsupported.',
 	NO_CHANGES: 'The calendar event patch does not contain any changes.',
 	INVALID_START: 'Start must be a valid date and time with whole-second precision.',
 	INVALID_END: 'End must be a valid date and time with whole-second precision.',
@@ -366,6 +394,34 @@ function isValidXmlText(value: string): boolean {
 }
 
 function eventJson(event: CalendarEvent): IDataObject {
+	const legacy = event as unknown as {
+		readonly calendarUrl: string;
+		readonly resourceUrl: string;
+		readonly etag?: string;
+		readonly uid: string;
+		readonly summary?: string;
+		readonly description?: string;
+		readonly location?: string;
+		readonly url?: string;
+		readonly start?: string;
+		readonly end?: string;
+		readonly timeMode?: string;
+		readonly accessMode?: string;
+	};
+	if (legacy.timeMode === undefined || legacy.accessMode === undefined) {
+		return {
+			calendarUrl: legacy.calendarUrl,
+			resourceUrl: legacy.resourceUrl,
+			...(legacy.etag === undefined ? {} : { etag: legacy.etag }),
+			uid: legacy.uid,
+			...(legacy.summary === undefined ? {} : { summary: legacy.summary }),
+			...(legacy.description === undefined ? {} : { description: legacy.description }),
+			...(legacy.location === undefined ? {} : { location: legacy.location }),
+			...(legacy.url === undefined ? {} : { url: legacy.url }),
+			...(legacy.start === undefined ? {} : { start: legacy.start }),
+			...(legacy.end === undefined ? {} : { end: legacy.end }),
+		};
+	}
 	return {
 		calendarUrl: event.calendarUrl,
 		resourceUrl: event.resourceUrl,
@@ -378,11 +434,18 @@ function eventJson(event: CalendarEvent): IDataObject {
 		timeMode: event.timeMode,
 		accessMode: event.accessMode,
 		...(event.timeMode === 'timed'
-			? { start: event.start, end: event.end }
+			? {
+					start: event.start,
+					end: event.end,
+					...(event.timeZoneMode === undefined ? {} : { timeZoneMode: event.timeZoneMode }),
+					...(event.timeZone === undefined ? {} : { timeZone: event.timeZone }),
+					...(event.startLocal === undefined ? {} : { startLocal: event.startLocal }),
+					...(event.endLocal === undefined ? {} : { endLocal: event.endLocal }),
+				}
 			: event.timeMode === 'allDay'
 				? { startDate: event.startDate, endDate: event.endDate }
 				: { readOnlyReason: event.readOnlyReason }),
-		...(event.extensions === undefined ? {} : { extensions: event.extensions }),
+		...(event.extensions === undefined ? {} : { extensions: event.extensions as IDataObject }),
 	};
 }
 
@@ -615,6 +678,9 @@ function eventCreateSerializationFailure(error: CalDavICalendarSerializeError): 
 }
 
 function eventCreateFailure(error: unknown): EventCreateFailure {
+	if (error instanceof CalDavTimeZoneReferenceError) {
+		return { message: error.message, configuration: false };
+	}
 	if (error instanceof CalDavCalendarEventCreateError) {
 		switch (error.code) {
 			case CalendarEventCreateFailureCode.RESOURCE_NAME_TOO_LONG:
@@ -742,6 +808,9 @@ function eventUpdateFailure(error: unknown): EventUpdateFailure {
 		return { message: READ_ONLY_EVENT_UPDATE_MESSAGE, configuration: true };
 	}
 	if (error instanceof CalDavCalendarEventUpdateError) {
+		if (error.code === CalendarEventUpdateFailureCode.READ_ONLY) {
+			return { message: EVENT_UPDATE_MESSAGES.READ_ONLY, configuration: false };
+		}
 		if (error.code === CalendarEventUpdateFailureCode.CONFIRMATION_FAILED) {
 			return {
 				message: EVENT_UPDATE_MESSAGES.CONFIRMATION,
@@ -1117,6 +1186,24 @@ function eventCreateInput(
 ): CalendarEventCreateInput | string {
 	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
 	if (calendarUrl === undefined) return EVENT_CREATE_MESSAGES.INVALID_CALENDAR_URL;
+	const timeZoneMode = nodeParameter(execution, 'timeZoneMode', itemIndex) ?? 'utc';
+	let timeZone: CalendarEventTimeZone;
+	if (timeZoneMode === 'utc') {
+		timeZone = { timeZoneMode: 'utc' };
+	} else if (timeZoneMode === 'iana') {
+		const value = nodeParameter(execution, 'timeZone', itemIndex);
+		try {
+			if (typeof value !== 'string') return EVENT_CREATE_MESSAGES.INVALID_TIME_ZONE;
+			timeZone = { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(value) };
+		} catch (error) {
+			return error instanceof CalDavIanaTimeZoneError &&
+				error.code === CalDavIanaTimeZoneErrorCode.UTC_EQUIVALENT
+				? EVENT_CREATE_MESSAGES.UTC_TIME_ZONE
+				: EVENT_CREATE_MESSAGES.INVALID_TIME_ZONE;
+		}
+	} else {
+		return EVENT_CREATE_MESSAGES.INVALID_TIME_ZONE_MODE;
+	}
 
 	const uidValue = nodeParameter(execution, 'uid', itemIndex);
 	if (typeof uidValue !== 'string' || !isValidICalendarText(uidValue)) {
@@ -1126,7 +1213,7 @@ function eventCreateInput(
 		return EVENT_CREATE_MESSAGES.RESOURCE_NAME_TOO_LONG;
 	}
 
-	const timeMode = nodeParameter(execution, 'timeMode', itemIndex);
+	const timeMode = nodeParameter(execution, 'timeMode', itemIndex) ?? 'timed';
 	if (timeMode !== 'timed' && timeMode !== 'allDay') {
 		return EVENT_CREATE_MESSAGES.INVALID_TIME_MODE;
 	}
@@ -1142,7 +1229,12 @@ function eventCreateInput(
 	}
 
 	let timeInput:
-		| { readonly timeMode: 'timed'; readonly start: Date; readonly end: Date }
+		| {
+				readonly timeMode: 'timed';
+				readonly start: Date;
+				readonly end: Date;
+				readonly timeZone: CalendarEventTimeZone;
+		  }
 		| {
 				readonly timeMode: 'allDay';
 				readonly startDate: CalendarDateString;
@@ -1154,7 +1246,22 @@ function eventCreateInput(
 		const end = createDateTimeInstant(endValue);
 		if (end === undefined) return EVENT_CREATE_MESSAGES.INVALID_END;
 		if (end.getTime() <= start.getTime()) return EVENT_CREATE_MESSAGES.INVALID_RANGE;
-		timeInput = { timeMode, start, end };
+		if (timeZone.timeZoneMode === 'iana') {
+			const projectedStart = projectInstantInTimeZone(start, timeZone.timeZone);
+			if (
+				resolveLocalDateTimeInTimeZone(projectedStart, timeZone.timeZone).getTime() !==
+				start.getTime()
+			) {
+				return EVENT_CREATE_MESSAGES.UNREPRESENTABLE_START;
+			}
+			const projectedEnd = projectInstantInTimeZone(end, timeZone.timeZone);
+			if (
+				resolveLocalDateTimeInTimeZone(projectedEnd, timeZone.timeZone).getTime() !== end.getTime()
+			) {
+				return EVENT_CREATE_MESSAGES.UNREPRESENTABLE_END;
+			}
+		}
+		timeInput = { timeMode, start, end, timeZone };
 	} else {
 		const startDate = workflowCalendarDate(execution, startDateValue);
 		if (startDate === undefined) return EVENT_CREATE_MESSAGES.INVALID_START_DATE;
@@ -1302,6 +1409,7 @@ function eventUpdatePatch(
 	const keys = Object.keys(descriptors);
 	if (keys.length === 0) return EVENT_UPDATE_MESSAGES.NO_CHANGES;
 	const allowed = new Set([
+		'timeZone',
 		'start',
 		'end',
 		'startDate',
@@ -1322,13 +1430,17 @@ function eventUpdatePatch(
 	if (
 		(timeMode === 'timed' &&
 			(descriptors.startDate !== undefined || descriptors.endDate !== undefined)) ||
-		(timeMode === 'allDay' && (descriptors.start !== undefined || descriptors.end !== undefined))
+		(timeMode === 'allDay' &&
+			(descriptors.timeZone !== undefined ||
+				descriptors.start !== undefined ||
+				descriptors.end !== undefined))
 	) {
 		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
 	}
 
 	const patch: {
 		timeMode: 'timed' | 'allDay';
+		timeZone?: { readonly kind: 'set'; readonly value: CalendarEventTimeZone };
 		start?: { readonly kind: 'set'; readonly value: Date };
 		end?: { readonly kind: 'set'; readonly value: Date };
 		startDate?: { readonly kind: 'set'; readonly value: string };
@@ -1338,6 +1450,36 @@ function eventUpdatePatch(
 		location?: OptionalFieldPatch<string>;
 		url?: OptionalFieldPatch<string>;
 	} = { timeMode };
+	if (descriptors.timeZone !== undefined) {
+		const outer = descriptors.timeZone.value;
+		if (typeof outer !== 'object' || outer === null || Array.isArray(outer)) {
+			return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
+		}
+		const change = (outer as { readonly change?: unknown }).change;
+		if (typeof change !== 'object' || change === null || Array.isArray(change)) {
+			return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
+		}
+		const mode = (change as { readonly timeZoneMode?: unknown }).timeZoneMode;
+		if (mode === 'utc') {
+			patch.timeZone = { kind: 'set', value: { timeZoneMode: 'utc' } };
+		} else if (mode === 'iana') {
+			const value = (change as { readonly timeZone?: unknown }).timeZone;
+			try {
+				if (typeof value !== 'string') return EVENT_UPDATE_MESSAGES.INVALID_TIME_ZONE;
+				patch.timeZone = {
+					kind: 'set',
+					value: { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(value) },
+				};
+			} catch (error) {
+				return error instanceof CalDavIanaTimeZoneError &&
+					error.code === CalDavIanaTimeZoneErrorCode.UTC_EQUIVALENT
+					? EVENT_UPDATE_MESSAGES.UTC_TIME_ZONE
+					: EVENT_UPDATE_MESSAGES.INVALID_TIME_ZONE;
+			}
+		} else {
+			return EVENT_UPDATE_MESSAGES.INVALID_TIME_ZONE_MODE;
+		}
+	}
 	if (descriptors.start !== undefined) {
 		const start = createDateTimeInstant(descriptors.start.value);
 		if (start === undefined) return EVENT_UPDATE_MESSAGES.INVALID_START;
@@ -1438,7 +1580,7 @@ function eventUpdateInput(
 		return EVENT_UPDATE_MESSAGES.INVALID_ETAG;
 	}
 	if (etag !== undefined && typeof etag !== 'string') return EVENT_UPDATE_MESSAGES.INVALID_ETAG;
-	const timeMode = nodeParameter(execution, 'timeMode', itemIndex);
+	const timeMode = nodeParameter(execution, 'timeMode', itemIndex) ?? 'timed';
 	if (timeMode !== 'timed' && timeMode !== 'allDay') {
 		return EVENT_UPDATE_MESSAGES.INVALID_TIME_MODE;
 	}
@@ -1708,10 +1850,50 @@ function asJson(collection: CalendarCollection): IDataObject {
 	return collection as unknown as IDataObject;
 }
 
+async function anonymousTimeZoneRequest(
+	execution: IExecuteFunctions,
+	request: TimeZoneDistributionRequestInput,
+) {
+	const helpers = execution.helpers as unknown as {
+		readonly httpRequest: (options: unknown) => Promise<unknown>;
+	};
+	const result = (await helpers.httpRequest({
+		method: request.method,
+		url: request.url,
+		headers: request.headers,
+		disableFollowRedirect: true,
+		returnFullResponse: true,
+		encoding: 'arraybuffer',
+	})) as {
+		readonly statusCode?: unknown;
+		readonly headers?: unknown;
+		readonly body?: unknown;
+	};
+	return {
+		statusCode: typeof result.statusCode === 'number' ? result.statusCode : 0,
+		headers:
+			typeof result.headers === 'object' && result.headers !== null
+				? (result.headers as Readonly<Record<string, string | readonly string[]>>)
+				: {},
+		effectiveUrl: request.url,
+		body: Buffer.isBuffer(result.body)
+			? result.body
+			: Buffer.from(typeof result.body === 'string' ? result.body : new Uint8Array(0)),
+	};
+}
+
 export class CalDav implements INodeType {
 	methods = {
 		credentialTest: { testCalDavApiCredentials },
 		listSearch: { searchCalendars },
+		loadOptions: {
+			async getIanaTimeZones() {
+				return listCanonicalIanaTimeZones().map((timeZone) => ({
+					name: timeZone,
+					value: timeZone,
+				}));
+			},
+		},
 	};
 
 	description: INodeTypeDescription = {
@@ -1890,6 +2072,42 @@ export class CalDav implements INodeType {
 				default: 'timed',
 				displayOptions: {
 					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+				},
+			},
+			{
+				displayName: 'Time Zone Mode',
+				name: 'timeZoneMode',
+				type: 'options',
+				required: true,
+				default: 'utc',
+				options: [
+					{ name: 'UTC', value: 'utc' },
+					{ name: 'IANA', value: 'iana' },
+				],
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						timeMode: ['timed'],
+					},
+				},
+			},
+			{
+				// eslint-disable-next-line n8n-nodes-base/node-param-display-name-wrong-for-dynamic-options -- issue-42-contract-r2 fixes this exact workflow-facing label.
+				displayName: 'Time Zone',
+				name: 'timeZone',
+				// eslint-disable-next-line n8n-nodes-base/node-param-description-missing-from-dynamic-options -- the accepted contract intentionally keeps this descriptor minimal.
+				type: 'options',
+				typeOptions: { loadOptionsMethod: 'getIanaTimeZones' },
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						timeMode: ['timed'],
+						timeZoneMode: ['iana'],
+					},
 				},
 			},
 			{
@@ -2121,8 +2339,45 @@ export class CalDav implements INodeType {
 				displayOptions: {
 					show: { resource: [EVENT_RESOURCE], operation: [UPDATE_OPERATION] },
 				},
-				// eslint-disable-next-line n8n-nodes-base/node-param-collection-type-unsorted-items -- issue-37-contract-r2 requires Start, End, Summary, Description, Location, URL order.
+				// eslint-disable-next-line n8n-nodes-base/node-param-collection-type-unsorted-items -- issue-42-contract-r2 requires Time Zone, Start, End, Summary, Description, Location, URL order.
 				options: [
+					{
+						displayName: 'Time Zone',
+						name: 'timeZone',
+						type: 'fixedCollection',
+						typeOptions: { multipleValues: false },
+						default: {},
+						// eslint-disable-next-line n8n-nodes-base/node-param-collection-type-item-required -- selecting the atomic timezone patch requires a complete nested value.
+						required: true,
+						options: [
+							{
+								displayName: 'Change',
+								name: 'change',
+								values: [
+									{
+										displayName: 'Mode',
+										name: 'timeZoneMode',
+										type: 'options',
+										options: [
+											{ name: 'UTC', value: 'utc' },
+											{ name: 'IANA', value: 'iana' },
+										],
+										default: 'utc',
+									},
+									{
+										// eslint-disable-next-line n8n-nodes-base/node-param-display-name-wrong-for-dynamic-options -- issue-42-contract-r2 fixes this exact nested label.
+										displayName: 'IANA Time Zone',
+										name: 'timeZone',
+										// eslint-disable-next-line n8n-nodes-base/node-param-description-missing-from-dynamic-options -- the parent collection explains the atomic choice.
+										type: 'options',
+										typeOptions: { loadOptionsMethod: 'getIanaTimeZones' },
+										default: '',
+										displayOptions: { show: { timeZoneMode: ['iana'] } },
+									},
+								],
+							},
+						],
+					},
 					{
 						displayName: 'Start',
 						name: 'start',
@@ -2275,6 +2530,17 @@ export class CalDav implements INodeType {
 		const returnData: INodeExecutionData[] = [];
 		let getTransport: CalDavTransport | undefined;
 		let getProvider: CalDavProviderAdapter | undefined;
+		let timeZoneContext: CalendarEventTimeZoneExecutionContext | undefined;
+		let hasIanaEventCreate: boolean | undefined;
+		const ensureTimeZoneContext = (
+			transport: CalDavTransport,
+		): CalendarEventTimeZoneExecutionContext => {
+			timeZoneContext ??= createCalendarEventTimeZoneExecutionContext({
+				transport,
+				request: (request) => anonymousTimeZoneRequest(this, request),
+			});
+			return timeZoneContext;
+		};
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
 			let resource: unknown;
@@ -2322,6 +2588,11 @@ export class CalDav implements INodeType {
 			}
 
 			if (isEventCreate) {
+				if (hasIanaEventCreate === undefined) {
+					hasIanaEventCreate = items.some(
+						(_item, index) => (nodeParameter(this, 'timeZoneMode', index) ?? 'utc') === 'iana',
+					);
+				}
 				const input = eventCreateInput(this, itemIndex);
 				if (typeof input === 'string') {
 					if (this.continueOnFail()) {
@@ -2335,7 +2606,15 @@ export class CalDav implements INodeType {
 					if (getTransport === undefined) {
 						getTransport = await createN8nCalDavTransport(this);
 					}
-					const created = await createCalendarEvent(getTransport, input, () => new Date());
+					if (hasIanaEventCreate && timeZoneContext === undefined) {
+						timeZoneContext = ensureTimeZoneContext(getTransport);
+					}
+					const created = await createCalendarEvent(
+						getTransport,
+						input,
+						() => new Date(),
+						timeZoneContext,
+					);
 					returnData.push({ json: eventJson(created), pairedItem: { item: itemIndex } });
 				} catch (error) {
 					const failure = eventCreateFailure(error);
@@ -2368,10 +2647,12 @@ export class CalDav implements INodeType {
 					if (getTransport === undefined) {
 						getTransport = await createN8nCalDavTransport(this);
 					}
-					const results = await queryCalendarEventsByTimeRange(getTransport, input.calendarUrl, {
-						start: input.start,
-						end: input.end,
-					});
+					const results = await queryCalendarEventsByTimeRange(
+						getTransport,
+						input.calendarUrl,
+						{ start: input.start, end: input.end },
+						ensureTimeZoneContext(getTransport),
+					);
 					const selected = input.limit === undefined ? results : results.slice(0, input.limit);
 					const projected = selected.map((result) => ({
 						json: eventJson(result.event),
@@ -2414,7 +2695,12 @@ export class CalDav implements INodeType {
 					if (getTransport === undefined) {
 						getTransport = await createN8nCalDavTransport(this);
 					}
-					const updated = await updateCalendarEvent(getTransport, input, () => new Date());
+					const updated = await updateCalendarEvent(
+						getTransport,
+						input,
+						() => new Date(),
+						ensureTimeZoneContext(getTransport),
+					);
 					returnData.push({ json: eventJson(updated), pairedItem: { item: itemIndex } });
 				} catch (error) {
 					const failure = eventUpdateFailure(error);
@@ -2706,8 +2992,12 @@ export class CalDav implements INodeType {
 					}
 					const result =
 						resourceUrl === undefined
-							? await resolveCalendarEventByUid(getTransport, calendarUrl, uid!)
-							: await getCalendarEventByResourceUrl(getTransport, calendarUrl, resourceUrl);
+							? await resolveCalendarEventByUid(getTransport, calendarUrl, uid!, {
+									timeZoneContext: ensureTimeZoneContext(getTransport),
+								})
+							: await getCalendarEventByResourceUrl(getTransport, calendarUrl, resourceUrl, {
+									timeZoneContext: ensureTimeZoneContext(getTransport),
+								});
 					returnData.push({ json: eventJson(result.event), pairedItem: { item: itemIndex } });
 				} catch (error) {
 					const failure = eventGetFailure(error);

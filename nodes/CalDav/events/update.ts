@@ -16,6 +16,7 @@ import {
 	resolveCalendarEventByUid,
 } from './resolveByUid';
 import type { CalendarEvent } from '../icalendar/eventReadModel';
+import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type {
 	ICalendarComponent,
 	ICalendarEntry,
@@ -24,6 +25,7 @@ import type {
 	ICalendarResource,
 	ICalendarValue,
 } from '../icalendar/parser';
+import { parseICalendarResource } from '../icalendar/parser';
 import {
 	applyCalendarEventPatch,
 	CalDavCalendarEventPatchError,
@@ -31,6 +33,8 @@ import {
 } from '../icalendar/patcher';
 import type { CalendarEventPatch } from '../icalendar/patcher';
 import { serializeICalendarResource } from '../icalendar/serializer';
+import type { CalendarEventInstantProjector } from '../icalendar/serializer';
+import { projectInstantInTimeZone } from '../icalendar/timeZones';
 import { CalDavTransportError, CalDavTransportErrorCode } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import { normalizeCalendarCollectionUrl, validateAbsoluteHttpUrl } from '../transport/url';
@@ -56,6 +60,7 @@ export type UpdatedCalendarEvent = CalendarEvent & {
 export const CalendarEventUpdateFailureCode = Object.freeze({
 	INVALID_INPUT: 'INVALID_INPUT',
 	INVALID_CLOCK: 'INVALID_CLOCK',
+	READ_ONLY: 'READ_ONLY',
 	CONFIRMATION_FAILED: 'CONFIRMATION_FAILED',
 } as const);
 
@@ -65,6 +70,7 @@ export type CalendarEventUpdateFailureCode =
 const ERROR_MESSAGES: Readonly<Record<CalendarEventUpdateFailureCode, string>> = {
 	INVALID_INPUT: 'The calendar event update input is invalid.',
 	INVALID_CLOCK: 'The calendar event clock is invalid.',
+	READ_ONLY: 'The calendar event is read-only because its time representation is unsupported.',
 	CONFIRMATION_FAILED: 'The event was updated, but its current state could not be verified.',
 };
 
@@ -289,10 +295,55 @@ function isPostPutMetadataFailure(error: unknown): boolean {
 	);
 }
 
+function directProperties(
+	component: ICalendarComponent,
+	name: string,
+): readonly ICalendarProperty[] {
+	const expected = name.toUpperCase();
+	return component.entries.filter(
+		(entry): entry is ICalendarProperty =>
+			entry.kind === 'property' && entry.name.toUpperCase() === expected,
+	);
+}
+
+function sourceTimeZoneId(master: ICalendarComponent): string | undefined {
+	const starts = directProperties(master, 'DTSTART');
+	const ends = directProperties(master, 'DTEND');
+	if (starts.length !== 1 || ends.length !== 1) return undefined;
+	const value = (property: ICalendarProperty): string | undefined => {
+		const parameters = property.parameters.filter(
+			(parameter) => parameter.name.toUpperCase() === 'TZID',
+		);
+		return parameters.length === 1 && parameters[0]!.values.length === 1
+			? parameters[0]!.values[0]!.value
+			: undefined;
+	};
+	const start = value(starts[0]!);
+	const end = value(ends[0]!);
+	return start !== undefined && start === end ? start : undefined;
+}
+
+function embeddedTimeZoneDefinition(
+	resource: ICalendarResource,
+	timeZoneId: string,
+): ICalendarComponent | undefined {
+	const matches = resource.calendar.entries.filter((entry): entry is ICalendarComponent => {
+		if (entry.kind !== 'component' || entry.name.toUpperCase() !== 'VTIMEZONE') return false;
+		const identifiers = directProperties(entry, 'TZID');
+		return (
+			identifiers.length === 1 &&
+			identifiers[0]!.value.textValues?.length === 1 &&
+			identifiers[0]!.value.textValues[0] === timeZoneId
+		);
+	});
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
 export async function updateCalendarEvent(
 	transport: CalDavTransport,
 	input: CalendarEventUpdateInput,
 	clock: CalendarEventUpdateClock,
+	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 ): Promise<UpdatedCalendarEvent> {
 	const snapshot = snapshotInput(input);
 	const current =
@@ -301,10 +352,14 @@ export async function updateCalendarEvent(
 					transport,
 					snapshot.calendarUrl,
 					snapshot.identifier.resourceUrl,
-					{ allowMissingEtag: true },
+					{
+						allowMissingEtag: true,
+						...(timeZoneContext === undefined ? {} : { timeZoneContext }),
+					},
 				)
 			: await resolveCalendarEventByUid(transport, snapshot.calendarUrl, snapshot.identifier.uid, {
 					allowMissingEtag: true,
+					timeZoneContext,
 				});
 	assertSnapshotResourceUrl(
 		snapshot.identifier,
@@ -314,8 +369,73 @@ export async function updateCalendarEvent(
 		current.event.uid,
 	);
 	if (current.event.accessMode === 'readOnly') {
-		throw new Error(
-			'The calendar event is read-only because its time representation is unsupported.',
+		throw new CalDavCalendarEventUpdateError(CalendarEventUpdateFailureCode.READ_ONLY);
+	}
+	const timedCurrent = current.event.timeMode === 'timed' ? current.event : undefined;
+	const patchTimeMode = snapshot.patch.timeMode ?? current.event.timeMode;
+	const requestedTimeZone =
+		patchTimeMode === 'timed' && 'timeZone' in snapshot.patch
+			? snapshot.patch.timeZone?.value
+			: undefined;
+	const requestedStart = 'start' in snapshot.patch ? snapshot.patch.start : undefined;
+	const requestedEnd = 'end' in snapshot.patch ? snapshot.patch.end : undefined;
+	const hasTimePatch =
+		patchTimeMode === 'timed' && (requestedStart !== undefined || requestedEnd !== undefined);
+	const currentIanaTimeZone =
+		timedCurrent?.timeZoneMode === 'iana' && timedCurrent.timeZone !== undefined
+			? timedCurrent.timeZone
+			: undefined;
+	const implicitCurrentTimeZone =
+		requestedTimeZone === undefined && hasTimePatch && currentIanaTimeZone !== undefined
+			? ({ timeZoneMode: 'iana', timeZone: currentIanaTimeZone } as const)
+			: undefined;
+	const effectiveTimeZone = requestedTimeZone ?? implicitCurrentTimeZone;
+	const originalTimeZoneId =
+		currentIanaTimeZone !== undefined ? sourceTimeZoneId(current.context.master) : undefined;
+	const embeddedDefinition =
+		currentIanaTimeZone !== undefined && originalTimeZoneId !== undefined
+			? embeddedTimeZoneDefinition(current.context.resource, originalTimeZoneId)
+			: undefined;
+	let projectInstant: CalendarEventInstantProjector | undefined;
+	if (effectiveTimeZone?.timeZoneMode === 'iana') {
+		const canUseEmbedded =
+			embeddedDefinition !== undefined &&
+			currentIanaTimeZone !== undefined &&
+			effectiveTimeZone.timeZone === currentIanaTimeZone;
+		if (canUseEmbedded) {
+			const definition = embeddedDefinition;
+			projectInstant = (instant, selectedTimeZone) =>
+				projectInstantInTimeZone(instant, selectedTimeZone, definition);
+		} else {
+			if (timeZoneContext === undefined) {
+				throw new CalDavCalendarEventPatchError(
+					CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
+					'timeZone',
+				);
+			}
+			const reference = await timeZoneContext.resolveReference(
+				snapshot.calendarUrl,
+				effectiveTimeZone.timeZone,
+			);
+			const referenceResource = parseICalendarResource(Buffer.from(reference.calendarData, 'utf8'));
+			const definition = referenceResource.calendar.entries.find(
+				(entry): entry is ICalendarComponent =>
+					entry.kind === 'component' && entry.name === 'VTIMEZONE',
+			);
+			if (definition === undefined) {
+				throw new CalDavCalendarEventPatchError(
+					CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
+					'timeZone',
+				);
+			}
+			projectInstant = (instant, selectedTimeZone) =>
+				projectInstantInTimeZone(instant, selectedTimeZone, definition);
+		}
+	}
+	if (implicitCurrentTimeZone !== undefined && originalTimeZoneId === undefined) {
+		throw new CalDavCalendarEventPatchError(
+			CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
+			'timeZone',
 		);
 	}
 
@@ -326,9 +446,37 @@ export async function updateCalendarEvent(
 	}
 
 	const modifiedAt = updateClockValue(clock);
+	const zoneChanges =
+		requestedTimeZone !== undefined &&
+		timedCurrent !== undefined &&
+		(requestedTimeZone.timeZoneMode !== timedCurrent.timeZoneMode ||
+			(requestedTimeZone.timeZoneMode === 'iana' &&
+				requestedTimeZone.timeZone !== timedCurrent.timeZone));
+	const needsAtomicBounds = zoneChanges || (effectiveTimeZone !== undefined && hasTimePatch);
+	const effectivePatch: CalendarEventPatch = needsAtomicBounds
+		? {
+				...snapshot.patch,
+				timeMode: 'timed',
+				...(!('timeZone' in snapshot.patch) && implicitCurrentTimeZone !== undefined
+					? { timeZone: { kind: 'set' as const, value: implicitCurrentTimeZone } }
+					: {}),
+				...(patchTimeMode === 'timed' && requestedStart === undefined
+					? { start: { kind: 'set' as const, value: new Date(timedCurrent!.start) } }
+					: {}),
+				...(patchTimeMode === 'timed' && requestedEnd === undefined
+					? { end: { kind: 'set' as const, value: new Date(timedCurrent!.end) } }
+					: {}),
+			}
+		: ({ ...snapshot.patch, timeMode: patchTimeMode } as CalendarEventPatch);
 	let patchedResource: ICalendarResource;
 	try {
-		patchedResource = applyCalendarEventPatch(current.context, snapshot.patch, modifiedAt);
+		patchedResource = applyCalendarEventPatch(
+			current.context,
+			effectivePatch,
+			modifiedAt,
+			projectInstant,
+			implicitCurrentTimeZone === undefined ? undefined : originalTimeZoneId,
+		);
 	} catch (error) {
 		if (
 			error instanceof CalDavCalendarEventPatchError &&
@@ -357,11 +505,19 @@ export async function updateCalendarEvent(
 	}
 
 	try {
-		const confirmed = await getCalendarEventByResourceUrl(
-			transport,
-			current.event.calendarUrl,
-			updatedResourceUrl,
-		);
+		const confirmed =
+			timeZoneContext === undefined
+				? await getCalendarEventByResourceUrl(
+						transport,
+						current.event.calendarUrl,
+						updatedResourceUrl,
+					)
+				: await getCalendarEventByResourceUrl(
+						transport,
+						current.event.calendarUrl,
+						updatedResourceUrl,
+						{ timeZoneContext },
+					);
 		if (
 			confirmed.event.etag === undefined ||
 			normalizeCalendarCollectionUrl(confirmed.event.calendarUrl) !==
@@ -373,6 +529,7 @@ export async function updateCalendarEvent(
 		) {
 			return confirmationFailed();
 		}
+		if (confirmed.event.accessMode === 'readOnly') return confirmationFailed();
 
 		return Object.freeze({ ...confirmed.event, etag: confirmed.event.etag });
 	} catch (error) {

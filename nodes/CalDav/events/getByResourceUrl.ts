@@ -1,5 +1,6 @@
-import { mapCalendarEventResource } from '../icalendar/eventReadModel';
+import { mapCalendarEventResourceWithTimeZoneContext } from '../icalendar/eventReadModel';
 import type { CalendarEventReadResult } from '../icalendar/eventReadModel';
+import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import { parseICalendarResource } from '../icalendar/parser';
 import { CalDavMethod } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
@@ -58,6 +59,7 @@ function isDirectCalendarChild(
 
 export interface CalendarEventResourceGetOptions {
 	readonly allowMissingEtag?: boolean;
+	readonly timeZoneContext?: CalendarEventTimeZoneExecutionContext;
 }
 
 export async function getCalendarEventByResourceUrl(
@@ -95,10 +97,13 @@ export async function getCalendarEventByResourceUrl(
 	}
 
 	const resource = parseICalendarResource(response.body);
-	return mapCalendarEventResource({
-		calendarUrl: normalizedCalendarUrl,
-		resourceUrl: effectiveResourceUrl,
-		...(response.etag === undefined ? {} : { etag: response.etag }),
-		resource,
-	});
+	return await mapCalendarEventResourceWithTimeZoneContext(
+		{
+			calendarUrl: normalizedCalendarUrl,
+			resourceUrl: effectiveResourceUrl,
+			...(response.etag === undefined ? {} : { etag: response.etag }),
+			resource,
+		},
+		options.timeZoneContext,
+	);
 }

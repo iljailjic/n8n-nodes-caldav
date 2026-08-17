@@ -1,5 +1,6 @@
-import { mapCalendarEventResource } from '../icalendar/eventReadModel';
+import { mapCalendarEventResourceWithTimeZoneContext } from '../icalendar/eventReadModel';
 import type { CalendarEventReadResult } from '../icalendar/eventReadModel';
+import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import { parseICalendarResource } from '../icalendar/parser';
 import { CalDavMethod } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
@@ -114,6 +115,7 @@ export async function queryCalendarEventsByTimeRange(
 	transport: CalDavTransport,
 	calendarUrl: AbsoluteHttpUrl,
 	range: CalendarTimeRangeQueryInput,
+	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 ): Promise<readonly CalendarEventReadResult[]> {
 	const body = buildCalendarTimeRangeQueryReport(range);
 	const response = await transport.request({
@@ -164,12 +166,15 @@ export async function queryCalendarEventsByTimeRange(
 	for (const [resourceUrl, candidate] of candidates) {
 		const resource = parseICalendarResource(Buffer.from(candidate.calendarData, 'utf8'));
 		results.push(
-			mapCalendarEventResource({
-				calendarUrl,
-				resourceUrl,
-				...(candidate.etag === undefined ? {} : { etag: candidate.etag }),
-				resource,
-			}),
+			await mapCalendarEventResourceWithTimeZoneContext(
+				{
+					calendarUrl,
+					resourceUrl,
+					...(candidate.etag === undefined ? {} : { etag: candidate.etag }),
+					resource,
+				},
+				timeZoneContext,
+			),
 		);
 	}
 

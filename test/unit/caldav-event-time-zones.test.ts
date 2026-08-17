@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	createCalendarEventPreservationContext,
 	mapCalendarEventResource,
+	mapCalendarEventResourceWithTimeZoneContext,
 } from '../../nodes/CalDav/icalendar/eventReadModel';
 import { parseICalendarResource } from '../../nodes/CalDav/icalendar/parser';
 import { applyCalendarEventPatch } from '../../nodes/CalDav/icalendar/patcher';
@@ -13,13 +14,18 @@ import {
 	serializeICalendarResource,
 } from '../../nodes/CalDav/icalendar/serializer';
 import type { BasicTimedEventSerializationInput } from '../../nodes/CalDav/icalendar/serializer';
-import { canonicalizeIanaTimeZone } from '../../nodes/CalDav/icalendar/timeZones';
+import {
+	canonicalizeIanaTimeZone,
+	projectInstantInTimeZone,
+} from '../../nodes/CalDav/icalendar/timeZones';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 import {
 	PRAGUE_VTIMEZONE,
 	READ_ONLY_EVENT_ORACLE,
 	SUPPORTED_EMBEDDED_IANA_EVENT,
+	SUPPORTED_BARE_IANA_EVENT,
 	SUPPORTED_UTC_EVENT,
+	TZDIST_ZONE_RESPONSE,
 	UNSUPPORTED_UNREFERENCED_VTIMEZONE,
 	timedEventIcs,
 } from './fixtures/time-zones/synthetic-time-zone-fixtures';
@@ -138,6 +144,68 @@ describe('timed event serialization and projection', () => {
 		expect(event.start).toBe('2040-07-15T07:00:00Z');
 		expect(event.end).toBe('2040-07-15T08:00:00Z');
 	});
+
+	it('projects authored wire values through authoritative referenced rules without embedding them', () => {
+		const resource = parse(SUPPORTED_EMBEDDED_IANA_EVENT);
+		const definition = resource.calendar.entries.find(
+			(entry) => entry.kind === 'component' && entry.name === 'VTIMEZONE',
+		);
+		expect(definition).toBeDefined();
+		const timeZone = canonicalizeIanaTimeZone('Europe/Prague');
+		const serialized = serializeBasicTimedEvent(
+			basicTimedInput({
+				start: new Date('2040-07-15T07:00:00Z'),
+				end: new Date('2040-07-15T08:00:00Z'),
+				timeZone: { timeZoneMode: 'iana', timeZone },
+			}),
+			(instant, selectedTimeZone) =>
+				projectInstantInTimeZone(instant, selectedTimeZone, definition!),
+		);
+		expect(serialized).toContain(
+			'DTSTART;TZID=Europe/Prague:20400715T100000\r\nDTEND;TZID=Europe/Prague:20400715T110000',
+		);
+		expect(serialized).not.toContain('BEGIN:VTIMEZONE');
+	});
+
+	it('resolves a bare IANA read through the optional execution context and uses referenced rules', async () => {
+		const result = await mapCalendarEventResourceWithTimeZoneContext(
+			{
+				calendarUrl: CALENDAR_URL,
+				resourceUrl: RESOURCE_URL,
+				resource: parse(SUPPORTED_BARE_IANA_EVENT),
+			},
+			{
+				resolveReference: async () => ({
+					timeZone: canonicalizeIanaTimeZone('Europe/Prague'),
+					etag: '"synthetic-reference"',
+					calendarData: TZDIST_ZONE_RESPONSE,
+					ruleSource: 'vtimezone',
+				}),
+			},
+		);
+		expect(result.event).toMatchObject({
+			accessMode: 'editable',
+			timeZoneMode: 'iana',
+			start: '2040-01-15T08:00:00Z',
+			end: '2040-01-15T09:00:00Z',
+		});
+	});
+
+	it('keeps a bare IANA read safe and read-only when reference resolution fails', async () => {
+		const result = await mapCalendarEventResourceWithTimeZoneContext(
+			{
+				calendarUrl: CALENDAR_URL,
+				resourceUrl: RESOURCE_URL,
+				resource: parse(SUPPORTED_BARE_IANA_EVENT),
+			},
+			{ resolveReference: async () => Promise.reject(new Error('synthetic failure')) },
+		);
+		expect(result.event).toMatchObject({
+			timeMode: 'unsupported',
+			accessMode: 'readOnly',
+			readOnlyReason: 'unsupportedTimeRepresentation',
+		});
+	});
 });
 
 describe('safe unsupported and hard-failure boundaries', () => {
@@ -191,13 +259,10 @@ describe('atomic timezone updates and preservation', () => {
 		const source = timedEventIcs(
 			'DTSTART;TZID=US/Eastern:20400115T090000',
 			'DTEND;TZID=US/Eastern:20400115T100000',
-			[
-				PRAGUE_VTIMEZONE.replaceAll('Europe/Prague', 'US/Eastern'),
-				'BEGIN:VTODO\r\nUID:unrelated\r\nEND:VTODO',
-			],
+			[PRAGUE_VTIMEZONE.replaceAll('Europe/Prague', 'US/Eastern')],
 		).replace(
-			'SUMMARY:Synthetic event',
-			'SUMMARY:Synthetic event\r\nRRULE:FREQ=DAILY;COUNT=2\r\nX-UNKNOWN:preserve\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nEND:VALARM',
+			'SUMMARY:Synthetic event\r\nX-SYNTHETIC-PRESERVE:opaque-value',
+			'SUMMARY:Synthetic event\r\nRRULE:FREQ=DAILY;COUNT=2\r\nX-UNKNOWN:preserve\r\nX-SYNTHETIC-PRESERVE:opaque-value\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nEND:VALARM',
 		);
 		const resource = parse(source);
 		const result = mapCalendarEventResource({
@@ -249,5 +314,31 @@ describe('atomic timezone updates and preservation', () => {
 				new Date('2040-01-02T00:00:00Z'),
 			),
 		).toThrow(/does not contain any changes/i);
+	});
+
+	it('keeps one coherent IANA representation when the same zone and bounds are patched together', () => {
+		const resource = parse(SUPPORTED_EMBEDDED_IANA_EVENT);
+		const context = createCalendarEventPreservationContext(resource);
+		const definition = resource.calendar.entries.find(
+			(entry) => entry.kind === 'component' && entry.name === 'VTIMEZONE',
+		);
+		expect(definition).toBeDefined();
+		const timeZone = canonicalizeIanaTimeZone('Europe/Prague');
+		const patched = applyCalendarEventPatch(
+			context,
+			{
+				timeZone: { kind: 'set', value: { timeZoneMode: 'iana', timeZone } },
+				start: { kind: 'set', value: new Date('2040-07-15T06:00:00Z') },
+				end: { kind: 'set', value: new Date('2040-07-15T08:00:00Z') },
+			},
+			new Date('2040-01-02T00:00:00Z'),
+			(instant, selectedTimeZone) =>
+				projectInstantInTimeZone(instant, selectedTimeZone, definition!),
+		);
+		const serialized = serializeICalendarResource(patched);
+		expect(serialized).toContain(
+			'DTSTART;TZID=Europe/Prague:20400715T090000\r\nDTEND;TZID=Europe/Prague:20400715T110000',
+		);
+		expect(serialized).not.toMatch(/DT(?:START|END):\d{8}T\d{6}Z/);
 	});
 });

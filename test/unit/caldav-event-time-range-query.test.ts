@@ -396,6 +396,9 @@ describe('event resource property selection and mapping', () => {
 			accessMode: 'editable',
 			start: '2026-01-02T10:00:00Z',
 			end: '2026-01-02T11:00:00Z',
+			timeZoneMode: 'utc',
+			startLocal: '2026-01-02T10:00:00',
+			endLocal: '2026-01-02T11:00:00',
 		});
 		expect(result[0]!.context.resource.originalIcs).toBe(ics.replaceAll('\r\n', '\n'));
 		expectDeeplyFrozen(result);
@@ -654,9 +657,10 @@ describe('recurrence, lower errors, protocol failures, and byte limits', () => {
 			CALENDAR_URL,
 			RANGE,
 		);
-
 		expect(result).toHaveLength(2);
-		expect(result.find(({ event }) => event.uid === 'private-tzid-sentinel')?.event).toMatchObject({
+		const unsupportedResult = result.find(({ event }) => event.uid === 'private-tzid-sentinel');
+
+		expect(unsupportedResult?.event).toMatchObject({
 			timeMode: 'unsupported',
 			accessMode: 'readOnly',
 			readOnlyReason: 'unsupportedTimeRepresentation',

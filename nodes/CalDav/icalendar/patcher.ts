@@ -3,6 +3,9 @@
 import { createCalendarEventPreservationContext } from './eventReadModel';
 import type { CalendarDateString, CalendarEventPreservationContext } from './eventReadModel';
 import { parseICalendarResource } from './parser';
+import type { CalendarEventInstantProjector } from './serializer';
+import { canonicalizeIanaTimeZone, projectInstantInTimeZone } from './timeZones';
+import type { CalendarEventTimeZone } from './timeZones';
 import type {
 	ICalendarComponent,
 	ICalendarEntry,
@@ -31,6 +34,7 @@ export type CalendarEventPatch = CalendarEventPatchCommon &
 				readonly timeMode: 'timed';
 				readonly start?: SetPatch<Date>;
 				readonly end?: SetPatch<Date>;
+				readonly timeZone?: SetPatch<CalendarEventTimeZone>;
 		  }
 		| {
 				readonly timeMode: 'allDay';
@@ -40,7 +44,15 @@ export type CalendarEventPatch = CalendarEventPatchCommon &
 	);
 
 export type CalendarEventPatchField =
-	'start' | 'end' | 'startDate' | 'endDate' | 'summary' | 'description' | 'location' | 'url';
+	| 'start'
+	| 'end'
+	| 'startDate'
+	| 'endDate'
+	| 'timeZone'
+	| 'summary'
+	| 'description'
+	| 'location'
+	| 'url';
 
 export const CalendarEventPatchErrorCode = Object.freeze({
 	INVALID_INPUT: 'INVALID_INPUT',
@@ -97,6 +109,7 @@ interface ValidatedOperation {
 	readonly text?: string;
 	readonly timestamp?: number;
 	readonly calendarDate?: CalendarDateString;
+	readonly timeZone?: CalendarEventTimeZone;
 }
 
 type ValidatedPatch = Partial<Readonly<Record<CalendarEventPatchField, ValidatedOperation>>> & {
@@ -108,6 +121,7 @@ const PATCH_FIELDS = [
 	'end',
 	'startDate',
 	'endDate',
+	'timeZone',
 	'summary',
 	'description',
 	'location',
@@ -120,6 +134,7 @@ const PROPERTY_NAMES: Readonly<Record<CalendarEventPatchField, string>> = {
 	end: 'DTEND',
 	startDate: 'DTSTART',
 	endDate: 'DTEND',
+	timeZone: 'DTSTART',
 	summary: 'SUMMARY',
 	description: 'DESCRIPTION',
 	location: 'LOCATION',
@@ -489,6 +504,25 @@ function validatePatchOperations(snapshot: Readonly<Record<string, unknown>>): V
 			validated[field] = { kind: 'set', timestamp: dateTimestamp(operation.value, field) };
 		} else if (field === 'startDate' || field === 'endDate') {
 			validated[field] = { kind: 'set', calendarDate: calendarDateValue(operation.value, field) };
+		} else if (field === 'timeZone') {
+			const descriptors = exactEnumerableRecord(operation.value, ['timeZoneMode']);
+			const ianaDescriptors = exactEnumerableRecord(operation.value, ['timeZoneMode', 'timeZone']);
+			if (descriptors?.timeZoneMode?.value === 'utc') {
+				validated[field] = { kind: 'set', timeZone: { timeZoneMode: 'utc' } };
+			} else if (
+				ianaDescriptors?.timeZoneMode?.value === 'iana' &&
+				typeof ianaDescriptors.timeZone?.value === 'string'
+			) {
+				validated[field] = {
+					kind: 'set',
+					timeZone: {
+						timeZoneMode: 'iana',
+						timeZone: canonicalizeIanaTimeZone(ianaDescriptors.timeZone.value),
+					},
+				};
+			} else {
+				fail('INVALID_INPUT', field);
+			}
 		} else {
 			if (typeof operation.value !== 'string') fail('INVALID_INPUT', field);
 			if (field === 'url') {
@@ -704,6 +738,8 @@ function parametersAreCompatible(
 
 function validateTouchedParameters(master: ICalendarComponent, patch: ValidatedPatch): void {
 	for (const field of PATCH_FIELDS) {
+		if (field === 'timeZone') continue;
+		if (patch.timeZone?.kind === 'set' && (field === 'start' || field === 'end')) continue;
 		if (patch[field]?.kind !== 'set') continue;
 		if (field === 'start' || field === 'end' || field === 'startDate' || field === 'endDate') {
 			continue;
@@ -836,6 +872,10 @@ function timePropertyMode(property: ICalendarProperty): EditableTimeMode | undef
 	return undefined;
 }
 
+function safeUtcTimeProperty(property: ICalendarProperty): boolean {
+	return timePropertyMode(property) === 'timed';
+}
+
 function conversionParametersAreSafe(property: ICalendarProperty): boolean {
 	return property.parameters.every((parameter) => asciiUpperCase(parameter.name) === 'VALUE');
 }
@@ -848,10 +888,13 @@ function planTimePatch(
 	const hasTimedEnd = patch.end?.kind === 'set';
 	const hasDateStart = patch.startDate?.kind === 'set';
 	const hasDateEnd = patch.endDate?.kind === 'set';
+	const hasTimeZone = patch.timeZone?.kind === 'set';
 	const hasTimed = hasTimedStart || hasTimedEnd;
 	const hasAllDay = hasDateStart || hasDateEnd;
-	if (hasTimed && hasAllDay) fail('INVALID_INPUT');
-	if (!hasTimed && !hasAllDay && patch.timeMode === undefined) {
+	if ((hasTimed && hasAllDay) || (hasTimeZone && (hasAllDay || patch.timeMode === 'allDay'))) {
+		fail('INVALID_INPUT');
+	}
+	if (!hasTimed && !hasAllDay && !hasTimeZone && patch.timeMode === undefined) {
 		return {
 			remoteMode: 'timed',
 			targetMode: 'timed',
@@ -859,13 +902,15 @@ function planTimePatch(
 			touchesTime: false,
 		};
 	}
-	const failureField: CalendarEventPatchField = hasTimed
-		? hasTimedStart
-			? 'start'
-			: 'end'
-		: hasDateStart
-			? 'startDate'
-			: 'endDate';
+	const failureField: CalendarEventPatchField = hasTimeZone
+		? 'timeZone'
+		: hasTimed
+			? hasTimedStart
+				? 'start'
+				: 'end'
+			: hasDateStart
+				? 'startDate'
+				: 'endDate';
 	const master = context.master;
 	const starts = directProperties(master, 'DTSTART');
 	const ends = directProperties(master, 'DTEND');
@@ -875,6 +920,27 @@ function planTimePatch(
 		directProperties(master, 'DURATION').length !== 0
 	) {
 		fail('UNSUPPORTED_TIME', failureField);
+	}
+	if (hasTimeZone) {
+		if (
+			directProperties(master, 'RRULE').length !== 0 ||
+			directProperties(master, 'RDATE').length !== 0 ||
+			directProperties(master, 'EXDATE').length !== 0 ||
+			context.exceptions.length !== 0 ||
+			((!hasTimedStart || !hasTimedEnd) &&
+				(!safeUtcTimeProperty(starts[0]!) || !safeUtcTimeProperty(ends[0]!)))
+		) {
+			fail('UNSUPPORTED_TIME', failureField);
+		}
+		const startKey = hasTimedStart
+			? utcDateTimeKey(formatUtcDateTime(patch.start!.timestamp!))
+			: utcDateTimeKey(starts[0]!.value.raw);
+		const endKey = hasTimedEnd
+			? utcDateTimeKey(formatUtcDateTime(patch.end!.timestamp!))
+			: utcDateTimeKey(ends[0]!.value.raw);
+		if (startKey === undefined || endKey === undefined) fail('UNSUPPORTED_TIME', failureField);
+		if (endKey <= startKey) fail('INVALID_TIME_RANGE');
+		return { remoteMode: 'timed', targetMode: 'timed', conversion: false, touchesTime: true };
 	}
 	const startMode = timePropertyMode(starts[0]!);
 	const endMode = timePropertyMode(ends[0]!);
@@ -943,6 +1009,33 @@ function operationChanges(
 	field: CalendarEventPatchField,
 	operation: ValidatedOperation,
 ): boolean {
+	if (field === 'timeZone') {
+		const starts = directProperties(master, 'DTSTART');
+		const ends = directProperties(master, 'DTEND');
+		if (starts.length !== 1 || ends.length !== 1) return true;
+		const selected = operation.timeZone!;
+		if (selected.timeZoneMode === 'utc') {
+			return !starts[0]!.value.raw.endsWith('Z') || !ends[0]!.value.raw.endsWith('Z');
+		}
+		const startTzid = matchingParameters(starts[0]!, 'TZID');
+		const endTzid = matchingParameters(ends[0]!, 'TZID');
+		if (
+			startTzid.length !== 1 ||
+			endTzid.length !== 1 ||
+			startTzid[0]!.values.length !== 1 ||
+			endTzid[0]!.values.length !== 1
+		) {
+			return true;
+		}
+		try {
+			return (
+				canonicalizeIanaTimeZone(startTzid[0]!.values[0]!.value) !== selected.timeZone ||
+				canonicalizeIanaTimeZone(endTzid[0]!.values[0]!.value) !== selected.timeZone
+			);
+		} catch {
+			return true;
+		}
+	}
 	const property = directProperties(master, PROPERTY_NAMES[field])[0];
 	if (operation.kind === 'remove') return property !== undefined;
 	if (property === undefined) return true;
@@ -1042,6 +1135,7 @@ function applyFieldOperation(
 	field: CalendarEventPatchField,
 	operation: ValidatedOperation,
 	timePlan: TimePatchPlan,
+	clearTimeParameters = false,
 ): void {
 	const name = PROPERTY_NAMES[field];
 	const index = entries.findIndex(
@@ -1058,9 +1152,56 @@ function applyFieldOperation(
 			: field === 'startDate' || field === 'endDate'
 				? operation.calendarDate!.split('-').join('')
 				: operation.text!;
-	const replacement = replacementProperty(existing, name, field, value, timePlan);
+	let replacement = replacementProperty(existing, name, field, value, timePlan);
+	if (clearTimeParameters && (field === 'start' || field === 'end')) {
+		replacement = freezeProperty({ ...replacement, parameters: [] });
+	}
 	if (index >= 0) entries[index] = replacement;
 	else insertCanonical(entries, replacement);
+}
+
+function applyTimeZoneOperation(
+	entries: ICalendarEntry[],
+	operation: ValidatedOperation,
+	projectInstant: CalendarEventInstantProjector,
+	renderedTimeZone?: string,
+): void {
+	const selected = operation.timeZone!;
+	if (selected.timeZoneMode === 'utc') return;
+	const outputTimeZone = renderedTimeZone ?? selected.timeZone;
+	for (const name of ['DTSTART', 'DTEND'] as const) {
+		const index = entries.findIndex(
+			(entry) => entry.kind === 'property' && asciiUpperCase(entry.name) === name,
+		);
+		if (index < 0) fail('UNSUPPORTED_TIME', 'timeZone');
+		const existing = entries[index] as ICalendarProperty;
+		const raw = existing.value.raw;
+		const match = UTC_DATE_TIME_PATTERN.exec(raw);
+		if (match === null) fail('UNSUPPORTED_TIME', 'timeZone');
+		const instant = new Date(
+			`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`,
+		);
+		const local = projectInstant(instant, selected.timeZone).replace(/[-:]/g, '');
+		entries[index] = freezeProperty({
+			kind: 'property',
+			name: existing.name,
+			parameters: [
+				{
+					kind: 'parameter',
+					name: 'TZID',
+					values: [
+						{
+							kind: 'parameterValue',
+							raw: outputTimeZone,
+							value: outputTimeZone,
+							quoted: false,
+						},
+					],
+				},
+			],
+			value: { kind: 'value', valueType: 'DATE-TIME', raw: local, textValues: null },
+		});
+	}
 }
 
 function applyMetadata(
@@ -1094,13 +1235,30 @@ function constructResource(
 	metadata: { readonly dtstamp: ICalendarProperty; readonly lastModified?: ICalendarProperty },
 	modifiedAt: number,
 	timePlan: TimePatchPlan,
+	projectInstant: CalendarEventInstantProjector,
+	renderedTimeZone?: string,
 ): ICalendarResource {
 	const masterEntries = [...context.master.entries];
 	for (const field of PATCH_FIELDS) {
 		const operation = patch[field];
+		if (field === 'timeZone') continue;
 		if (operation !== undefined && operationChanges(context.master, field, operation)) {
-			applyFieldOperation(masterEntries, field, operation, timePlan);
+			applyFieldOperation(
+				masterEntries,
+				field,
+				operation,
+				timePlan,
+				patch.timeZone?.kind === 'set',
+			);
 		}
+	}
+	if (
+		patch.timeZone?.kind === 'set' &&
+		(operationChanges(context.master, 'timeZone', patch.timeZone) ||
+			patch.start !== undefined ||
+			patch.end !== undefined)
+	) {
+		applyTimeZoneOperation(masterEntries, patch.timeZone, projectInstant, renderedTimeZone);
 	}
 	applyMetadata(masterEntries, metadata, modifiedAt);
 	Object.freeze(masterEntries);
@@ -1125,6 +1283,8 @@ export function applyCalendarEventPatch(
 	context: CalendarEventPreservationContext,
 	patch: CalendarEventPatch,
 	modifiedAt: Date,
+	projectInstant: CalendarEventInstantProjector = projectInstantInTimeZone,
+	renderedTimeZone?: string,
 ): ICalendarResource {
 	const canonicalContext = validateStage(
 		() => snapshotCanonicalContext(context),
@@ -1145,5 +1305,13 @@ export function applyCalendarEventPatch(
 		fail('NO_CHANGES');
 	}
 	const modifiedTimestamp = validateStage(() => dateTimestamp(modifiedAt), 'INVALID_DATE');
-	return constructResource(canonicalContext, validatedPatch, metadata, modifiedTimestamp, timePlan);
+	return constructResource(
+		canonicalContext,
+		validatedPatch,
+		metadata,
+		modifiedTimestamp,
+		timePlan,
+		projectInstant,
+		renderedTimeZone,
+	);
 }

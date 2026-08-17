@@ -373,6 +373,7 @@ describe('CalDAV Event Get dispatch and output', () => {
 				TRANSPORT,
 				'https://calendar.example.test/calendars/work/',
 				resource,
+				expect.objectContaining({ timeZoneContext: expect.any(Object) }),
 			);
 			expect(mocks.resolveCalendarEventByUid).not.toHaveBeenCalled();
 			expect(executionContext.getNodeParameter).not.toHaveBeenCalledWith('uid', 0);
@@ -392,6 +393,7 @@ describe('CalDAV Event Get dispatch and output', () => {
 			TRANSPORT,
 			'https://calendar.example.test/calendars/work/',
 			uid,
+			expect.objectContaining({ timeZoneContext: expect.any(Object) }),
 		);
 		expect(mocks.getCalendarEventByResourceUrl).not.toHaveBeenCalled();
 		expect(TRANSPORT.request).not.toHaveBeenCalled();

@@ -117,6 +117,9 @@ describe('issue #41 discriminated event projection', () => {
 			'accessMode',
 			'start',
 			'end',
+			'timeZoneMode',
+			'startLocal',
+			'endLocal',
 			'extensions',
 		]);
 		expect(Object.keys(allDay)).toEqual([

@@ -28,6 +28,19 @@ import {
 import tzdbOracle from './fixtures/time-zones/tzdb-2026c-oracle.json';
 
 const UTC_EQUIVALENT_PRIMARY_ZONES = new Set(['Etc/GMT', 'Etc/UTC']);
+const DISALLOWED_IMPLEMENTATION_LINKS = new Set([
+	'CET',
+	'CST6CDT',
+	'EET',
+	'EST',
+	'EST5EDT',
+	'HST',
+	'MET',
+	'MST',
+	'MST7MDT',
+	'PST8PDT',
+	'WET',
+]);
 
 function resolveOracleLink(name: string): string {
 	const links = new Map(tzdbOracle.links.map((link) => [link.name, link.target]));
@@ -97,6 +110,12 @@ describe('pinned IANA TZDB 2026c identity oracle', () => {
 
 	it('resolves every checked-in 2026c Link chain and ASCII case variant to one primary spelling', () => {
 		for (const link of tzdbOracle.links) {
+			if (DISALLOWED_IMPLEMENTATION_LINKS.has(link.name)) {
+				expect(captureError(() => canonicalizeIanaTimeZone(link.name)).code).toBe(
+					'INVALID_TIME_ZONE',
+				);
+				continue;
+			}
 			const canonical = resolveOracleLink(link.name);
 			if (UTC_EQUIVALENT_PRIMARY_ZONES.has(canonical)) {
 				expect(captureError(() => canonicalizeIanaTimeZone(link.name)).code).toBe('UTC_EQUIVALENT');

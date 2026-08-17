@@ -1,4 +1,10 @@
+/* eslint-disable @n8n/community-nodes/require-node-api-error -- protocol-layer typed errors are mapped at the node boundary. */
+
+import { parseICalendarResource } from './parser';
 import type { ICalendarComponent, ICalendarProperty, ICalendarResource } from './parser';
+import { CalDavIanaTimeZoneError, canonicalizeIanaTimeZone } from './timeZones';
+import type { IanaTimeZoneId, LocalDateTimeString } from './timeZones';
+import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type { AbsoluteHttpUrl } from '../transport/url';
 
 export const CalendarEventReadModelErrorCode = Object.freeze({
@@ -68,6 +74,7 @@ export interface CalendarEventResourceInput {
 	readonly resourceUrl: AbsoluteHttpUrl;
 	readonly etag?: string;
 	readonly resource: ICalendarResource;
+	readonly timeZoneDefinition?: ICalendarComponent;
 	readonly extensions?: CalendarEventExtensions;
 }
 
@@ -83,26 +90,33 @@ interface CalendarEventCommon {
 	readonly extensions?: CalendarEventExtensions;
 }
 
-export type CalendarEvent = CalendarEventCommon &
-	(
-		| {
-				readonly timeMode: 'timed';
-				readonly accessMode: 'editable';
-				readonly start: UtcDateTimeString;
-				readonly end: UtcDateTimeString;
-		  }
-		| {
-				readonly timeMode: 'allDay';
-				readonly accessMode: 'editable';
-				readonly startDate: CalendarDateString;
-				readonly endDate: CalendarDateString;
-		  }
-		| {
-				readonly timeMode: 'unsupported';
-				readonly accessMode: 'readOnly';
-				readonly readOnlyReason: CalendarEventReadOnlyReason;
-		  }
-	);
+export interface TimedCalendarEvent extends CalendarEventCommon {
+	readonly timeMode: 'timed';
+	readonly accessMode: 'editable';
+	readonly start: UtcDateTimeString;
+	readonly end: UtcDateTimeString;
+	readonly timeZoneMode: 'utc' | 'iana';
+	readonly timeZone?: IanaTimeZoneId;
+	readonly startLocal: LocalDateTimeString;
+	readonly endLocal: LocalDateTimeString;
+}
+
+export interface AllDayCalendarEvent extends CalendarEventCommon {
+	readonly timeMode: 'allDay';
+	readonly accessMode: 'editable';
+	readonly startDate: CalendarDateString;
+	readonly endDate: CalendarDateString;
+}
+
+export type EditableCalendarEvent = TimedCalendarEvent | AllDayCalendarEvent;
+
+export interface ReadOnlyCalendarEvent extends CalendarEventCommon {
+	readonly timeMode: 'unsupported';
+	readonly accessMode: 'readOnly';
+	readonly readOnlyReason: 'unsupportedTimeRepresentation';
+}
+
+export type CalendarEvent = EditableCalendarEvent | ReadOnlyCalendarEvent;
 
 export interface CalendarEventPreservationContext {
 	readonly resource: ICalendarResource;
@@ -410,6 +424,11 @@ interface ParsedCalendarDate {
 	readonly comparisonKey: string;
 }
 
+interface ParsedLocalDateTime {
+	readonly local: LocalDateTimeString;
+	readonly rawKey: string;
+}
+
 function parseUtcDateTime(property: ICalendarProperty): ParsedUtcDateTime {
 	if (hasParameter(property, 'TZID')) fail('UNSUPPORTED_EVENT_TIME');
 
@@ -466,6 +485,197 @@ function timePropertyIsSyntacticallyReadable(property: ICalendarProperty): boole
 	if (utcMatch !== null) return isValidCalendarDateTimeMatch(utcMatch);
 	const localMatch = LOCAL_DATE_TIME_PATTERN.exec(property.value.raw);
 	return localMatch !== null && isValidCalendarDateTimeMatch(localMatch);
+}
+
+function parseLocalDateTime(property: ICalendarProperty): ParsedLocalDateTime | undefined {
+	if (asciiUpperCase(property.value.valueType) !== 'DATE-TIME') return undefined;
+	const match = LOCAL_DATE_TIME_PATTERN.exec(property.value.raw);
+	if (match === null || !isValidCalendarDateTimeMatch(match) || Number(match[6]) > 59) {
+		return undefined;
+	}
+	return {
+		local:
+			`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}` as LocalDateTimeString,
+		rawKey: property.value.raw,
+	};
+}
+
+function onlyTzid(property: ICalendarProperty): string | undefined {
+	const tzids = parameterValues(property, 'TZID');
+	if (tzids.length !== 1 || tzids[0]!.length !== 1 || tzids[0]![0]!.length === 0) return undefined;
+	return tzids[0]![0]!;
+}
+
+function utcInstant(value: Date): UtcDateTimeString {
+	return value.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
+}
+
+interface EmbeddedTransition {
+	readonly localMilliseconds: number;
+	readonly offsetFromMinutes: number;
+	readonly offsetToMinutes: number;
+}
+
+function localMilliseconds(raw: string): number | undefined {
+	const match = LOCAL_DATE_TIME_PATTERN.exec(raw);
+	if (match === null || !isValidCalendarDateTimeMatch(match) || Number(match[6]) > 59)
+		return undefined;
+	return Date.parse(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`);
+}
+
+function offsetMinutes(raw: string): number | undefined {
+	const match = /^([+-])(\d{2})(\d{2})(?:\d{2})?$/.exec(raw);
+	if (match === null) return undefined;
+	const hours = Number(match[2]);
+	const minutes = Number(match[3]);
+	if (hours > 23 || minutes > 59) return undefined;
+	return (match[1] === '-' ? -1 : 1) * (hours * 60 + minutes);
+}
+
+function oneRaw(component: ICalendarComponent, name: string): string | undefined {
+	const properties = directProperties(component, name);
+	return properties.length === 1 && properties[0]!.value.textValues === null
+		? properties[0]!.value.raw
+		: undefined;
+}
+
+const WEEKDAY_INDEX: Readonly<Record<string, number>> = {
+	SU: 0,
+	MO: 1,
+	TU: 2,
+	WE: 3,
+	TH: 4,
+	FR: 5,
+	SA: 6,
+};
+
+function yearlyOccurrence(rrule: string, start: string, year: number): string | undefined {
+	const startMatch = LOCAL_DATE_TIME_PATTERN.exec(start);
+	if (startMatch === null) return undefined;
+	const parts = new Map<string, string>();
+	for (const part of rrule.split(';')) {
+		const delimiter = part.indexOf('=');
+		if (delimiter <= 0) return undefined;
+		parts.set(part.slice(0, delimiter).toUpperCase(), part.slice(delimiter + 1));
+	}
+	if (parts.get('FREQ') !== 'YEARLY') return undefined;
+	const month = Number(parts.get('BYMONTH') ?? startMatch[2]);
+	if (!Number.isInteger(month) || month < 1 || month > 12) return undefined;
+	let day = Number(parts.get('BYMONTHDAY') ?? startMatch[3]);
+	const byDay = parts.get('BYDAY');
+	if (byDay !== undefined) {
+		const match = /^([+-]?\d)(SU|MO|TU|WE|TH|FR|SA)$/.exec(byDay);
+		if (match === null) return undefined;
+		const ordinal = Number(match[1]);
+		const weekday = WEEKDAY_INDEX[match[2]!]!;
+		if (ordinal > 0) {
+			const firstWeekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+			day = 1 + ((weekday - firstWeekday + 7) % 7) + (ordinal - 1) * 7;
+		} else {
+			const last = daysInMonth(year, month);
+			const lastWeekday = new Date(Date.UTC(year, month - 1, last)).getUTCDay();
+			day = last - ((lastWeekday - weekday + 7) % 7) + (ordinal + 1) * 7;
+		}
+	}
+	if (day < 1 || day > daysInMonth(year, month)) return undefined;
+	return `${String(year).padStart(4, '0')}${String(month).padStart(2, '0')}${String(day).padStart(2, '0')}T${startMatch[4]}${startMatch[5]}${startMatch[6]}`;
+}
+
+function embeddedTransitions(
+	definition: ICalendarComponent,
+	targetYears: readonly number[],
+): readonly EmbeddedTransition[] | undefined {
+	const transitions: EmbeddedTransition[] = [];
+	const observances = directComponents(definition);
+	if (
+		observances.length === 0 ||
+		observances.some(
+			(component) => !['STANDARD', 'DAYLIGHT'].includes(asciiUpperCase(component.name)),
+		)
+	) {
+		return undefined;
+	}
+	for (const observance of observances) {
+		const start = oneRaw(observance, 'DTSTART');
+		const from = oneRaw(observance, 'TZOFFSETFROM');
+		const to = oneRaw(observance, 'TZOFFSETTO');
+		const fromMinutes = from === undefined ? undefined : offsetMinutes(from);
+		const toMinutes = to === undefined ? undefined : offsetMinutes(to);
+		if (start === undefined || fromMinutes === undefined || toMinutes === undefined)
+			return undefined;
+		const dates = [start];
+		for (const property of directProperties(observance, 'RDATE')) {
+			if (property.value.textValues !== null) return undefined;
+			dates.push(...property.value.raw.split(','));
+		}
+		const rrules = directProperties(observance, 'RRULE');
+		if (rrules.length > 1 || (rrules[0] !== undefined && rrules[0].value.textValues !== null)) {
+			return undefined;
+		}
+		if (rrules[0] !== undefined) {
+			for (const year of new Set(targetYears.flatMap((value) => [value - 1, value, value + 1]))) {
+				if (year < Number(start.slice(0, 4)) || year < 1 || year > 9999) continue;
+				const occurrence = yearlyOccurrence(rrules[0].value.raw, start, year);
+				if (occurrence === undefined) return undefined;
+				dates.push(occurrence);
+			}
+		}
+		for (const date of dates) {
+			const timestamp = localMilliseconds(date);
+			if (timestamp === undefined || !Number.isFinite(timestamp)) return undefined;
+			transitions.push({
+				localMilliseconds: timestamp,
+				offsetFromMinutes: fromMinutes,
+				offsetToMinutes: toMinutes,
+			});
+		}
+	}
+	return transitions.sort((left, right) => left.localMilliseconds - right.localMilliseconds);
+}
+
+function resolveEmbeddedLocal(
+	local: LocalDateTimeString,
+	transitions: readonly EmbeddedTransition[],
+): Date | undefined {
+	const target = Date.parse(`${local}Z`);
+	if (!Number.isFinite(target) || transitions.length === 0) return undefined;
+	const transitionInstants = transitions
+		.map((transition) => ({
+			...transition,
+			instantMilliseconds: transition.localMilliseconds - transition.offsetFromMinutes * 60_000,
+		}))
+		.sort((left, right) => left.instantMilliseconds - right.instantMilliseconds);
+	const offsetAtInstant = (instant: number): number => {
+		let offset = transitionInstants[0]!.offsetFromMinutes;
+		for (const transition of transitionInstants) {
+			if (instant < transition.instantMilliseconds) break;
+			offset = transition.offsetToMinutes;
+		}
+		return offset;
+	};
+	const candidates = new Set<number>();
+	for (const transition of transitions) {
+		candidates.add(transition.offsetFromMinutes);
+		candidates.add(transition.offsetToMinutes);
+	}
+	const matching = [...candidates]
+		.map((offset) => target - offset * 60_000)
+		.filter((instant) => offsetAtInstant(instant) === (target - instant) / 60_000)
+		.sort((left, right) => left - right);
+	if (matching[0] !== undefined) return new Date(matching[0]);
+
+	// RFC 5545 assigns a nonexistent wall time the UTC offset in force before the gap.
+	for (const transition of transitions) {
+		const gapMinutes = transition.offsetToMinutes - transition.offsetFromMinutes;
+		if (
+			gapMinutes > 0 &&
+			target >= transition.localMilliseconds &&
+			target < transition.localMilliseconds + gapMinutes * 60_000
+		) {
+			return new Date(target - transition.offsetFromMinutes * 60_000);
+		}
+	}
+	return undefined;
 }
 
 function isPlainRecord(value: object): boolean {
@@ -609,7 +819,6 @@ function snapshotExtensions(
 		return snapshotExtensionsUnchecked(extensions, failValidation);
 	} catch (error: unknown) {
 		if (typeof error === 'object' && error !== null && internalErrors.has(error)) {
-			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- Preserve the accepted transport-independent protocol error unchanged.
 			throw error;
 		}
 		return fail('INVALID_EVENT_EXTENSIONS');
@@ -639,7 +848,12 @@ export function mapCalendarEventResource(
 	) {
 		fail('INVALID_EVENT_PROPERTY');
 	}
+	if (!timePropertyIsSyntacticallyReadable(startProperty)) fail('INVALID_EVENT_PROPERTY');
+	if (endProperty !== undefined && !timePropertyIsSyntacticallyReadable(endProperty)) {
+		fail('INVALID_EVENT_PROPERTY');
+	}
 
+	const extensions = snapshotExtensions(input.extensions);
 	const common = {
 		calendarUrl: input.calendarUrl,
 		resourceUrl: input.resourceUrl,
@@ -651,87 +865,225 @@ export function mapCalendarEventResource(
 		...(url !== undefined ? { url } : {}),
 	};
 
-	let time:
+	const startType = asciiUpperCase(startProperty.value.valueType);
+	if (startType === 'DATE') {
+		let event: CalendarEvent;
+		if (
+			durationProperty === undefined &&
+			endProperty !== undefined &&
+			asciiUpperCase(endProperty.value.valueType) === 'DATE' &&
+			!hasParameter(startProperty, 'TZID') &&
+			!hasParameter(endProperty, 'TZID')
+		) {
+			const start = parseCalendarDate(startProperty);
+			const end = parseCalendarDate(endProperty);
+			if (end.comparisonKey <= start.comparisonKey) fail('INVALID_EVENT_TIME_RANGE');
+			event = Object.freeze({
+				...common,
+				timeMode: 'allDay',
+				accessMode: 'editable',
+				startDate: start.formatted,
+				endDate: end.formatted,
+				...(extensions !== undefined ? { extensions } : {}),
+			});
+		} else {
+			event = Object.freeze({
+				...common,
+				timeMode: 'unsupported',
+				accessMode: 'readOnly',
+				readOnlyReason: 'unsupportedTimeRepresentation',
+				...(extensions !== undefined ? { extensions } : {}),
+			});
+		}
+		return Object.freeze({ event, context });
+	}
+
+	let timed:
 		| {
-				readonly timeMode: 'timed';
-				readonly accessMode: 'editable';
 				readonly start: UtcDateTimeString;
 				readonly end: UtcDateTimeString;
+				readonly timeZoneMode: 'utc';
+				readonly startLocal: LocalDateTimeString;
+				readonly endLocal: LocalDateTimeString;
 		  }
 		| {
-				readonly timeMode: 'allDay';
-				readonly accessMode: 'editable';
-				readonly startDate: CalendarDateString;
-				readonly endDate: CalendarDateString;
+				readonly start: UtcDateTimeString;
+				readonly end: UtcDateTimeString;
+				readonly timeZoneMode: 'iana';
+				readonly timeZone: IanaTimeZoneId;
+				readonly startLocal: LocalDateTimeString;
+				readonly endLocal: LocalDateTimeString;
 		  }
-		| {
-				readonly timeMode: 'unsupported';
-				readonly accessMode: 'readOnly';
-				readonly readOnlyReason: 'unsupportedTimeRepresentation';
-		  };
+		| undefined;
 
-	const startType = asciiUpperCase(startProperty.value.valueType);
-	const endType =
-		endProperty === undefined ? undefined : asciiUpperCase(endProperty.value.valueType);
-	const unsupported = (): void => {
-		time = {
-			timeMode: 'unsupported',
-			accessMode: 'readOnly',
-			readOnlyReason: 'unsupportedTimeRepresentation',
-		};
-	};
-
-	if (!timePropertyIsSyntacticallyReadable(startProperty)) fail('INVALID_EVENT_PROPERTY');
-	if (endProperty !== undefined && !timePropertyIsSyntacticallyReadable(endProperty)) {
-		fail('INVALID_EVENT_PROPERTY');
-	}
-
-	if (durationProperty !== undefined) {
-		unsupported();
-	} else if (
-		startType === 'DATE' &&
-		endProperty !== undefined &&
-		endType === 'DATE' &&
-		!hasParameter(startProperty, 'TZID') &&
-		!hasParameter(endProperty, 'TZID')
-	) {
-		const start = parseCalendarDate(startProperty);
-		const end = parseCalendarDate(endProperty);
-		if (end.comparisonKey <= start.comparisonKey) fail('INVALID_EVENT_TIME_RANGE');
-		time = {
-			timeMode: 'allDay',
-			accessMode: 'editable',
-			startDate: start.formatted,
-			endDate: end.formatted,
-		};
-	} else if (
-		startType === 'DATE-TIME' &&
-		(endProperty === undefined || endType === 'DATE-TIME') &&
-		!hasParameter(startProperty, 'TZID') &&
-		(endProperty === undefined || !hasParameter(endProperty, 'TZID')) &&
-		UTC_DATE_TIME_PATTERN.test(startProperty.value.raw) &&
-		(endProperty === undefined || UTC_DATE_TIME_PATTERN.test(endProperty.value.raw))
-	) {
-		const start = parseUtcDateTime(startProperty);
-		const end = endProperty === undefined ? start : parseUtcDateTime(endProperty);
-		if (end.comparisonKey <= start.comparisonKey && endProperty !== undefined) {
-			fail('INVALID_EVENT_TIME_RANGE');
+	const effectiveEndProperty =
+		endProperty ?? (durationProperty === undefined ? startProperty : undefined);
+	if (durationProperty === undefined && effectiveEndProperty !== undefined) {
+		if (startProperty.value.raw.endsWith('Z') && effectiveEndProperty.value.raw.endsWith('Z')) {
+			try {
+				const start = parseUtcDateTime(startProperty);
+				const end = parseUtcDateTime(effectiveEndProperty);
+				if (endProperty !== undefined && end.comparisonKey <= start.comparisonKey) {
+					fail('INVALID_EVENT_TIME_RANGE');
+				}
+				timed = {
+					start: start.formatted,
+					end: end.formatted,
+					timeZoneMode: 'utc',
+					startLocal: start.formatted.slice(0, -1) as LocalDateTimeString,
+					endLocal: end.formatted.slice(0, -1) as LocalDateTimeString,
+				};
+			} catch (error) {
+				if (
+					error instanceof CalDavCalendarEventReadModelError &&
+					error.code === CalendarEventReadModelErrorCode.INVALID_EVENT_TIME_RANGE
+				) {
+					throw error;
+				}
+			}
+		} else {
+			const startLocal = parseLocalDateTime(startProperty);
+			const endLocal = parseLocalDateTime(effectiveEndProperty);
+			const startTzid = onlyTzid(startProperty);
+			const endTzid = onlyTzid(effectiveEndProperty);
+			if (
+				startLocal !== undefined &&
+				endLocal !== undefined &&
+				startTzid !== undefined &&
+				endTzid !== undefined &&
+				startTzid === endTzid
+			) {
+				try {
+					const timeZone = canonicalizeIanaTimeZone(startTzid);
+					const definitions = directComponents(input.resource.calendar).filter(
+						(component) =>
+							asciiUpperCase(component.name) === 'VTIMEZONE' &&
+							directProperties(component, 'TZID').some(
+								(property) => singleText(property) === startTzid,
+							),
+					);
+					let startInstant: Date | undefined;
+					let endInstant: Date | undefined;
+					const definition =
+						definitions.length === 1
+							? definitions[0]
+							: definitions.length === 0
+								? input.timeZoneDefinition
+								: undefined;
+					if (definition !== undefined) {
+						const identifiers = directProperties(definition, 'TZID');
+						const definitionTimeZone =
+							identifiers.length === 1 ? singleText(identifiers[0]!) : undefined;
+						if (
+							definitionTimeZone === undefined ||
+							canonicalizeIanaTimeZone(definitionTimeZone) !== timeZone
+						) {
+							throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+						}
+						const transitions = embeddedTransitions(definition, [
+							Number(startLocal.local.slice(0, 4)),
+							Number(endLocal.local.slice(0, 4)),
+						]);
+						if (transitions !== undefined) {
+							startInstant = resolveEmbeddedLocal(startLocal.local, transitions);
+							endInstant = resolveEmbeddedLocal(endLocal.local, transitions);
+						}
+					}
+					if (startInstant !== undefined && endInstant !== undefined) {
+						if (endProperty !== undefined && endInstant.getTime() <= startInstant.getTime()) {
+							fail('INVALID_EVENT_TIME_RANGE');
+						}
+						timed = {
+							start: utcInstant(startInstant),
+							end: utcInstant(endInstant),
+							timeZoneMode: 'iana',
+							timeZone,
+							startLocal: startLocal.local,
+							endLocal: endLocal.local,
+						};
+					}
+				} catch (error) {
+					if (
+						error instanceof CalDavCalendarEventReadModelError &&
+						error.code === CalendarEventReadModelErrorCode.INVALID_EVENT_TIME_RANGE
+					) {
+						throw error;
+					}
+				}
+			}
 		}
-		time = {
-			timeMode: 'timed',
-			accessMode: 'editable',
-			start: start.formatted,
-			end: end.formatted,
-		};
-	} else {
-		unsupported();
 	}
-	const extensions = snapshotExtensions(input.extensions);
 
-	const event = Object.freeze({
-		...common,
-		...time!,
-		...(extensions !== undefined ? { extensions } : {}),
-	}) satisfies CalendarEvent;
+	const event = Object.freeze(
+		timed === undefined
+			? {
+					...common,
+					timeMode: 'unsupported',
+					accessMode: 'readOnly',
+					readOnlyReason: 'unsupportedTimeRepresentation',
+					...(extensions !== undefined ? { extensions } : {}),
+				}
+			: {
+					...common,
+					timeMode: 'timed',
+					accessMode: 'editable',
+					start: timed.start,
+					end: timed.end,
+					timeZoneMode: timed.timeZoneMode,
+					...(timed.timeZoneMode === 'iana' ? { timeZone: timed.timeZone } : {}),
+					startLocal: timed.startLocal,
+					endLocal: timed.endLocal,
+					...(extensions !== undefined ? { extensions } : {}),
+				},
+	) satisfies CalendarEvent;
 	return Object.freeze({ event, context });
+}
+
+function referencedTimeZone(resource: ICalendarResource): IanaTimeZoneId | undefined {
+	const context = createCalendarEventPreservationContext(resource);
+	const starts = directProperties(context.master, 'DTSTART');
+	const ends = directProperties(context.master, 'DTEND');
+	if (starts.length !== 1 || ends.length !== 1) return undefined;
+	const start = starts[0]!;
+	const end = ends[0]!;
+	if (parseLocalDateTime(start) === undefined || parseLocalDateTime(end) === undefined) {
+		return undefined;
+	}
+	const startTzid = onlyTzid(start);
+	const endTzid = onlyTzid(end);
+	if (startTzid === undefined || startTzid !== endTzid) return undefined;
+	let timeZone: IanaTimeZoneId;
+	try {
+		timeZone = canonicalizeIanaTimeZone(startTzid);
+	} catch {
+		return undefined;
+	}
+	const embedded = directComponents(resource.calendar).filter(
+		(component) =>
+			asciiUpperCase(component.name) === 'VTIMEZONE' &&
+			directProperties(component, 'TZID').some((property) => singleText(property) === startTzid),
+	);
+	return embedded.length === 0 ? timeZone : undefined;
+}
+
+export async function mapCalendarEventResourceWithTimeZoneContext(
+	input: CalendarEventResourceInput,
+	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
+): Promise<CalendarEventReadResult> {
+	const timeZone = referencedTimeZone(input.resource);
+	if (timeZone === undefined || timeZoneContext === undefined)
+		return mapCalendarEventResource(input);
+	try {
+		const reference = await timeZoneContext.resolveReference(input.calendarUrl, timeZone);
+		const resource = parseICalendarResource(Buffer.from(reference.calendarData, 'utf8'));
+		const definitions = directComponents(resource.calendar).filter(
+			(component) => asciiUpperCase(component.name) === 'VTIMEZONE',
+		);
+		return mapCalendarEventResource({
+			...input,
+			...(definitions.length === 1 ? { timeZoneDefinition: definitions[0] } : {}),
+		});
+	} catch {
+		return mapCalendarEventResource(input);
+	}
 }

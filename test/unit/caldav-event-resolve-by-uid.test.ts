@@ -305,6 +305,9 @@ describe('calendar-event UID REPORT request and successful mapping', () => {
 			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T10:30:00Z',
+			timeZoneMode: 'utc',
+			startLocal: '2040-01-02T10:00:00',
+			endLocal: '2040-01-02T10:30:00',
 		});
 		expect(Object.keys(result).sort()).toEqual(['context', 'event']);
 		expect(result.context.resource.originalIcs).toBe(ics);

@@ -186,6 +186,40 @@ describe('RFC 7809 capability and RFC 7808 TZDIST resolution', () => {
 		expect(requested.filter((url) => url.includes('tzdist-b'))).toHaveLength(2);
 	});
 
+	it('follows only trusted anonymous redirects and rejects private redirect targets', async () => {
+		const transport = transportForServices([
+			'https://tzdist-unsafe.example.test/',
+			'https://tzdist-safe.example.test/',
+		]);
+		const request = vi.fn(async (input: unknown) => {
+			const url = String((input as { readonly url?: unknown }).url ?? '');
+			if (url.includes('tzdist-unsafe') && url.includes('capabilities')) {
+				return response(302, '', { location: 'http://127.0.0.1/private' });
+			}
+			if (url.includes('tzdist-safe') && url.includes('capabilities')) {
+				return response(307, '', {
+					location: 'https://tzdist-cdn.example.test/capabilities',
+				});
+			}
+			if (url.includes('capabilities')) {
+				return response(200, TZDIST_CAPABILITIES, { 'content-type': 'application/json' });
+			}
+			return response(200, TZDIST_ZONE_RESPONSE, {
+				'content-type': 'text/calendar',
+				etag: '"redirected-zone"',
+			});
+		}) as unknown as TimeZoneDistributionRequest;
+
+		await expect(
+			context(transport, request).resolveReference(CALENDAR_URL, 'Europe/Prague'),
+		).resolves.toMatchObject({ etag: '"redirected-zone"' });
+		const urls = (request as ReturnType<typeof vi.fn>).mock.calls.map(([call]) =>
+			String((call as { readonly url?: unknown }).url),
+		);
+		expect(urls).toContain('https://tzdist-cdn.example.test/capabilities');
+		expect(urls).not.toEqual(expect.arrayContaining([expect.stringContaining('127.0.0.1')]));
+	});
+
 	it.each([
 		['weak ETag', { 'content-type': 'text/calendar', etag: 'W/"weak"' }, TZDIST_ZONE_RESPONSE],
 		[

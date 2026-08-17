@@ -249,12 +249,14 @@ describe('CalDAV Event Get Many execution', () => {
 			TRANSPORT,
 			'https://calendar.example.test/calendars/work/',
 			{ start: new Date('2040-01-02T10:00:00Z'), end: new Date('2040-01-02T11:00:00Z') },
+			expect.objectContaining({ resolveReference: expect.any(Function) }),
 		);
 		expect(mocks.queryCalendarEventsByTimeRange).toHaveBeenNthCalledWith(
 			2,
 			TRANSPORT,
 			'https://calendar.example.test/calendars/other/',
 			{ start: new Date('2040-01-02T10:00:00Z'), end: new Date('2040-01-02T11:00:00Z') },
+			expect.objectContaining({ resolveReference: expect.any(Function) }),
 		);
 		expect(output).toEqual([
 			{
