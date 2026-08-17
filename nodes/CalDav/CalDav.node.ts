@@ -49,7 +49,7 @@ import {
 import type { CalendarEventUpdateInput } from './events/update';
 import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
 import { CalDavCalendarEventReadModelError } from './icalendar/eventReadModel';
-import type { CalendarEvent } from './icalendar/eventReadModel';
+import type { CalendarDateString, CalendarEvent } from './icalendar/eventReadModel';
 import { CalDavICalendarParseError } from './icalendar/parser';
 import { CalDavCalendarEventPatchError, CalendarEventPatchErrorCode } from './icalendar/patcher';
 import type { CalendarEventPatch, OptionalFieldPatch } from './icalendar/patcher';
@@ -87,10 +87,13 @@ const RESOURCE_URL_IDENTIFIER_MODE = 'resourceUrl';
 const UID_IDENTIFIER_MODE = 'uid';
 const INVALID_LIMIT_MESSAGE = 'Limit must be an integer greater than or equal to 1.';
 const UNSUPPORTED_OPERATION_MESSAGE = 'Unsupported CalDAV resource or operation.';
+const READ_ONLY_EVENT_UPDATE_MESSAGE =
+	'The calendar event is read-only because its time representation is unsupported.';
 const GENERIC_GET_MANY_ERROR_MESSAGE = 'The Calendar Get Many operation failed.';
 const GENERIC_LIST_SEARCH_ERROR_MESSAGE = 'The calendar list could not be loaded.';
 const ZONED_ISO_INSTANT_PATTERN =
 	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:([zZ])|([+-])(\d{2}):(\d{2}))$/;
+const CALENDAR_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 const GET_MESSAGES = {
 	INVALID_CALENDAR_URL:
@@ -186,9 +189,13 @@ const EVENT_CREATE_MESSAGES = {
 	INVALID_CALENDAR_URL:
 		'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
 	INVALID_UID: 'UID must be a non-empty valid iCalendar text value.',
+	INVALID_TIME_MODE: 'Time Mode must be Timed or All-Day.',
 	RESOURCE_NAME_TOO_LONG: 'UID is too long to create a safe event resource name.',
 	INVALID_START: 'Start must be a valid date and time with whole-second precision.',
 	INVALID_END: 'End must be a valid date and time with whole-second precision.',
+	INVALID_START_DATE: 'Start Date must be a valid calendar date.',
+	INVALID_END_DATE: 'End Date must be a valid calendar date.',
+	MIXED_TIME_FIELDS: 'The selected Time Mode cannot use fields from the other time mode.',
 	INVALID_RANGE: 'End must be later than Start.',
 	INVALID_SUMMARY: 'Summary must be a valid iCalendar text value.',
 	INVALID_DESCRIPTION: 'Description must be a valid iCalendar text value.',
@@ -218,10 +225,13 @@ const EVENT_UPDATE_MESSAGES = {
 		'The Event Resource URL is invalid or does not belong to the selected calendar.',
 	INVALID_UID: 'UID must be a non-empty valid iCalendar text value.',
 	INVALID_ETAG: 'ETag must be a string.',
+	INVALID_TIME_MODE: 'Time Mode must be Timed or All-Day.',
 	INVALID_FIELDS: 'Fields to Update must be an object.',
 	NO_CHANGES: 'The calendar event patch does not contain any changes.',
 	INVALID_START: 'Start must be a valid date and time with whole-second precision.',
 	INVALID_END: 'End must be a valid date and time with whole-second precision.',
+	INVALID_START_DATE: 'Start Date must be a valid calendar date.',
+	INVALID_END_DATE: 'End Date must be a valid calendar date.',
 	INVALID_RANGE: 'End must be later than Start.',
 	INVALID_SUMMARY: 'Summary must be a valid iCalendar text value.',
 	INVALID_DESCRIPTION: 'Description must be a valid iCalendar text value.',
@@ -365,8 +375,14 @@ function eventJson(event: CalendarEvent): IDataObject {
 		...(event.description === undefined ? {} : { description: event.description }),
 		...(event.location === undefined ? {} : { location: event.location }),
 		...(event.url === undefined ? {} : { url: event.url }),
-		start: event.start,
-		end: event.end,
+		timeMode: event.timeMode,
+		accessMode: event.accessMode,
+		...(event.timeMode === 'timed'
+			? { start: event.start, end: event.end }
+			: event.timeMode === 'allDay'
+				? { startDate: event.startDate, endDate: event.endDate }
+				: { readOnlyReason: event.readOnlyReason }),
+		...(event.extensions === undefined ? {} : { extensions: event.extensions }),
 	};
 }
 
@@ -722,6 +738,9 @@ function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpd
 }
 
 function eventUpdateFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof Error && error.message === READ_ONLY_EVENT_UPDATE_MESSAGE) {
+		return { message: READ_ONLY_EVENT_UPDATE_MESSAGE, configuration: true };
+	}
 	if (error instanceof CalDavCalendarEventUpdateError) {
 		if (error.code === CalendarEventUpdateFailureCode.CONFIRMATION_FAILED) {
 			return {
@@ -877,7 +896,7 @@ function isValidWholeSecondInstant(value: Date): boolean {
 	const timestamp = value.getTime();
 	if (!Number.isFinite(timestamp) || timestamp % 1000 !== 0) return false;
 	const utcYear = value.getUTCFullYear();
-	return utcYear >= 0 && utcYear <= 9999;
+	return utcYear >= 1 && utcYear <= 9999;
 }
 
 function parseZonedIsoInstant(value: string): Date | undefined {
@@ -894,6 +913,7 @@ function parseZonedIsoInstant(value: string): Date | undefined {
 	const offsetHour = match[8] === undefined ? Number(match[10]) : 0;
 	const offsetMinute = match[8] === undefined ? Number(match[11]) : 0;
 	if (
+		year < 1 ||
 		month < 1 ||
 		month > 12 ||
 		day < 1 ||
@@ -1004,6 +1024,80 @@ function createDateTimeInstant(value: unknown): Date | undefined {
 	}
 }
 
+function strictCalendarDate(value: string): CalendarDateString | undefined {
+	const match = CALENDAR_DATE_PATTERN.exec(value);
+	if (match === null) return undefined;
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	if (
+		year < 1 ||
+		year > 9999 ||
+		month < 1 ||
+		month > 12 ||
+		day < 1 ||
+		day > daysInGregorianMonth(year, month)
+	) {
+		return undefined;
+	}
+	return value as CalendarDateString;
+}
+
+function calendarDateInstant(value: unknown): Date | undefined {
+	if (value instanceof Date) {
+		return Number.isFinite(value.getTime()) ? new Date(value.getTime()) : undefined;
+	}
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+	try {
+		const dateTime = value as {
+			readonly isLuxonDateTime?: unknown;
+			readonly isValid?: unknown;
+			readonly toJSDate?: unknown;
+		};
+		if (
+			dateTime.isLuxonDateTime !== true ||
+			dateTime.isValid !== true ||
+			typeof dateTime.toJSDate !== 'function'
+		) {
+			return undefined;
+		}
+		const converted = dateTime.toJSDate.call(value) as unknown;
+		return converted instanceof Date && Number.isFinite(converted.getTime())
+			? new Date(converted.getTime())
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function workflowCalendarDate(
+	execution: IExecuteFunctions,
+	value: unknown,
+): CalendarDateString | undefined {
+	if (typeof value === 'string') return strictCalendarDate(value);
+	const instant = calendarDateInstant(value);
+	if (instant === undefined) return undefined;
+	try {
+		const timezone = execution.getTimezone();
+		if (typeof timezone !== 'string' || timezone.length === 0) return undefined;
+		const parts = new Intl.DateTimeFormat('en-US-u-ca-gregory-nu-latn', {
+			timeZone: timezone,
+			year: 'numeric',
+			month: '2-digit',
+			day: '2-digit',
+		}).formatToParts(instant);
+		const part = (type: Intl.DateTimeFormatPartTypes): string | undefined =>
+			parts.find((candidate) => candidate.type === type)?.value;
+		const year = part('year');
+		const month = part('month');
+		const day = part('day');
+		if (year === undefined || month === undefined || day === undefined) return undefined;
+		return strictCalendarDate(`${year.padStart(4, '0')}-${month}-${day}`);
+	} catch {
+		return undefined;
+	}
+}
+
 function ownAdditionalField(
 	additionalFields: Record<PropertyKey, unknown>,
 	name: 'description' | 'location' | 'url',
@@ -1032,10 +1126,43 @@ function eventCreateInput(
 		return EVENT_CREATE_MESSAGES.RESOURCE_NAME_TOO_LONG;
 	}
 
-	const start = createDateTimeInstant(nodeParameter(execution, 'start', itemIndex));
-	if (start === undefined) return EVENT_CREATE_MESSAGES.INVALID_START;
-	const end = createDateTimeInstant(nodeParameter(execution, 'end', itemIndex));
-	if (end === undefined) return EVENT_CREATE_MESSAGES.INVALID_END;
+	const timeMode = nodeParameter(execution, 'timeMode', itemIndex);
+	if (timeMode !== 'timed' && timeMode !== 'allDay') {
+		return EVENT_CREATE_MESSAGES.INVALID_TIME_MODE;
+	}
+	const startValue = nodeParameter(execution, 'start', itemIndex);
+	const endValue = nodeParameter(execution, 'end', itemIndex);
+	const startDateValue = nodeParameter(execution, 'startDate', itemIndex);
+	const endDateValue = nodeParameter(execution, 'endDate', itemIndex);
+	if (
+		(timeMode === 'timed' && (startDateValue !== undefined || endDateValue !== undefined)) ||
+		(timeMode === 'allDay' && (startValue !== undefined || endValue !== undefined))
+	) {
+		return EVENT_CREATE_MESSAGES.MIXED_TIME_FIELDS;
+	}
+
+	let timeInput:
+		| { readonly timeMode: 'timed'; readonly start: Date; readonly end: Date }
+		| {
+				readonly timeMode: 'allDay';
+				readonly startDate: CalendarDateString;
+				readonly endDate: CalendarDateString;
+		  };
+	if (timeMode === 'timed') {
+		const start = createDateTimeInstant(startValue);
+		if (start === undefined) return EVENT_CREATE_MESSAGES.INVALID_START;
+		const end = createDateTimeInstant(endValue);
+		if (end === undefined) return EVENT_CREATE_MESSAGES.INVALID_END;
+		if (end.getTime() <= start.getTime()) return EVENT_CREATE_MESSAGES.INVALID_RANGE;
+		timeInput = { timeMode, start, end };
+	} else {
+		const startDate = workflowCalendarDate(execution, startDateValue);
+		if (startDate === undefined) return EVENT_CREATE_MESSAGES.INVALID_START_DATE;
+		const endDate = workflowCalendarDate(execution, endDateValue);
+		if (endDate === undefined) return EVENT_CREATE_MESSAGES.INVALID_END_DATE;
+		if (endDate <= startDate) return EVENT_CREATE_MESSAGES.INVALID_RANGE;
+		timeInput = { timeMode, startDate, endDate };
+	}
 
 	const summary = nodeParameter(execution, 'summary', itemIndex);
 	if (typeof summary !== 'string' || !isValidICalendarText(summary)) {
@@ -1088,12 +1215,10 @@ function eventCreateInput(
 		return EVENT_CREATE_MESSAGES.INVALID_URL;
 	}
 
-	if (end.getTime() <= start.getTime()) return EVENT_CREATE_MESSAGES.INVALID_RANGE;
 	return Object.freeze({
 		calendarUrl,
 		...(uidValue.length === 0 ? {} : { uid: uidValue }),
-		start,
-		end,
+		...timeInput,
 		summary,
 		...(descriptionField.present ? { description: descriptionField.value as string } : {}),
 		...(locationField.present ? { location: locationField.value as string } : {}),
@@ -1156,7 +1281,11 @@ function optionalUpdatePatch(
 	}
 }
 
-function eventUpdatePatch(value: unknown): CalendarEventPatch | string {
+function eventUpdatePatch(
+	execution: IExecuteFunctions,
+	value: unknown,
+	timeMode: 'timed' | 'allDay',
+): CalendarEventPatch | string {
 	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
 		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
 	}
@@ -1172,7 +1301,16 @@ function eventUpdatePatch(value: unknown): CalendarEventPatch | string {
 	}
 	const keys = Object.keys(descriptors);
 	if (keys.length === 0) return EVENT_UPDATE_MESSAGES.NO_CHANGES;
-	const allowed = new Set(['start', 'end', 'summary', 'description', 'location', 'url']);
+	const allowed = new Set([
+		'start',
+		'end',
+		'startDate',
+		'endDate',
+		'summary',
+		'description',
+		'location',
+		'url',
+	]);
 	if (
 		keys.some((key) => {
 			const descriptor = descriptors[key]!;
@@ -1181,15 +1319,25 @@ function eventUpdatePatch(value: unknown): CalendarEventPatch | string {
 	) {
 		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
 	}
+	if (
+		(timeMode === 'timed' &&
+			(descriptors.startDate !== undefined || descriptors.endDate !== undefined)) ||
+		(timeMode === 'allDay' && (descriptors.start !== undefined || descriptors.end !== undefined))
+	) {
+		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
+	}
 
 	const patch: {
+		timeMode: 'timed' | 'allDay';
 		start?: { readonly kind: 'set'; readonly value: Date };
 		end?: { readonly kind: 'set'; readonly value: Date };
+		startDate?: { readonly kind: 'set'; readonly value: string };
+		endDate?: { readonly kind: 'set'; readonly value: string };
 		summary?: { readonly kind: 'set'; readonly value: string };
 		description?: OptionalFieldPatch<string>;
 		location?: OptionalFieldPatch<string>;
 		url?: OptionalFieldPatch<string>;
-	} = {};
+	} = { timeMode };
 	if (descriptors.start !== undefined) {
 		const start = createDateTimeInstant(descriptors.start.value);
 		if (start === undefined) return EVENT_UPDATE_MESSAGES.INVALID_START;
@@ -1199,6 +1347,16 @@ function eventUpdatePatch(value: unknown): CalendarEventPatch | string {
 		const end = createDateTimeInstant(descriptors.end.value);
 		if (end === undefined) return EVENT_UPDATE_MESSAGES.INVALID_END;
 		patch.end = { kind: 'set', value: end };
+	}
+	if (descriptors.startDate !== undefined) {
+		const startDate = workflowCalendarDate(execution, descriptors.startDate.value);
+		if (startDate === undefined) return EVENT_UPDATE_MESSAGES.INVALID_START_DATE;
+		patch.startDate = { kind: 'set', value: startDate };
+	}
+	if (descriptors.endDate !== undefined) {
+		const endDate = workflowCalendarDate(execution, descriptors.endDate.value);
+		if (endDate === undefined) return EVENT_UPDATE_MESSAGES.INVALID_END_DATE;
+		patch.endDate = { kind: 'set', value: endDate };
 	}
 	if (descriptors.summary !== undefined) {
 		const summary = descriptors.summary.value;
@@ -1234,7 +1392,7 @@ function eventUpdatePatch(value: unknown): CalendarEventPatch | string {
 		if ('error' in extracted) return extracted.error;
 		patch.url = extracted.patch;
 	}
-	return Object.freeze(patch);
+	return Object.freeze(patch) as CalendarEventPatch;
 }
 
 function eventUpdateInput(
@@ -1280,6 +1438,10 @@ function eventUpdateInput(
 		return EVENT_UPDATE_MESSAGES.INVALID_ETAG;
 	}
 	if (etag !== undefined && typeof etag !== 'string') return EVENT_UPDATE_MESSAGES.INVALID_ETAG;
+	const timeMode = nodeParameter(execution, 'timeMode', itemIndex);
+	if (timeMode !== 'timed' && timeMode !== 'allDay') {
+		return EVENT_UPDATE_MESSAGES.INVALID_TIME_MODE;
+	}
 
 	let fieldsToUpdate: unknown;
 	try {
@@ -1287,7 +1449,7 @@ function eventUpdateInput(
 	} catch {
 		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
 	}
-	const patch = eventUpdatePatch(fieldsToUpdate);
+	const patch = eventUpdatePatch(execution, fieldsToUpdate, timeMode);
 	if (typeof patch === 'string') return patch;
 
 	return Object.freeze({
@@ -1716,13 +1878,32 @@ export class CalDav implements INodeType {
 				},
 			},
 			{
+				displayName: 'Time Mode',
+				name: 'timeMode',
+				type: 'options',
+				required: true,
+				noDataExpression: true,
+				options: [
+					{ name: 'Timed', value: 'timed' },
+					{ name: 'All-Day', value: 'allDay' },
+				],
+				default: 'timed',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+				},
+			},
+			{
 				displayName: 'Start',
 				name: 'start',
 				type: 'dateTime',
 				required: true,
 				default: '',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						timeMode: ['timed'],
+					},
 				},
 			},
 			{
@@ -1732,7 +1913,41 @@ export class CalDav implements INodeType {
 				required: true,
 				default: '',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						timeMode: ['timed'],
+					},
+				},
+			},
+			{
+				displayName: 'Start Date',
+				name: 'startDate',
+				type: 'dateTime',
+				typeOptions: { dateOnly: true },
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						timeMode: ['allDay'],
+					},
+				},
+			},
+			{
+				displayName: 'End Date',
+				name: 'endDate',
+				type: 'dateTime',
+				typeOptions: { dateOnly: true },
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						timeMode: ['allDay'],
+					},
 				},
 			},
 			{
@@ -1882,6 +2097,21 @@ export class CalDav implements INodeType {
 				},
 			},
 			{
+				displayName: 'Time Mode',
+				name: 'timeMode',
+				type: 'options',
+				required: true,
+				noDataExpression: true,
+				options: [
+					{ name: 'Timed', value: 'timed' },
+					{ name: 'All-Day', value: 'allDay' },
+				],
+				default: 'timed',
+				displayOptions: {
+					show: { resource: [EVENT_RESOURCE], operation: [UPDATE_OPERATION] },
+				},
+			},
+			{
 				displayName: 'Fields to Update',
 				name: 'fieldsToUpdate',
 				type: 'collection',
@@ -1898,12 +2128,30 @@ export class CalDav implements INodeType {
 						name: 'start',
 						type: 'dateTime',
 						default: '',
+						displayOptions: { show: { timeMode: ['timed'] } },
 					},
 					{
 						displayName: 'End',
 						name: 'end',
 						type: 'dateTime',
 						default: '',
+						displayOptions: { show: { timeMode: ['timed'] } },
+					},
+					{
+						displayName: 'Start Date',
+						name: 'startDate',
+						type: 'dateTime',
+						typeOptions: { dateOnly: true },
+						default: '',
+						displayOptions: { show: { timeMode: ['allDay'] } },
+					},
+					{
+						displayName: 'End Date',
+						name: 'endDate',
+						type: 'dateTime',
+						typeOptions: { dateOnly: true },
+						default: '',
+						displayOptions: { show: { timeMode: ['allDay'] } },
 					},
 					{
 						displayName: 'Summary',

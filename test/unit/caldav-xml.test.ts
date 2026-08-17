@@ -195,6 +195,13 @@ describe('CalDAV XML namespaces', () => {
 				localName: 'time-range',
 				qualifiedName: 'c:time-range',
 			},
+			timezone: {
+				namespace: 'caldav',
+				namespaceUri: 'urn:ietf:params:xml:ns:caldav',
+				prefix: 'c',
+				localName: 'timezone',
+				qualifiedName: 'c:timezone',
+			},
 		});
 	});
 });
@@ -464,6 +471,18 @@ describe('CalDAV REPORT request builders', () => {
       </c:comp-filter>
     </c:comp-filter>
   </c:filter>
+  <c:timezone>BEGIN:VCALENDAR&#13;
+PRODID:-//n8n-nodes-caldav//EN&#13;
+VERSION:2.0&#13;
+BEGIN:VTIMEZONE&#13;
+TZID:UTC&#13;
+BEGIN:STANDARD&#13;
+DTSTART:19700101T000000&#13;
+TZOFFSETFROM:+0000&#13;
+TZOFFSETTO:+0000&#13;
+END:STANDARD&#13;
+END:VTIMEZONE&#13;
+END:VCALENDAR</c:timezone>
 </c:calendar-query>`);
 		expectCleanDocument(document);
 	});
@@ -550,6 +569,14 @@ describe('CalDAV REPORT request builders', () => {
 	});
 
 	it('rejects years that cannot be serialized with exactly four digits', () => {
+		const yearZero = new Date('2026-01-01T00:00:00Z');
+		yearZero.setUTCFullYear(0);
+		const yearOne = new Date('2026-01-02T00:00:00Z');
+		yearOne.setUTCFullYear(1);
+		expect(
+			captureError(() => buildCalendarTimeRangeQueryReport({ start: yearZero, end: yearOne })).code,
+		).toBe('INVALID_DATE');
+
 		const negativeYear = new Date('2026-01-01T00:00:00Z');
 		const ordinaryEnd = new Date('2026-01-02T00:00:00Z');
 		negativeYear.setUTCFullYear(-1);

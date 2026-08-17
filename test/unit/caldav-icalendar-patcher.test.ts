@@ -415,22 +415,24 @@ describe('time scope, parameters, ordering, and revision metadata', () => {
 	});
 
 	it.each([
-		['recurrence', ['RRULE:FREQ=DAILY;COUNT=2'], 'UNSUPPORTED_TIME'],
+		['recurrence', ['RRULE:FREQ=DAILY;COUNT=2'], 'UNSUPPORTED_TIME', 'start'],
 		[
 			'all day',
 			['DTSTART;VALUE=DATE:20260812', 'DTEND;VALUE=DATE:20260813'],
-			'INCOMPATIBLE_PARAMETERS',
+			'INVALID_INPUT',
+			'end',
 		],
 		[
 			'TZID',
 			['DTSTART;TZID=Europe/Prague:20260812T090000', 'DTEND;TZID=Europe/Prague:20260812T100000'],
-			'INCOMPATIBLE_PARAMETERS',
+			'UNSUPPORTED_TIME',
+			'start',
 		],
-		['floating', ['DTSTART:20260812T090000', 'DTEND:20260812T100000'], 'UNSUPPORTED_TIME'],
-		['DURATION', ['DTSTART:20260812T090000Z', 'DURATION:PT1H'], 'UNSUPPORTED_TIME'],
+		['floating', ['DTSTART:20260812T090000', 'DTEND:20260812T100000'], 'UNSUPPORTED_TIME', 'start'],
+		['DURATION', ['DTSTART:20260812T090000Z', 'DURATION:PT1H'], 'UNSUPPORTED_TIME', 'start'],
 	] as const)(
 		'rejects a %s time patch while allowing a text-only patch',
-		(_label, timeLines, code) => {
+		(_label, timeLines, code, field) => {
 			const source = context(
 				event('unsupported-time', ['DTSTAMP:20260812T080000Z', ...timeLines, 'SUMMARY:Original']),
 			);
@@ -442,7 +444,7 @@ describe('time scope, parameters, ordering, and revision metadata', () => {
 						MODIFIED_AT,
 					),
 				code,
-				'start',
+				field,
 			);
 			const textOnly = applyCalendarEventPatch(
 				source,

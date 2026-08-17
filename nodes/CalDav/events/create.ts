@@ -1,32 +1,42 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The accepted application-service contract exposes sanitized domain failures outside the n8n UI boundary. */
 
-import { mapCalendarEventResource } from '../icalendar/eventReadModel';
-import type { CalendarEvent } from '../icalendar/eventReadModel';
-import { parseICalendarResource } from '../icalendar/parser';
+import type { CalendarDateString, CalendarEvent } from '../icalendar/eventReadModel';
 import { serializeBasicUtcEvent } from '../icalendar/serializer';
 import { CalDavTransportError } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import { joinCalendarCollectionUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
-import { createCalendarEventResource, getCalendarEventMutationEtag } from './mutations';
+import { getCalendarEventByResourceUrl } from './getByResourceUrl';
+import { createCalendarEventResource } from './mutations';
 import { resolveCalendarEventUid } from './uid';
 
-export interface CalendarEventCreateInput {
+interface CalendarEventCreateCommon {
 	readonly calendarUrl: AbsoluteHttpUrl;
 	readonly uid?: string;
-	readonly start: Date;
-	readonly end: Date;
 	readonly summary: string;
 	readonly description?: string;
 	readonly location?: string;
 	readonly url?: string;
 }
 
+export type CalendarEventCreateInput = CalendarEventCreateCommon &
+	(
+		| {
+				readonly timeMode: 'timed';
+				readonly start: Date;
+				readonly end: Date;
+		  }
+		| {
+				readonly timeMode: 'allDay';
+				readonly startDate: CalendarDateString;
+				readonly endDate: CalendarDateString;
+		  }
+	);
+
 export type CalendarEventCreateClock = () => Date;
 
-export type CreatedCalendarEvent = Omit<CalendarEvent, 'etag' | 'summary' | 'extensions'> & {
+export type CreatedCalendarEvent = CalendarEvent & {
 	readonly etag: string;
-	readonly summary: string;
 };
 
 export const CalendarEventCreateFailureCode = Object.freeze({
@@ -104,45 +114,25 @@ function readClock(clock: CalendarEventCreateClock): Date {
 	}
 }
 
-function normalizeCreatedEvent(
-	input: CalendarEventCreateInput,
-	resourceUrl: AbsoluteHttpUrl,
-	calendarData: string,
-): Omit<CreatedCalendarEvent, 'etag'> {
-	try {
-		const resource = parseICalendarResource(Buffer.from(calendarData, 'utf8'));
-		const event = mapCalendarEventResource({
-			calendarUrl: input.calendarUrl,
-			resourceUrl,
-			resource,
-		}).event;
-		if (event.summary === undefined) {
-			throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
-		}
-		return Object.freeze({
-			calendarUrl: event.calendarUrl,
-			resourceUrl: event.resourceUrl,
-			uid: event.uid,
-			summary: event.summary,
-			...(event.description === undefined ? {} : { description: event.description }),
-			...(event.location === undefined ? {} : { location: event.location }),
-			...(event.url === undefined ? {} : { url: event.url }),
-			start: event.start,
-			end: event.end,
-		});
-	} catch (error) {
-		if (
-			error instanceof CalDavCalendarEventCreateError &&
-			error.code === CalendarEventCreateFailureCode.NORMALIZATION_FAILED
-		) {
-			throw error;
-		}
-		throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
-	}
-}
-
 function safeStatusCode(error: unknown): number | undefined {
 	return error instanceof CalDavTransportError ? error.statusCode : undefined;
+}
+
+function isDirectCalendarChild(
+	calendarUrl: AbsoluteHttpUrl,
+	resourceUrl: AbsoluteHttpUrl,
+): boolean {
+	try {
+		const calendar = new URL(calendarUrl);
+		const resource = new URL(resourceUrl);
+		if (calendar.origin !== resource.origin || !resource.pathname.startsWith(calendar.pathname)) {
+			return false;
+		}
+		const child = resource.pathname.slice(calendar.pathname.length);
+		return child.length > 0 && !child.endsWith('/') && !child.includes('/');
+	} catch {
+		return false;
+	}
 }
 
 export async function createCalendarEvent(
@@ -153,17 +143,28 @@ export async function createCalendarEvent(
 	const uid = resolveCalendarEventUid(input.uid);
 	const resourceUrl = joinCalendarCollectionUrl(input.calendarUrl, resourceNameForUid(uid));
 	const dtstamp = readClock(clock);
-	const calendarData = serializeBasicUtcEvent({
+	const common = {
 		uid,
 		dtstamp,
-		start: input.start,
-		end: input.end,
 		summary: input.summary,
 		...(input.description === undefined ? {} : { description: input.description }),
 		...(input.location === undefined ? {} : { location: input.location }),
 		...(input.url === undefined ? {} : { url: input.url }),
-	});
-	const normalized = normalizeCreatedEvent(input, resourceUrl, calendarData);
+	};
+	const calendarData =
+		input.timeMode === 'allDay'
+			? serializeBasicUtcEvent({
+					...common,
+					timeMode: 'allDay',
+					startDate: input.startDate,
+					endDate: input.endDate,
+				})
+			: serializeBasicUtcEvent({
+					...common,
+					timeMode: 'timed',
+					start: input.start,
+					end: input.end,
+				});
 	const created = await createCalendarEventResource(
 		transport,
 		input.calendarUrl,
@@ -171,35 +172,32 @@ export async function createCalendarEvent(
 		calendarData,
 	);
 
-	let canonicalResourceUrl = created.resourceUrl;
-	let etag = created.etag;
-	if (etag === undefined) {
-		try {
-			const metadata = await getCalendarEventMutationEtag(
-				transport,
-				input.calendarUrl,
-				created.resourceUrl,
-			);
-			canonicalResourceUrl = metadata.resourceUrl;
-			etag = metadata.etag;
-		} catch (error) {
+	try {
+		const confirmed = await getCalendarEventByResourceUrl(
+			transport,
+			input.calendarUrl,
+			created.resourceUrl,
+		);
+		if (
+			confirmed.event.etag === undefined ||
+			confirmed.event.uid !== uid ||
+			!isDirectCalendarChild(input.calendarUrl, confirmed.event.resourceUrl)
+		) {
 			throw new CalDavCalendarEventCreateError(
 				CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED,
-				safeStatusCode(error),
 			);
 		}
+		return Object.freeze({ ...confirmed.event, etag: confirmed.event.etag });
+	} catch (error) {
+		if (
+			error instanceof CalDavCalendarEventCreateError &&
+			error.code === CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED
+		) {
+			throw error;
+		}
+		throw new CalDavCalendarEventCreateError(
+			CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED,
+			safeStatusCode(error),
+		);
 	}
-
-	return Object.freeze({
-		calendarUrl: normalized.calendarUrl,
-		resourceUrl: canonicalResourceUrl,
-		etag,
-		uid: normalized.uid,
-		summary: normalized.summary,
-		...(normalized.description === undefined ? {} : { description: normalized.description }),
-		...(normalized.location === undefined ? {} : { location: normalized.location }),
-		...(normalized.url === undefined ? {} : { url: normalized.url }),
-		start: normalized.start,
-		end: normalized.end,
-	});
 }

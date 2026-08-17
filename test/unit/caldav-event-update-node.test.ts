@@ -65,6 +65,8 @@ const UPDATED_EVENT = Object.freeze({
 	description: '',
 	location: 'Updated location',
 	url: 'urn:example:updated',
+	timeMode: 'timed',
+	accessMode: 'editable',
 	start: '2040-01-02T10:00:00Z',
 	end: '2040-01-02T11:00:00Z',
 });
@@ -77,6 +79,7 @@ interface EventUpdateParameters {
 	readonly resourceUrl: unknown;
 	readonly uid: unknown;
 	readonly etag: unknown;
+	readonly timeMode: unknown;
 	readonly fieldsToUpdate: unknown;
 }
 
@@ -96,6 +99,7 @@ function parameters(
 		resourceUrl: identifierMode === 'resourceUrl' ? RESOURCE_URL : 'hidden-resource-private',
 		uid: identifierMode === 'uid' ? 'event@example.test' : 'hidden-uid-private',
 		etag: '',
+		timeMode: 'timed',
 		fieldsToUpdate: { summary: 'Updated summary' },
 		...overrides,
 	};
@@ -230,6 +234,8 @@ describe('CalDAV Event Update metadata', () => {
 		expect(fields.options?.map((option) => option.name)).toEqual([
 			'start',
 			'end',
+			'startDate',
+			'endDate',
 			'summary',
 			'description',
 			'location',
@@ -296,6 +302,7 @@ describe('CalDAV Event Update extraction and output', () => {
 			calendarUrl: CALENDAR_URL,
 			identifier: { kind: 'resourceUrl', resourceUrl: RESOURCE_URL },
 			patch: {
+				timeMode: 'timed',
 				start: { kind: 'set', value: new Date('2040-01-02T10:00:00Z') },
 				end: { kind: 'set', value: new Date('2040-01-02T11:00:00Z') },
 				summary: { kind: 'set', value: '' },
@@ -316,6 +323,8 @@ describe('CalDAV Event Update extraction and output', () => {
 			'description',
 			'location',
 			'url',
+			'timeMode',
+			'accessMode',
 			'start',
 			'end',
 		]);
@@ -336,7 +345,7 @@ describe('CalDAV Event Update extraction and output', () => {
 		expect(mocks.updateCalendarEvent.mock.calls[0][1]).toEqual({
 			calendarUrl: CALENDAR_URL,
 			identifier: { kind: 'uid', uid: 'opaque uid ../event' },
-			patch: { description: { kind: 'remove' } },
+			patch: { timeMode: 'timed', description: { kind: 'remove' } },
 		});
 	});
 });

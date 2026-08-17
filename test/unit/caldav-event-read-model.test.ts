@@ -319,6 +319,8 @@ describe('event projection and preservation context', () => {
 			calendarUrl: CALENDAR_URL,
 			resourceUrl: RESOURCE_URL,
 			uid: 'minimal-uid',
+			timeMode: 'timed',
+			accessMode: 'editable',
 			start: '2026-02-28T23:59:59Z',
 			end: '2026-02-28T23:59:59Z',
 		});
@@ -356,6 +358,8 @@ describe('event projection and preservation context', () => {
 			description: 'Line one\nLine two',
 			location: 'Room; 42',
 			url: 'https://events.example.test/raw%2Fpath?q=a,b;z',
+			timeMode: 'timed',
+			accessMode: 'editable',
 			start: '2026-08-12T09:00:00Z',
 			end: '2026-08-12T10:30:45Z',
 		});
@@ -472,11 +476,13 @@ describe('event projection and preservation context', () => {
 		const parsed = JSON.parse(serialized) as Record<string, unknown>;
 
 		expect(Object.keys(parsed).sort()).toEqual([
+			'accessMode',
 			'calendarUrl',
 			'end',
 			'extensions',
 			'resourceUrl',
 			'start',
+			'timeMode',
 			'uid',
 		]);
 		for (const forbidden of [
@@ -684,6 +690,20 @@ describe('projected property types and UTC event times', () => {
 		['floating local time', ['DTSTART:20260812T090000']],
 		['TZID local time', ['DTSTART;TZID=Europe/Prague:20260812T090000']],
 		['TZID on Z time', ['DTSTART;TZID=Etc/UTC:20260812T090000Z']],
+		['duration-only end', ['DTSTART:20260812T090000Z', 'DURATION:PT1H']],
+	] as const)('projects a safe read-only time representation: %s', (_label, lines) => {
+		const mapped = mapCalendarEventResource(
+			inputFor(parseEventResource(event('unsupported-time', lines))),
+		);
+		expect(mapped.event).toMatchObject({
+			timeMode: 'unsupported',
+			accessMode: 'readOnly',
+			readOnlyReason: 'unsupportedTimeRepresentation',
+		});
+		expect(mapped.event).not.toHaveProperty('start');
+	});
+
+	it.each([
 		['numeric offset', ['DTSTART:20260812T090000+0200']],
 		['hyphenated RFC 3339 input', ['DTSTART:2026-08-12T09:00:00Z']],
 		['lowercase z', ['DTSTART:20260812T090000z']],
@@ -698,9 +718,8 @@ describe('projected property types and UTC event times', () => {
 		['hour 24', ['DTSTART:20260812T240000Z']],
 		['minute 60', ['DTSTART:20260812T096000Z']],
 		['second 61', ['DTSTART:20260812T090061Z']],
-		['duration-only end', ['DTSTART:20260812T090000Z', 'DURATION:PT1H']],
-	] as const)('rejects unsupported time representation: %s', (_label, lines) => {
-		expectMapError(parseEventResource(event('unsupported-time', lines)), 'UNSUPPORTED_EVENT_TIME');
+	] as const)('rejects malformed time representation: %s', (_label, lines) => {
+		expectMapError(parseEventResource(event('unsupported-time', lines)), 'INVALID_EVENT_PROPERTY');
 	});
 
 	it('maps Gregorian leap day and RFC-valid leap-second spelling mechanically', () => {
@@ -779,7 +798,7 @@ describe('projected property types and UTC event times', () => {
 		const invalidTime = parseEventResource(
 			event('precedence', ['DTSTART:20260229T090000Z', 'DTEND:20260228T090000Z']),
 		);
-		expectMapError(invalidTime, 'UNSUPPORTED_EVENT_TIME', { extensions: badExtensions });
+		expectMapError(invalidTime, 'INVALID_EVENT_PROPERTY', { extensions: badExtensions });
 
 		const invalidRange = parseEventResource(
 			event('precedence', ['DTSTART:20260812T100000Z', 'DTEND:20260812T090000Z']),

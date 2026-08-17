@@ -16,19 +16,41 @@ import type {
 
 export const CALDAV_ICALENDAR_PRODID = '-//iljailjic//n8n-nodes-caldav//EN';
 
-export interface BasicUtcEventSerializationInput {
+interface BasicEventSerializationCommon {
 	readonly uid: string;
 	readonly dtstamp: Date;
-	readonly start: Date;
-	readonly end: Date;
 	readonly summary: string;
 	readonly description?: string;
 	readonly location?: string;
 	readonly url?: string;
 }
 
+export type BasicUtcEventSerializationInput = BasicEventSerializationCommon &
+	(
+		| {
+				readonly timeMode?: 'timed';
+				readonly start: Date;
+				readonly end: Date;
+		  }
+		| {
+				readonly timeMode: 'allDay';
+				readonly startDate: string;
+				readonly endDate: string;
+		  }
+	);
+
 export type BasicUtcEventSerializationField =
-	'uid' | 'dtstamp' | 'start' | 'end' | 'summary' | 'description' | 'location' | 'url';
+	| 'uid'
+	| 'dtstamp'
+	| 'timeMode'
+	| 'start'
+	| 'end'
+	| 'startDate'
+	| 'endDate'
+	| 'summary'
+	| 'description'
+	| 'location'
+	| 'url';
 
 export const CalDavICalendarSerializeErrorCode = Object.freeze({
 	INVALID_INPUT: 'INVALID_INPUT',
@@ -65,22 +87,27 @@ export class CalDavICalendarSerializeError extends Error {
 	}
 }
 
-interface BasicInputSnapshot {
+interface BasicInputSnapshotCommon {
 	readonly uid: string;
 	readonly dtstamp: number;
-	readonly start: number;
-	readonly end: number;
 	readonly summary: string;
 	readonly description?: string;
 	readonly location?: string;
 	readonly url?: string;
 }
 
+type BasicInputSnapshot = BasicInputSnapshotCommon &
+	(
+		| { readonly timeMode: 'timed'; readonly start: number; readonly end: number }
+		| { readonly timeMode: 'allDay'; readonly startDate: string; readonly endDate: string }
+	);
+
 const NAME_PATTERN = /^[A-Za-z0-9-]+$/;
 const SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*$/;
 const HEX_PATTERN = /^[0-9A-Fa-f]$/;
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
+const CALENDAR_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 const DEFAULT_VALUE_TYPES: Readonly<Record<string, string>> = {
 	ACTION: 'TEXT',
@@ -414,17 +441,63 @@ function dateTimestamp(value: unknown, field: 'dtstamp' | 'start' | 'end'): numb
 	return timestamp;
 }
 
+function isLeapYear(year: number): boolean {
+	return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function daysInMonth(year: number, month: number): number {
+	if (month === 2) return isLeapYear(year) ? 29 : 28;
+	if (month === 4 || month === 6 || month === 9 || month === 11) return 30;
+	return 31;
+}
+
+function calendarDate(value: unknown, field: 'startDate' | 'endDate'): string {
+	if (value === undefined) fail('MISSING_REQUIRED_FIELD', field);
+	if (typeof value !== 'string') fail('INVALID_INPUT', field);
+	const match = CALENDAR_DATE_PATTERN.exec(value);
+	if (match === null) fail('INVALID_DATE', field);
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	if (
+		year < 1 ||
+		year > 9999 ||
+		month < 1 ||
+		month > 12 ||
+		day < 1 ||
+		day > daysInMonth(year, month)
+	) {
+		fail('INVALID_DATE', field);
+	}
+	return value;
+}
+
 function snapshotBasicInput(input: BasicUtcEventSerializationInput): BasicInputSnapshot {
 	if (!isRecord(input)) fail('INVALID_INPUT');
 
 	const uid = requiredString(input.uid, 'uid', false);
 	const dtstamp = dateTimestamp(input.dtstamp, 'dtstamp');
-	const start = dateTimestamp(input.start, 'start');
-	const end = dateTimestamp(input.end, 'end');
+	const mode = input.timeMode ?? 'timed';
+	let time:
+		| { readonly timeMode: 'timed'; readonly start: number; readonly end: number }
+		| { readonly timeMode: 'allDay'; readonly startDate: string; readonly endDate: string };
+	if (mode === 'timed') {
+		if ('startDate' in input || 'endDate' in input) fail('INVALID_INPUT', 'timeMode');
+		const start = dateTimestamp(input.start, 'start');
+		const end = dateTimestamp(input.end, 'end');
+		time = { timeMode: 'timed', start, end };
+	} else if (mode === 'allDay') {
+		if ('start' in input || 'end' in input) fail('INVALID_INPUT', 'timeMode');
+		const startDate = calendarDate(input.startDate, 'startDate');
+		const endDate = calendarDate(input.endDate, 'endDate');
+		time = { timeMode: 'allDay', startDate, endDate };
+	} else {
+		fail('INVALID_INPUT', 'timeMode');
+	}
+
 	const summary = requiredString(input.summary, 'summary', true);
 	const description = optionalText(input.description, 'description');
 	const location = optionalText(input.location, 'location');
-
 	const urlValue = input.url;
 	let url: string | undefined;
 	if (urlValue !== undefined) {
@@ -432,9 +505,13 @@ function snapshotBasicInput(input: BasicUtcEventSerializationInput): BasicInputS
 		if (!isAbsoluteUri(urlValue)) fail('INVALID_URI', 'url');
 		url = urlValue;
 	}
-
-	if (end <= start) fail('INVALID_TIME_RANGE');
-	return { uid, dtstamp, start, end, summary, description, location, url };
+	if (
+		(time.timeMode === 'timed' && time.end <= time.start) ||
+		(time.timeMode === 'allDay' && time.endDate <= time.startDate)
+	) {
+		fail('INVALID_TIME_RANGE');
+	}
+	return { uid, dtstamp, ...time, summary, description, location, url };
 }
 
 function formatUtcDateTime(timestamp: number): string {
@@ -469,12 +546,36 @@ function rawProperty(name: string, valueType: string, raw: string): ICalendarPro
 	};
 }
 
+function dateProperty(name: string, raw: string): ICalendarProperty {
+	return {
+		kind: 'property',
+		name,
+		parameters: [
+			{
+				kind: 'parameter',
+				name: 'VALUE',
+				values: [{ kind: 'parameterValue', raw: 'DATE', value: 'DATE', quoted: false }],
+			},
+		],
+		value: { kind: 'value', valueType: 'DATE', raw, textValues: null },
+	};
+}
+
 function basicResource(input: BasicInputSnapshot): ICalendarResource {
+	const timeProperties =
+		input.timeMode === 'timed'
+			? [
+					rawProperty('DTSTART', 'DATE-TIME', formatUtcDateTime(input.start)),
+					rawProperty('DTEND', 'DATE-TIME', formatUtcDateTime(input.end)),
+				]
+			: [
+					dateProperty('DTSTART', input.startDate.split('-').join('')),
+					dateProperty('DTEND', input.endDate.split('-').join('')),
+				];
 	const eventEntries: ICalendarEntry[] = [
 		textProperty('UID', input.uid),
 		rawProperty('DTSTAMP', 'DATE-TIME', formatUtcDateTime(input.dtstamp)),
-		rawProperty('DTSTART', 'DATE-TIME', formatUtcDateTime(input.start)),
-		rawProperty('DTEND', 'DATE-TIME', formatUtcDateTime(input.end)),
+		...timeProperties,
 		textProperty('SUMMARY', input.summary),
 	];
 	if (input.description !== undefined) {

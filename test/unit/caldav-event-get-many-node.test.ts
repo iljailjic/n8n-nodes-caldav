@@ -87,6 +87,8 @@ function event(uid: string, overrides: Partial<CalendarEventReadResult['event']>
 			description: undefined,
 			location: 'Room',
 			url: undefined,
+			timeMode: 'timed',
+			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',
 			end: '2040-01-02T10:30:00Z',
 			...overrides,
@@ -207,6 +209,26 @@ describe('CalDAV Event Get Many metadata', () => {
 });
 
 describe('CalDAV Event Get Many execution', () => {
+	it('accepts the inclusive four-digit UTC year boundaries', async () => {
+		mocks.queryCalendarEventsByTimeRange.mockResolvedValue([]);
+
+		await expect(
+			execute(
+				context([
+					parameters({ start: '0001-01-01T00:00:00Z', end: '0001-01-02T00:00:00Z' }),
+					parameters({ start: '9999-12-30T00:00:00Z', end: '9999-12-31T00:00:00Z' }),
+				]),
+			),
+		).resolves.toEqual([[]]);
+		expect(mocks.queryCalendarEventsByTimeRange).toHaveBeenCalledTimes(2);
+		expect(mocks.queryCalendarEventsByTimeRange.mock.calls[0]?.[2]).toEqual({
+			start: expect.any(Date),
+			end: expect.any(Date),
+		});
+		expect(mocks.queryCalendarEventsByTimeRange.mock.calls[0]?.[2].start.getUTCFullYear()).toBe(1);
+		expect(mocks.queryCalendarEventsByTimeRange.mock.calls[1]?.[2].end.getUTCFullYear()).toBe(9999);
+	});
+
 	it('normalizes each calendar, delegates sequentially, slices service order, projects events, and pairs input', async () => {
 		const first = event('first');
 		const second = event('second', { etag: undefined, summary: undefined, description: '' });
@@ -242,6 +264,8 @@ describe('CalDAV Event Get Many execution', () => {
 					uid: 'second',
 					description: '',
 					location: 'Room',
+					timeMode: 'timed',
+					accessMode: 'editable',
 					start: '2040-01-02T10:00:00Z',
 					end: '2040-01-02T10:30:00Z',
 				},
@@ -255,6 +279,8 @@ describe('CalDAV Event Get Many execution', () => {
 					uid: 'first',
 					summary: '',
 					location: 'Room',
+					timeMode: 'timed',
+					accessMode: 'editable',
 					start: '2040-01-02T10:00:00Z',
 					end: '2040-01-02T10:30:00Z',
 				},
@@ -268,6 +294,8 @@ describe('CalDAV Event Get Many execution', () => {
 					uid: 'other',
 					summary: '',
 					location: 'Room',
+					timeMode: 'timed',
+					accessMode: 'editable',
 					start: '2040-01-02T10:00:00Z',
 					end: '2040-01-02T10:30:00Z',
 				},
@@ -285,6 +313,38 @@ describe('CalDAV Event Get Many execution', () => {
 });
 
 describe('CalDAV Event Get Many validation and failures', () => {
+	it.each([
+		['string', '0000-01-01T00:00:00Z'],
+		[
+			'native Date',
+			(() => {
+				const value = new Date(0);
+				value.setUTCFullYear(0, 0, 1);
+				value.setUTCHours(0, 0, 0, 0);
+				return value;
+			})(),
+		],
+		[
+			'Luxon/n8n DateTime',
+			{
+				isLuxonDateTime: true,
+				isValid: true,
+				toJSDate: () => {
+					const value = new Date(0);
+					value.setUTCFullYear(0, 0, 1);
+					value.setUTCHours(0, 0, 0, 0);
+					return value;
+				},
+			},
+		],
+	] as const)('rejects year zero from a %s before transport or query', async (_label, start) => {
+		const error = await captureError(execute(context([parameters({ start })])));
+		expect(error).toBeInstanceOf(NodeOperationError);
+		expect(error.message).toBe('Start must be a valid date and time with whole-second precision.');
+		expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
+		expect(mocks.queryCalendarEventsByTimeRange).not.toHaveBeenCalled();
+	});
+
 	it.each([
 		['start', '2040-01-02T10:00:00'],
 		['start', '2040-01-02T10:00:00.123Z'],

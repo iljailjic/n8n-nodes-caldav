@@ -180,8 +180,11 @@ describe('Calendar Get Many node description', () => {
 			'limit',
 			'calendar',
 			'uid',
+			'timeMode',
 			'start',
 			'end',
+			'startDate',
+			'endDate',
 			'summary',
 			'additionalFields',
 			'start',
@@ -192,6 +195,7 @@ describe('Calendar Get Many node description', () => {
 			'resourceUrl',
 			'uid',
 			'etag',
+			'timeMode',
 			'fieldsToUpdate',
 		]);
 

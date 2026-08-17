@@ -50,6 +50,12 @@ a standards-compliant UUID. Do not assume an application-specific identifier.
 - Recurrence authoring and preservation.
 - Raw ICS input and output as an interoperability escape hatch.
 
+The 0.5.0 all-day slice authors strict Gregorian `VALUE=DATE` start/end pairs
+with an inclusive start and exclusive end. Timed authoring in this slice stays
+UTC-only. Safely identifiable floating, duration-based, or timezone-dependent
+events remain readable and deletable but are read-only for structured Update;
+IANA authoring and `VTIMEZONE` generation remain separate roadmap work.
+
 ### Concurrency and interoperability
 
 - Return resource URLs and ETags on reads and writes.

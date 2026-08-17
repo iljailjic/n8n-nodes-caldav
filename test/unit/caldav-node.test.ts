@@ -144,8 +144,11 @@ describe('CalDAV Calendar Get UI', () => {
 			'limit',
 			'calendar',
 			'uid',
+			'timeMode',
 			'start',
 			'end',
+			'startDate',
+			'endDate',
 			'summary',
 			'additionalFields',
 			'start',
@@ -156,6 +159,7 @@ describe('CalDAV Calendar Get UI', () => {
 			'resourceUrl',
 			'uid',
 			'etag',
+			'timeMode',
 			'fieldsToUpdate',
 		]);
 		const calendarProperties = node.description.properties.filter(
@@ -163,6 +167,9 @@ describe('CalDAV Calendar Get UI', () => {
 				![
 					'start',
 					'end',
+					'startDate',
+					'endDate',
+					'timeMode',
 					'summary',
 					'additionalFields',
 					'identifierMode',

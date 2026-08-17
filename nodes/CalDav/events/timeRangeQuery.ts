@@ -87,8 +87,24 @@ function compareUnicodeScalars(left: string, right: string): number {
 }
 
 function compareResults(left: CalendarEventReadResult, right: CalendarEventReadResult): number {
+	const leftTime =
+		left.event.timeMode === 'timed'
+			? left.event.start
+			: left.event.timeMode === 'allDay'
+				? `${left.event.startDate}T00:00:00Z`
+				: undefined;
+	const rightTime =
+		right.event.timeMode === 'timed'
+			? right.event.start
+			: right.event.timeMode === 'allDay'
+				? `${right.event.startDate}T00:00:00Z`
+				: undefined;
+	if (leftTime !== undefined && rightTime === undefined) return -1;
+	if (leftTime === undefined && rightTime !== undefined) return 1;
 	return (
-		compareUnicodeScalars(left.event.start, right.event.start) ||
+		(leftTime === undefined || rightTime === undefined
+			? 0
+			: compareUnicodeScalars(leftTime, rightTime)) ||
 		compareUnicodeScalars(left.event.uid, right.event.uid) ||
 		compareUnicodeScalars(left.event.resourceUrl, right.event.resourceUrl)
 	);

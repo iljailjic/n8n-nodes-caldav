@@ -27,11 +27,14 @@ import {
 	updateCalendarEventResource,
 } from '../../nodes/CalDav/events/mutations';
 import { queryCalendarEventsByTimeRange } from '../../nodes/CalDav/events/timeRangeQuery';
+import { updateCalendarEvent } from '../../nodes/CalDav/events/update';
+import type { CalendarEventUpdateInput } from '../../nodes/CalDav/events/update';
 import {
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
 } from '../../nodes/CalDav/events/resolveByUid';
 import { serializeBasicUtcEvent } from '../../nodes/CalDav/icalendar/serializer';
+import type { CalendarEventPatch } from '../../nodes/CalDav/icalendar/patcher';
 import {
 	CalDavAuthenticationError,
 	CalDavAuthorizationError,
@@ -274,6 +277,7 @@ interface EventDeleteIntegrationParameters {
 interface EventCreateIntegrationParameters {
 	readonly calendar: unknown;
 	readonly uid: unknown;
+	readonly timeMode: 'timed';
 	readonly start: unknown;
 	readonly end: unknown;
 	readonly summary: unknown;
@@ -286,6 +290,7 @@ interface EventUpdateIntegrationParameters {
 	readonly resourceUrl?: string;
 	readonly uid?: string;
 	readonly etag?: unknown;
+	readonly timeMode: 'timed';
 	readonly fieldsToUpdate: unknown;
 }
 
@@ -305,6 +310,7 @@ function eventCreateContext(
 		operation: 'create',
 		calendar: parameters.calendar,
 		uid: parameters.uid,
+		timeMode: parameters.timeMode,
 		start: parameters.start,
 		end: parameters.end,
 		summary: parameters.summary,
@@ -407,6 +413,7 @@ function eventUpdateContext(
 		resourceUrl: parameters.resourceUrl,
 		uid: parameters.uid,
 		etag: parameters.etag,
+		timeMode: parameters.timeMode,
 		fieldsToUpdate: parameters.fieldsToUpdate,
 	};
 	const context = {
@@ -892,6 +899,8 @@ describe('Radicale calendar-event UID resolution', () => {
 				etag: storedEtag,
 				uid,
 				summary: 'Synthetic harness oracle event',
+				timeMode: 'timed',
+				accessMode: 'editable',
 				start: '2040-01-02T10:00:00Z',
 				end: '2040-01-02T10:30:00Z',
 			};
@@ -953,6 +962,7 @@ describe('Radicale collision-safe Event Create', () => {
 			const execution = eventCreateContext(run, {
 				calendar: { __rl: true, mode: 'url', value: calendarUrl },
 				uid: '',
+				timeMode: 'timed',
 				start: '2040-02-03T10:00:00Z',
 				end: '2040-02-03T11:00:00Z',
 				summary: 'Generated UID round trip',
@@ -1037,6 +1047,8 @@ describe('Radicale collision-safe Event Create', () => {
 				description: '',
 				location: 'Praha; Brno',
 				url: 'urn:example:radicale:create',
+				timeMode: 'timed',
+				accessMode: 'editable',
 				start: '2040-02-03T10:00:00Z',
 				end: '2040-02-03T11:00:00Z',
 			});
@@ -1103,6 +1115,7 @@ describe('Radicale collision-safe Event Create', () => {
 			const readOnly = eventCreateContext(run, {
 				calendar: { __rl: true, mode: 'url', value: calendarUrl },
 				uid: `read-only-${run.identity}`,
+				timeMode: 'timed',
 				start: '2040-02-03T10:00:00Z',
 				end: '2040-02-03T11:00:00Z',
 				summary: 'Must not be created',
@@ -1122,6 +1135,7 @@ describe('Radicale collision-safe Event Create', () => {
 			const invalid = eventCreateContext(run, {
 				calendar: { __rl: true, mode: 'url', value: calendarUrl },
 				uid: `invalid-${run.identity}`,
+				timeMode: 'timed',
 				start: '2040-02-03T10:00:00',
 				end: '2040-02-03T11:00:00Z',
 				summary: 'Invalid timezone-less input',
@@ -1196,6 +1210,8 @@ describe('Radicale conditional calendar-event mutations', () => {
 				description: 'Created through the merged mutation service',
 				location: 'Integration calendar',
 				url: 'urn:example:calendar:radicale-oracle',
+				timeMode: 'timed',
+				accessMode: 'editable',
 				start: '2040-01-02T10:00:00Z',
 				end: '2040-01-02T10:30:00Z',
 			});
@@ -1397,6 +1413,7 @@ describe('Radicale conditional Event Update operation', () => {
 				identifierMode: 'resourceUrl',
 				resourceUrl: eventUrl,
 				etag: '',
+				timeMode: 'timed',
 				fieldsToUpdate: {
 					summary: 'After preservation update',
 					description: { change: { action: 'set', value: '' } },
@@ -1416,6 +1433,8 @@ describe('Radicale conditional Event Update operation', () => {
 						uid: syntheticEventUid(run),
 						summary: 'After preservation update',
 						description: '',
+						timeMode: 'timed',
+						accessMode: 'editable',
 						start: '2040-01-02T10:00:00Z',
 						end: '2040-01-02T10:30:00Z',
 					},
@@ -1458,6 +1477,7 @@ describe('Radicale conditional Event Update operation', () => {
 				identifierMode: 'uid',
 				uid: syntheticEventUid(run),
 				etag: suppliedEtag,
+				timeMode: 'timed',
 				fieldsToUpdate: { location: { change: { action: 'set', value: 'UID oracle' } } },
 			});
 
@@ -1497,6 +1517,7 @@ describe('Radicale conditional Event Update operation', () => {
 				identifierMode: 'resourceUrl',
 				resourceUrl: eventUrl,
 				etag: staleEtag,
+				timeMode: 'timed',
 				fieldsToUpdate: { summary: 'Forbidden stale Update' },
 			});
 
@@ -1529,6 +1550,7 @@ describe('Radicale conditional Event Update operation', () => {
 					identifierMode: 'resourceUrl',
 					resourceUrl: eventUrl,
 					etag: '',
+					timeMode: 'timed',
 					fieldsToUpdate: { summary: 'Forbidden race loser' },
 				},
 				async (options) => {
@@ -1565,6 +1587,7 @@ describe('Radicale conditional Event Update operation', () => {
 				identifierMode: 'resourceUrl',
 				resourceUrl: eventUrl,
 				etag: '',
+				timeMode: 'timed',
 				fieldsToUpdate: { summary: 'Forbidden read-only Update' },
 			});
 
@@ -1752,6 +1775,206 @@ describe('Radicale Event Delete node operation', () => {
 			expect(deleteRequests[0].headers?.['If-Match']).toEqual(expect.any(String));
 			expect(deleteRequests[0].body).toBeUndefined();
 			expect((await authenticatedFetch(run, eventUrl)).status).toBe(200);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+});
+
+describe('Radicale issue #41 all-day event interoperability', () => {
+	it('round-trips one-day leap and multi-day year-boundary values and enforces half-open queries', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'all-day-boundaries', 'All-Day Boundaries'),
+			);
+			const adapter = requestAdapter(run);
+			const requests = vi.fn(
+				async (options: N8nCalDavRequestOptions) => await adapter.request(options),
+			);
+			const liveTransport = createCalDavTransport(run.endpoint, { request: requests });
+			const leapUid = `all-day-leap-${run.identity}@example.test`;
+			const yearUid = `all-day-year-${run.identity}@example.test`;
+
+			const leap = await createCalendarEvent(
+				liveTransport,
+				{
+					calendarUrl,
+					uid: leapUid,
+					timeMode: 'allDay',
+					startDate: '2040-02-29',
+					endDate: '2040-03-01',
+					summary: 'Leap-day exclusive end',
+				} as never,
+				() => new Date('2040-02-01T00:00:00.999Z'),
+			);
+			const year = await createCalendarEvent(
+				liveTransport,
+				{
+					calendarUrl,
+					uid: yearUid,
+					timeMode: 'allDay',
+					startDate: '2040-12-31',
+					endDate: '2041-01-03',
+					summary: 'Year-boundary exclusive end',
+				} as never,
+				() => new Date('2040-02-01T00:00:01Z'),
+			);
+
+			expect(leap).toMatchObject({
+				timeMode: 'allDay',
+				accessMode: 'editable',
+				startDate: '2040-02-29',
+				endDate: '2040-03-01',
+				etag: expect.any(String),
+			});
+			expect(year).toMatchObject({
+				timeMode: 'allDay',
+				accessMode: 'editable',
+				startDate: '2040-12-31',
+				endDate: '2041-01-03',
+			});
+			const createMethods = requests.mock.calls.map(
+				([options]) => (options as N8nCalDavRequestOptions).method,
+			);
+			expect(createMethods).toEqual(['PUT', 'GET', 'PUT', 'GET']);
+
+			for (const created of [leap, year]) {
+				const raw = await authenticatedFetch(run, created.resourceUrl);
+				const rawBody = await raw.text();
+				expect(rawBody).toContain(`DTSTART;VALUE=DATE:${created.startDate.replaceAll('-', '')}`);
+				expect(rawBody).toContain(`DTEND;VALUE=DATE:${created.endDate.replaceAll('-', '')}`);
+				expect(rawBody).not.toMatch(/DT(?:START|END)[^\r\n]*(?:TZID|T\d{6}|Z)/);
+				const readBack = await getCalendarEventByResourceUrl(
+					transport(run),
+					calendarUrl,
+					created.resourceUrl,
+				);
+				expect(readBack.event).toMatchObject({
+					timeMode: 'allDay',
+					startDate: created.startDate,
+					endDate: created.endDate,
+				});
+			}
+
+			const beforeLeap = await queryCalendarEventsByTimeRange(transport(run), calendarUrl, {
+				start: new Date('2040-02-28T00:00:00Z'),
+				end: new Date('2040-02-29T00:00:00Z'),
+			});
+			const exactLeap = await queryCalendarEventsByTimeRange(transport(run), calendarUrl, {
+				start: new Date('2040-02-29T00:00:00Z'),
+				end: new Date('2040-03-01T00:00:00Z'),
+			});
+			const afterLeap = await queryCalendarEventsByTimeRange(transport(run), calendarUrl, {
+				start: new Date('2040-03-01T00:00:00Z'),
+				end: new Date('2040-03-02T00:00:00Z'),
+			});
+			expect(beforeLeap.map(({ event }) => event.uid)).not.toContain(leapUid);
+			expect(exactLeap.map(({ event }) => event.uid)).toContain(leapUid);
+			expect(afterLeap.map(({ event }) => event.uid)).not.toContain(leapUid);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
+	it('converts all-day to timed and back while preserving conditional concurrency', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'all-day-conversion', 'All-Day Conversion'),
+			);
+			const adapter = requestAdapter(run);
+			const requests = vi.fn(
+				async (options: N8nCalDavRequestOptions) => await adapter.request(options),
+			);
+			const liveTransport = createCalDavTransport(run.endpoint, { request: requests });
+			const uid = `all-day-conversion-${run.identity}@example.test`;
+			const created = await createCalendarEvent(
+				liveTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'allDay',
+					startDate: '2040-12-31',
+					endDate: '2041-01-03',
+					summary: 'Convert me',
+				} as never,
+				() => new Date('2040-12-01T00:00:00Z'),
+			);
+
+			requests.mockClear();
+			const toTimedPatch = {
+				timeMode: 'timed',
+				start: { kind: 'set', value: new Date('2040-12-31T10:00:00Z') },
+				end: { kind: 'set', value: new Date('2040-12-31T11:00:00Z') },
+			} as unknown as CalendarEventPatch;
+			const timed = await updateCalendarEvent(
+				liveTransport,
+				{
+					calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+					etag: created.etag,
+					patch: toTimedPatch,
+				} satisfies CalendarEventUpdateInput,
+				() => new Date('2040-12-02T00:00:00.999Z'),
+			);
+			expect(timed).toMatchObject({
+				timeMode: 'timed',
+				accessMode: 'editable',
+				start: '2040-12-31T10:00:00Z',
+				end: '2040-12-31T11:00:00Z',
+			});
+			expect(
+				requests.mock.calls.map(([options]) => (options as N8nCalDavRequestOptions).method),
+			).toEqual(['GET', 'PUT', 'GET']);
+
+			requests.mockClear();
+			const backToAllDay = await updateCalendarEvent(
+				liveTransport,
+				{
+					calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+					etag: timed.etag,
+					patch: {
+						timeMode: 'allDay',
+						startDate: { kind: 'set', value: '2040-12-31' },
+						endDate: { kind: 'set', value: '2041-01-03' },
+					} as unknown as CalendarEventPatch,
+				},
+				() => new Date('2040-12-03T00:00:00Z'),
+			);
+			expect(backToAllDay).toMatchObject({
+				timeMode: 'allDay',
+				startDate: '2040-12-31',
+				endDate: '2041-01-03',
+			});
+			const stored = await authenticatedFetch(run, created.resourceUrl);
+			const storedBody = await stored.text();
+			expect(storedBody).toContain('DTSTART;VALUE=DATE:20401231');
+			expect(storedBody).toContain('DTEND;VALUE=DATE:20410103');
+
+			requests.mockClear();
+			await expect(
+				updateCalendarEvent(
+					liveTransport,
+					{
+						calendarUrl,
+						identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+						etag: timed.etag,
+						patch: {
+							timeMode: 'allDay',
+							summary: { kind: 'set', value: 'Forbidden stale update' },
+						} as unknown as CalendarEventPatch,
+					},
+					() => new Date('2040-12-04T00:00:00Z'),
+				),
+			).rejects.toMatchObject({ code: CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT });
+			expect(
+				requests.mock.calls.map(([options]) => (options as N8nCalDavRequestOptions).method),
+			).toEqual(['GET', 'PUT']);
+			expect(await (await authenticatedFetch(run, created.resourceUrl)).text()).not.toContain(
+				'Forbidden stale update',
+			);
 		} finally {
 			await teardownRun(run);
 		}
