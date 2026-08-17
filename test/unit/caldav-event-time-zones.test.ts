@@ -49,6 +49,25 @@ function map(ics: string) {
 	}).event;
 }
 
+function withException(source: string, lines: readonly string[]): string {
+	return source.replace(
+		'END:VCALENDAR\r\n',
+		[
+			'BEGIN:VEVENT',
+			'UID:synthetic-time-zone-event',
+			...lines,
+			'END:VEVENT',
+			'END:VCALENDAR',
+			'',
+		].join('\r\n'),
+	);
+}
+
+const RECURRING_PRAGUE_VTIMEZONE = PRAGUE_VTIMEZONE.replace(
+	'RDATE:20401028T030000',
+	'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU',
+).replace('RDATE:20410331T020000', 'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU');
+
 function basicTimedInput(
 	overrides: Partial<BasicTimedEventSerializationInput> = {},
 ): BasicTimedEventSerializationInput {
@@ -209,6 +228,95 @@ describe('timed event serialization and projection', () => {
 });
 
 describe('safe unsupported and hard-failure boundaries', () => {
+	it('accepts the strict supported yearly VTIMEZONE RRULE subset', () => {
+		const event = map(
+			timedEventIcs(
+				'DTSTART;TZID=Europe/Prague:20400715T100000',
+				'DTEND;TZID=Europe/Prague:20400715T110000',
+				[RECURRING_PRAGUE_VTIMEZONE],
+			),
+		);
+		expect(event).toMatchObject({ accessMode: 'editable', timeZoneMode: 'iana' });
+	});
+
+	it.each([
+		['UNTIL', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;UNTIL=20451231T000000Z'],
+		['COUNT', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;COUNT=4'],
+		['duplicate FREQ', 'FREQ=YEARLY;FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU'],
+		['unsupported BYSETPOS', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;BYSETPOS=1'],
+		['unsupported BYHOUR', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;BYHOUR=3'],
+		['unknown clause', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;X-SYNTHETIC=1'],
+	] as const)('maps a VTIMEZONE RRULE containing %s to read-only', (_label, rule) => {
+		const definition = RECURRING_PRAGUE_VTIMEZONE.replace(
+			'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU',
+			`RRULE:${rule}`,
+		);
+		const event = map(
+			timedEventIcs(
+				'DTSTART;TZID=Europe/Prague:20400715T100000',
+				'DTEND;TZID=Europe/Prague:20400715T110000',
+				[definition],
+			),
+		);
+		expect(event).toMatchObject({
+			timeMode: 'unsupported',
+			accessMode: 'readOnly',
+		});
+	});
+
+	it('maps a finite VTIMEZONE without sufficient future coverage to read-only', () => {
+		const definition = PRAGUE_VTIMEZONE.replace('RDATE:20410331T020000\r\n', '');
+		const event = map(
+			timedEventIcs(
+				'DTSTART;TZID=Europe/Prague:20400715T100000',
+				'DTEND;TZID=Europe/Prague:20400715T110000',
+				[definition],
+			),
+		);
+		expect(event).toMatchObject({ timeMode: 'unsupported', accessMode: 'readOnly' });
+	});
+
+	it.each([
+		[
+			'UTC master with IANA exception bounds',
+			withException(SUPPORTED_UTC_EVENT, [
+				'RECURRENCE-ID:20400122T090000Z',
+				'DTSTART;TZID=Europe/Prague:20400122T100000',
+				'DTEND;TZID=Europe/Prague:20400122T110000',
+			]),
+		],
+		[
+			'UTC master with IANA recurrence identity',
+			withException(SUPPORTED_UTC_EVENT, [
+				'RECURRENCE-ID;TZID=Europe/Prague:20400122T100000',
+				'DTSTART:20400122T090000Z',
+				'DTEND:20400122T100000Z',
+			]),
+		],
+		[
+			'IANA master with UTC exception',
+			withException(SUPPORTED_EMBEDDED_IANA_EVENT, [
+				'RECURRENCE-ID:20400722T070000Z',
+				'DTSTART:20400722T070000Z',
+				'DTEND:20400722T080000Z',
+			]),
+		],
+		[
+			'IANA master with a distinct exception zone',
+			withException(SUPPORTED_EMBEDDED_IANA_EVENT, [
+				'RECURRENCE-ID;TZID=Europe/Prague:20400722T100000',
+				'DTSTART;TZID=America/New_York:20400722T040000',
+				'DTEND;TZID=America/New_York:20400722T050000',
+			]),
+		],
+	] as const)('maps %s to read-only instead of projecting mixed recurrence time', (_label, ics) => {
+		expect(map(ics)).toMatchObject({
+			timeMode: 'unsupported',
+			accessMode: 'readOnly',
+			readOnlyReason: 'unsupportedTimeRepresentation',
+		});
+	});
+
 	it.each(READ_ONLY_EVENT_ORACLE)(
 		'maps $name to the exact read-only shape without unproven fields',
 		({ ics }) => {

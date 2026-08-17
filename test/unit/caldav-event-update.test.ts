@@ -285,6 +285,36 @@ describe('calendar event Update coordinator requests and authoritative result', 
 });
 
 describe('calendar event Update coordinator fail-fast and confirmation behavior', () => {
+	it('rejects a mixed-zone recurring event as read-only before clock, ETag, patching, or PUT', async () => {
+		const mixedRecurrence = SUPPORTED_EMBEDDED_IANA_EVENT.replace(
+			'END:VCALENDAR\r\n',
+			[
+				'BEGIN:VEVENT',
+				'UID:synthetic-time-zone-event',
+				'RECURRENCE-ID;TZID=Europe/Prague:20400722T100000',
+				'DTSTART;TZID=America/New_York:20400722T040000',
+				'DTEND;TZID=America/New_York:20400722T050000',
+				'END:VEVENT',
+				'END:VCALENDAR',
+				'',
+			].join('\r\n'),
+		);
+		const current = readResult(mixedRecurrence, { etag: '"snapshot"' });
+		expect(current.event.accessMode).toBe('readOnly');
+		mocks.getCalendarEventByResourceUrl.mockResolvedValue(current);
+		const clock = vi.fn().mockReturnValue(CLOCK);
+
+		await expect(
+			updateCalendarEvent(
+				TRANSPORT,
+				resourceInput({ summary: { kind: 'set', value: 'Must not change' } }),
+				clock,
+			),
+		).rejects.toMatchObject({ code: CalendarEventUpdateFailureCode.READ_ONLY });
+		expect(clock).not.toHaveBeenCalled();
+		expect(mocks.updateCalendarEventResource).not.toHaveBeenCalled();
+	});
+
 	it('rejects an empty patch before any preservation read or clock access', async () => {
 		const clock = vi.fn().mockReturnValue(CLOCK);
 

@@ -1,3 +1,8 @@
+// The accepted TZDIST trust boundary requires DNS results to be validated and pinned
+// before the anonymous n8n HTTP helper is allowed to connect.
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
+import { lookup } from 'node:dns/promises';
+
 import { discoverCalendarHome } from './calendarHome';
 import { discoverCurrentUserPrincipal } from './currentUserPrincipal';
 import { parseICalendarResource } from '../icalendar/parser';
@@ -50,6 +55,8 @@ export type TimeZoneDistributionRequest = (
 	input: TimeZoneDistributionRequestInput,
 ) => Promise<CalDavTransportResponse>;
 
+type TimeZoneDistributionHostResolver = (hostname: string) => Promise<readonly string[]>;
+
 export interface CalendarEventTimeZoneReference {
 	readonly timeZone: IanaTimeZoneId;
 	readonly etag: string;
@@ -71,7 +78,6 @@ const TIMEZONE_SERVICE_NAMESPACES = new Set([
 	'urn:ietf:params:xml:ns:caldav',
 	'http://calendarserver.org/ns/',
 ]);
-const PRIVATE_IPV4 = /^(?:127\.|10\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/;
 const STRONG_ETAG = /^"[^"\r\n]+"$/;
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const MAX_ANONYMOUS_REDIRECTS = 5;
@@ -155,10 +161,153 @@ function parseServiceSet(response: CalDavTransportResponse): readonly AbsoluteHt
 	return [...deduplicated.values()];
 }
 
-function trustedServiceUrl(
+interface TimeZoneDistributionTrustContext {
+	readonly resolveHost: TimeZoneDistributionHostResolver;
+	readonly pinnedAddresses: Map<string, string>;
+}
+
+async function resolveTimeZoneDistributionHost(hostname: string): Promise<readonly string[]> {
+	const addresses = await lookup(hostname, { all: true, verbatim: true });
+	return Object.freeze(addresses.map(({ address }) => address));
+}
+
+function ipv4Bytes(input: string): readonly number[] | undefined {
+	const parts = input.split('.');
+	if (parts.length !== 4) return undefined;
+	const bytes = parts.map((part) => (/^(?:0|[1-9]\d{0,2})$/.test(part) ? Number(part) : -1));
+	return bytes.every((byte) => byte >= 0 && byte <= 255) ? bytes : undefined;
+}
+
+function isPublicIpv4(input: string): boolean {
+	const bytes = ipv4Bytes(input);
+	if (bytes === undefined) return false;
+	const [first, second, third] = bytes as readonly [number, number, number, number];
+	return !(
+		first === 0 ||
+		first === 10 ||
+		first === 127 ||
+		(first === 100 && second >= 64 && second <= 127) ||
+		(first === 169 && second === 254) ||
+		(first === 172 && second >= 16 && second <= 31) ||
+		(first === 192 && second === 0 && third === 0) ||
+		(first === 192 && second === 0 && third === 2) ||
+		(first === 192 && second === 168) ||
+		(first === 198 && (second === 18 || second === 19)) ||
+		(first === 198 && second === 51 && third === 100) ||
+		(first === 203 && second === 0 && third === 113) ||
+		first >= 224
+	);
+}
+
+function ipv6Bytes(input: string): readonly number[] | undefined {
+	let value = input.toLowerCase();
+	if (value.startsWith('[') && value.endsWith(']')) value = value.slice(1, -1);
+	if (value.includes('%') || !value.includes(':')) return undefined;
+	if (value.includes('.')) {
+		const delimiter = value.lastIndexOf(':');
+		const embedded = ipv4Bytes(value.slice(delimiter + 1));
+		if (delimiter < 0 || embedded === undefined) return undefined;
+		value = `${value.slice(0, delimiter)}:${((embedded[0]! << 8) | embedded[1]!).toString(16)}:${((embedded[2]! << 8) | embedded[3]!).toString(16)}`;
+	}
+	const halves = value.split('::');
+	if (halves.length > 2) return undefined;
+	const left = halves[0] === '' ? [] : halves[0]!.split(':');
+	const right = halves.length === 1 || halves[1] === '' ? [] : halves[1]!.split(':');
+	const missing = 8 - left.length - right.length;
+	if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1))
+		return undefined;
+	const words = [...left, ...Array.from({ length: missing }, () => '0'), ...right];
+	if (words.length !== 8 || words.some((word) => !/^[0-9a-f]{1,4}$/.test(word))) return undefined;
+	return words.flatMap((word) => {
+		const parsed = Number.parseInt(word, 16);
+		return [parsed >> 8, parsed & 0xff];
+	});
+}
+
+function embeddedIpv4IsPublic(bytes: readonly number[], start: number, inverted = false): boolean {
+	const address = bytes
+		.slice(start, start + 4)
+		.map((byte) => (inverted ? byte ^ 0xff : byte))
+		.join('.');
+	return isPublicIpv4(address);
+}
+
+function isPublicIpv6(input: string): boolean {
+	const bytes = ipv6Bytes(input);
+	if (bytes === undefined) return false;
+	if (bytes.slice(0, 15).every((byte) => byte === 0) && bytes[15]! <= 1) return false;
+	if ((bytes[0]! & 0xfe) === 0xfc || (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80)) {
+		return false;
+	}
+	if (bytes[0] === 0xff || (bytes[0]! & 0xe0) !== 0x20) return false;
+	if (bytes.slice(0, 10).every((byte) => byte === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
+		return embeddedIpv4IsPublic(bytes, 12);
+	}
+	if (bytes.slice(0, 12).every((byte) => byte === 0)) return embeddedIpv4IsPublic(bytes, 12);
+	if (
+		bytes[0] === 0x00 &&
+		bytes[1] === 0x64 &&
+		bytes[2] === 0xff &&
+		bytes[3] === 0x9b &&
+		bytes.slice(4, 12).every((byte) => byte === 0)
+	) {
+		return embeddedIpv4IsPublic(bytes, 12);
+	}
+	if (bytes[0] === 0x20 && bytes[1] === 0x02) return embeddedIpv4IsPublic(bytes, 2);
+	if (bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0 && bytes[3] === 0) {
+		return embeddedIpv4IsPublic(bytes, 12, true);
+	}
+	if (bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0x0d && bytes[3] === 0xb8) {
+		return false;
+	}
+	return true;
+}
+
+function isPublicIpAddress(input: string): boolean {
+	return ipv4Bytes(input) !== undefined ? isPublicIpv4(input) : isPublicIpv6(input);
+}
+
+async function hostnameIsTrusted(
+	hostnameInput: string,
+	trust: TimeZoneDistributionTrustContext,
+): Promise<boolean> {
+	let hostname = hostnameInput.toLowerCase();
+	if (hostname.startsWith('[') && hostname.endsWith(']')) hostname = hostname.slice(1, -1);
+	if (hostname.endsWith('.')) hostname = hostname.slice(0, -1);
+	if (
+		hostname.length === 0 ||
+		hostname === 'localhost' ||
+		hostname.endsWith('.localhost') ||
+		hostname.endsWith('.local')
+	) {
+		return false;
+	}
+	if (ipv4Bytes(hostname) !== undefined || ipv6Bytes(hostname) !== undefined) {
+		return isPublicIpAddress(hostname);
+	}
+	let addresses: readonly string[];
+	try {
+		addresses = await trust.resolveHost(hostname);
+	} catch {
+		return false;
+	}
+	if (addresses.length === 0 || addresses.length > 32 || !addresses.every(isPublicIpAddress)) {
+		return false;
+	}
+	const identity = [...new Set(addresses.map((address) => address.toLowerCase()))]
+		.sort()
+		.join('\n');
+	const pinned = trust.pinnedAddresses.get(hostname);
+	if (pinned !== undefined) return pinned === identity;
+	trust.pinnedAddresses.set(hostname, identity);
+	return true;
+}
+
+async function trustedServiceUrl(
 	input: string,
 	calendarUrl: AbsoluteHttpUrl,
-): AbsoluteHttpUrl | undefined {
+	trust: TimeZoneDistributionTrustContext,
+): Promise<AbsoluteHttpUrl | undefined> {
 	let value: AbsoluteHttpUrl;
 	try {
 		value = validateAbsoluteHttpUrl(input);
@@ -168,20 +317,7 @@ function trustedServiceUrl(
 	const url = new URL(value);
 	const calendar = new URL(calendarUrl);
 	if (calendar.protocol === 'https:' && url.protocol !== 'https:') return undefined;
-	const hostname = url.hostname.toLowerCase();
-	if (
-		hostname === 'localhost' ||
-		hostname.endsWith('.localhost') ||
-		hostname.endsWith('.local') ||
-		PRIVATE_IPV4.test(hostname) ||
-		hostname === '::1' ||
-		hostname.startsWith('fc') ||
-		hostname.startsWith('fd') ||
-		hostname.startsWith('fe80:')
-	) {
-		return undefined;
-	}
-	return value;
+	return (await hostnameIsTrusted(url.hostname, trust)) ? value : undefined;
 }
 
 function joinServiceUrl(root: AbsoluteHttpUrl, path: string): AbsoluteHttpUrl {
@@ -193,12 +329,16 @@ async function requestFollowingTrustedRedirects(
 	request: TimeZoneDistributionRequest,
 	initialUrl: AbsoluteHttpUrl,
 	calendarUrl: AbsoluteHttpUrl,
+	trust: TimeZoneDistributionTrustContext,
 	headers?: Readonly<Record<string, string>>,
 ): Promise<CalDavTransportResponse> {
 	let url = initialUrl;
 	const visited = new Set<string>([url]);
 	let followed = 0;
 	while (true) {
+		if ((await trustedServiceUrl(url, calendarUrl, trust)) === undefined) {
+			throw new Error('untrusted anonymous target');
+		}
 		const response = await request({
 			method: 'GET',
 			url,
@@ -217,7 +357,7 @@ async function requestFollowingTrustedRedirects(
 		}
 		let target: AbsoluteHttpUrl | undefined;
 		try {
-			target = trustedServiceUrl(new URL(locations[0]!, url).href, calendarUrl);
+			target = await trustedServiceUrl(new URL(locations[0]!, url).href, calendarUrl, trust);
 		} catch {
 			// The sanitized discovery result below remains authoritative.
 		}
@@ -324,10 +464,18 @@ async function discoverServices(
 
 export function createCalendarEventTimeZoneExecutionContext(
 	input: CalendarEventTimeZoneExecutionContextInput,
+): CalendarEventTimeZoneExecutionContext;
+export function createCalendarEventTimeZoneExecutionContext(
+	input: CalendarEventTimeZoneExecutionContextInput,
+	resolveHost: TimeZoneDistributionHostResolver = resolveTimeZoneDistributionHost,
 ): CalendarEventTimeZoneExecutionContext {
 	const resultCache = new Map<string, Promise<CalendarEventTimeZoneReference>>();
 	const serviceCache = new Map<string, Promise<readonly AbsoluteHttpUrl[]>>();
 	const capabilityCache = new Map<string, Promise<boolean>>();
+	const trust: TimeZoneDistributionTrustContext = {
+		resolveHost,
+		pinnedAddresses: new Map<string, string>(),
+	};
 
 	async function resolve(
 		calendarUrlInput: string,
@@ -343,7 +491,7 @@ export function createCalendarEventTimeZoneExecutionContext(
 		const services = await servicesPromise;
 		let sawUsableService = false;
 		for (const advertised of services) {
-			const service = trustedServiceUrl(advertised, calendarUrl);
+			const service = await trustedServiceUrl(advertised, calendarUrl, trust);
 			if (service === undefined) continue;
 			sawUsableService = true;
 			let capabilityPromise = capabilityCache.get(service);
@@ -352,6 +500,7 @@ export function createCalendarEventTimeZoneExecutionContext(
 					input.request,
 					joinServiceUrl(service, 'capabilities'),
 					calendarUrl,
+					trust,
 				).then(validCapabilities, () => false);
 				capabilityCache.set(service, capabilityPromise);
 			}
@@ -362,6 +511,7 @@ export function createCalendarEventTimeZoneExecutionContext(
 					input.request,
 					joinServiceUrl(service, `zones/${encodeURIComponent(timeZone)}`),
 					calendarUrl,
+					trust,
 					{ Accept: 'text/calendar' },
 				);
 			} catch {

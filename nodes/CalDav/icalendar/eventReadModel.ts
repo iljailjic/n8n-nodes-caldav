@@ -2,7 +2,11 @@
 
 import { parseICalendarResource } from './parser';
 import type { ICalendarComponent, ICalendarProperty, ICalendarResource } from './parser';
-import { CalDavIanaTimeZoneError, canonicalizeIanaTimeZone } from './timeZones';
+import {
+	CalDavIanaTimeZoneError,
+	canonicalizeIanaTimeZone,
+	resolveLocalDateTimeInTimeZone,
+} from './timeZones';
 import type { IanaTimeZoneId, LocalDateTimeString } from './timeZones';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type { AbsoluteHttpUrl } from '../transport/url';
@@ -320,7 +324,7 @@ function validateExceptionIdentities(
 			fail(recurrenceIds.length > 1 ? 'AMBIGUOUS_EVENT_PROPERTY' : 'INVALID_EVENT_IDENTITY');
 		}
 		const shape = recurrenceIdentityShape(recurrenceIds[0]!);
-		if (shape === undefined || shape.form !== masterShape.form) fail('INVALID_EVENT_PROPERTY');
+		if (shape === undefined) fail('INVALID_EVENT_PROPERTY');
 		const identityKey = `${shape.form}\u0000${shape.key}`;
 		if (identities.has(identityKey)) fail('INVALID_EVENT_IDENTITY');
 		identities.add(identityKey);
@@ -510,172 +514,46 @@ function utcInstant(value: Date): UtcDateTimeString {
 	return value.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
 }
 
-interface EmbeddedTransition {
-	readonly localMilliseconds: number;
-	readonly offsetFromMinutes: number;
-	readonly offsetToMinutes: number;
+function isUtcExceptionDateTime(property: ICalendarProperty): boolean {
+	try {
+		return (
+			asciiUpperCase(property.value.valueType) === 'DATE-TIME' &&
+			property.value.textValues === null &&
+			property.value.raw.endsWith('Z') &&
+			parseUtcDateTime(property) !== undefined
+		);
+	} catch {
+		return false;
+	}
 }
 
-function localMilliseconds(raw: string): number | undefined {
-	const match = LOCAL_DATE_TIME_PATTERN.exec(raw);
-	if (match === null || !isValidCalendarDateTimeMatch(match) || Number(match[6]) > 59)
-		return undefined;
-	return Date.parse(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`);
+function isIanaExceptionDateTime(property: ICalendarProperty, timeZone: IanaTimeZoneId): boolean {
+	const parsed = parseLocalDateTime(property);
+	const identifier = onlyTzid(property);
+	if (parsed === undefined || identifier === undefined) return false;
+	try {
+		return canonicalizeIanaTimeZone(identifier) === timeZone;
+	} catch {
+		return false;
+	}
 }
 
-function offsetMinutes(raw: string): number | undefined {
-	const match = /^([+-])(\d{2})(\d{2})(?:\d{2})?$/.exec(raw);
-	if (match === null) return undefined;
-	const hours = Number(match[2]);
-	const minutes = Number(match[3]);
-	if (hours > 23 || minutes > 59) return undefined;
-	return (match[1] === '-' ? -1 : 1) * (hours * 60 + minutes);
-}
-
-function oneRaw(component: ICalendarComponent, name: string): string | undefined {
-	const properties = directProperties(component, name);
-	return properties.length === 1 && properties[0]!.value.textValues === null
-		? properties[0]!.value.raw
-		: undefined;
-}
-
-const WEEKDAY_INDEX: Readonly<Record<string, number>> = {
-	SU: 0,
-	MO: 1,
-	TU: 2,
-	WE: 3,
-	TH: 4,
-	FR: 5,
-	SA: 6,
-};
-
-function yearlyOccurrence(rrule: string, start: string, year: number): string | undefined {
-	const startMatch = LOCAL_DATE_TIME_PATTERN.exec(start);
-	if (startMatch === null) return undefined;
-	const parts = new Map<string, string>();
-	for (const part of rrule.split(';')) {
-		const delimiter = part.indexOf('=');
-		if (delimiter <= 0) return undefined;
-		parts.set(part.slice(0, delimiter).toUpperCase(), part.slice(delimiter + 1));
-	}
-	if (parts.get('FREQ') !== 'YEARLY') return undefined;
-	const month = Number(parts.get('BYMONTH') ?? startMatch[2]);
-	if (!Number.isInteger(month) || month < 1 || month > 12) return undefined;
-	let day = Number(parts.get('BYMONTHDAY') ?? startMatch[3]);
-	const byDay = parts.get('BYDAY');
-	if (byDay !== undefined) {
-		const match = /^([+-]?\d)(SU|MO|TU|WE|TH|FR|SA)$/.exec(byDay);
-		if (match === null) return undefined;
-		const ordinal = Number(match[1]);
-		const weekday = WEEKDAY_INDEX[match[2]!]!;
-		if (ordinal > 0) {
-			const firstWeekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
-			day = 1 + ((weekday - firstWeekday + 7) % 7) + (ordinal - 1) * 7;
-		} else {
-			const last = daysInMonth(year, month);
-			const lastWeekday = new Date(Date.UTC(year, month - 1, last)).getUTCDay();
-			day = last - ((lastWeekday - weekday + 7) % 7) + (ordinal + 1) * 7;
-		}
-	}
-	if (day < 1 || day > daysInMonth(year, month)) return undefined;
-	return `${String(year).padStart(4, '0')}${String(month).padStart(2, '0')}${String(day).padStart(2, '0')}T${startMatch[4]}${startMatch[5]}${startMatch[6]}`;
-}
-
-function embeddedTransitions(
-	definition: ICalendarComponent,
-	targetYears: readonly number[],
-): readonly EmbeddedTransition[] | undefined {
-	const transitions: EmbeddedTransition[] = [];
-	const observances = directComponents(definition);
-	if (
-		observances.length === 0 ||
-		observances.some(
-			(component) => !['STANDARD', 'DAYLIGHT'].includes(asciiUpperCase(component.name)),
-		)
-	) {
-		return undefined;
-	}
-	for (const observance of observances) {
-		const start = oneRaw(observance, 'DTSTART');
-		const from = oneRaw(observance, 'TZOFFSETFROM');
-		const to = oneRaw(observance, 'TZOFFSETTO');
-		const fromMinutes = from === undefined ? undefined : offsetMinutes(from);
-		const toMinutes = to === undefined ? undefined : offsetMinutes(to);
-		if (start === undefined || fromMinutes === undefined || toMinutes === undefined)
-			return undefined;
-		const dates = [start];
-		for (const property of directProperties(observance, 'RDATE')) {
-			if (property.value.textValues !== null) return undefined;
-			dates.push(...property.value.raw.split(','));
-		}
-		const rrules = directProperties(observance, 'RRULE');
-		if (rrules.length > 1 || (rrules[0] !== undefined && rrules[0].value.textValues !== null)) {
-			return undefined;
-		}
-		if (rrules[0] !== undefined) {
-			for (const year of new Set(targetYears.flatMap((value) => [value - 1, value, value + 1]))) {
-				if (year < Number(start.slice(0, 4)) || year < 1 || year > 9999) continue;
-				const occurrence = yearlyOccurrence(rrules[0].value.raw, start, year);
-				if (occurrence === undefined) return undefined;
-				dates.push(occurrence);
-			}
-		}
-		for (const date of dates) {
-			const timestamp = localMilliseconds(date);
-			if (timestamp === undefined || !Number.isFinite(timestamp)) return undefined;
-			transitions.push({
-				localMilliseconds: timestamp,
-				offsetFromMinutes: fromMinutes,
-				offsetToMinutes: toMinutes,
-			});
-		}
-	}
-	return transitions.sort((left, right) => left.localMilliseconds - right.localMilliseconds);
-}
-
-function resolveEmbeddedLocal(
-	local: LocalDateTimeString,
-	transitions: readonly EmbeddedTransition[],
-): Date | undefined {
-	const target = Date.parse(`${local}Z`);
-	if (!Number.isFinite(target) || transitions.length === 0) return undefined;
-	const transitionInstants = transitions
-		.map((transition) => ({
-			...transition,
-			instantMilliseconds: transition.localMilliseconds - transition.offsetFromMinutes * 60_000,
-		}))
-		.sort((left, right) => left.instantMilliseconds - right.instantMilliseconds);
-	const offsetAtInstant = (instant: number): number => {
-		let offset = transitionInstants[0]!.offsetFromMinutes;
-		for (const transition of transitionInstants) {
-			if (instant < transition.instantMilliseconds) break;
-			offset = transition.offsetToMinutes;
-		}
-		return offset;
-	};
-	const candidates = new Set<number>();
-	for (const transition of transitions) {
-		candidates.add(transition.offsetFromMinutes);
-		candidates.add(transition.offsetToMinutes);
-	}
-	const matching = [...candidates]
-		.map((offset) => target - offset * 60_000)
-		.filter((instant) => offsetAtInstant(instant) === (target - instant) / 60_000)
-		.sort((left, right) => left - right);
-	if (matching[0] !== undefined) return new Date(matching[0]);
-
-	// RFC 5545 assigns a nonexistent wall time the UTC offset in force before the gap.
-	for (const transition of transitions) {
-		const gapMinutes = transition.offsetToMinutes - transition.offsetFromMinutes;
-		if (
-			gapMinutes > 0 &&
-			target >= transition.localMilliseconds &&
-			target < transition.localMilliseconds + gapMinutes * 60_000
-		) {
-			return new Date(target - transition.offsetFromMinutes * 60_000);
-		}
-	}
-	return undefined;
+function exceptionsMatchTimedRepresentation(
+	exceptions: readonly ICalendarComponent[],
+	timeZoneMode: 'utc' | 'iana',
+	timeZone?: IanaTimeZoneId,
+): boolean {
+	return exceptions.every((exception) => {
+		const recurrenceIds = directProperties(exception, 'RECURRENCE-ID');
+		const starts = directProperties(exception, 'DTSTART');
+		const ends = directProperties(exception, 'DTEND');
+		if (recurrenceIds.length !== 1 || starts.length !== 1 || ends.length > 1) return false;
+		const properties = [recurrenceIds[0]!, starts[0]!, ...ends];
+		return timeZoneMode === 'utc'
+			? properties.every(isUtcExceptionDateTime)
+			: timeZone !== undefined &&
+					properties.every((property) => isIanaExceptionDateTime(property, timeZone));
+	});
 }
 
 function isPlainRecord(value: object): boolean {
@@ -980,14 +858,8 @@ export function mapCalendarEventResource(
 						) {
 							throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
 						}
-						const transitions = embeddedTransitions(definition, [
-							Number(startLocal.local.slice(0, 4)),
-							Number(endLocal.local.slice(0, 4)),
-						]);
-						if (transitions !== undefined) {
-							startInstant = resolveEmbeddedLocal(startLocal.local, transitions);
-							endInstant = resolveEmbeddedLocal(endLocal.local, transitions);
-						}
+						startInstant = resolveLocalDateTimeInTimeZone(startLocal.local, timeZone, definition);
+						endInstant = resolveLocalDateTimeInTimeZone(endLocal.local, timeZone, definition);
 					}
 					if (startInstant !== undefined && endInstant !== undefined) {
 						if (endProperty !== undefined && endInstant.getTime() <= startInstant.getTime()) {
@@ -1012,6 +884,16 @@ export function mapCalendarEventResource(
 				}
 			}
 		}
+	}
+	if (
+		timed !== undefined &&
+		!exceptionsMatchTimedRepresentation(
+			context.exceptions,
+			timed.timeZoneMode,
+			timed.timeZoneMode === 'iana' ? timed.timeZone : undefined,
+		)
+	) {
+		timed = undefined;
 	}
 
 	const event = Object.freeze(

@@ -1850,6 +1850,78 @@ function asJson(collection: CalendarCollection): IDataObject {
 	return collection as unknown as IDataObject;
 }
 
+function anonymousResponseData(value: unknown):
+	| {
+			readonly statusCode: number;
+			readonly headers: Readonly<Record<string, string | readonly string[]>>;
+			readonly body: Buffer;
+	  }
+	| undefined {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+	let descriptors: Readonly<Record<PropertyKey, PropertyDescriptor>>;
+	try {
+		descriptors = Object.getOwnPropertyDescriptors(value);
+	} catch {
+		return undefined;
+	}
+	const data = (key: string): unknown => {
+		const descriptor = descriptors[key];
+		return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
+	};
+	const statusCode = data('statusCode');
+	if (
+		typeof statusCode !== 'number' ||
+		!Number.isInteger(statusCode) ||
+		statusCode < 100 ||
+		statusCode > 599
+	) {
+		return undefined;
+	}
+	const rawHeaders = data('headers');
+	const headers: Record<string, string | readonly string[]> = {};
+	if (typeof rawHeaders === 'object' && rawHeaders !== null && !Array.isArray(rawHeaders)) {
+		try {
+			for (const [name, descriptor] of Object.entries(
+				Object.getOwnPropertyDescriptors(rawHeaders),
+			)) {
+				if (!('value' in descriptor)) continue;
+				if (typeof descriptor.value === 'string') headers[name.toLowerCase()] = descriptor.value;
+				else if (
+					Array.isArray(descriptor.value) &&
+					descriptor.value.every((item) => typeof item === 'string')
+				) {
+					headers[name.toLowerCase()] = Object.freeze([...descriptor.value]);
+				}
+			}
+		} catch {
+			return undefined;
+		}
+	}
+	const rawBody = data('body');
+	const body = Buffer.isBuffer(rawBody)
+		? Buffer.from(rawBody)
+		: typeof rawBody === 'string'
+			? Buffer.from(rawBody)
+			: rawBody instanceof Uint8Array
+				? Buffer.from(rawBody)
+				: Buffer.alloc(0);
+	return { statusCode, headers: Object.freeze(headers), body };
+}
+
+function rejectedAnonymousResponse(error: unknown): ReturnType<typeof anonymousResponseData> {
+	const direct = anonymousResponseData(error);
+	if (direct !== undefined) return direct;
+	if (typeof error !== 'object' || error === null) return undefined;
+	try {
+		const descriptor = Object.getOwnPropertyDescriptor(error, 'response');
+		return descriptor !== undefined && 'value' in descriptor
+			? anonymousResponseData(descriptor.value)
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 async function anonymousTimeZoneRequest(
 	execution: IExecuteFunctions,
 	request: TimeZoneDistributionRequestInput,
@@ -1857,28 +1929,30 @@ async function anonymousTimeZoneRequest(
 	const helpers = execution.helpers as unknown as {
 		readonly httpRequest: (options: unknown) => Promise<unknown>;
 	};
-	const result = (await helpers.httpRequest({
-		method: request.method,
-		url: request.url,
-		headers: request.headers,
-		disableFollowRedirect: true,
-		returnFullResponse: true,
-		encoding: 'arraybuffer',
-	})) as {
-		readonly statusCode?: unknown;
-		readonly headers?: unknown;
-		readonly body?: unknown;
-	};
+	let normalized: ReturnType<typeof anonymousResponseData>;
+	try {
+		normalized = anonymousResponseData(
+			await helpers.httpRequest({
+				method: request.method,
+				url: request.url,
+				headers: request.headers,
+				ignoreHttpStatusErrors: true,
+				disableFollowRedirect: true,
+				returnFullResponse: true,
+				encoding: 'arraybuffer',
+			}),
+		);
+	} catch (error) {
+		normalized = rejectedAnonymousResponse(error);
+	}
+	if (normalized === undefined) {
+		throw new NodeOperationError(execution.getNode(), 'Anonymous time zone request failed');
+	}
 	return {
-		statusCode: typeof result.statusCode === 'number' ? result.statusCode : 0,
-		headers:
-			typeof result.headers === 'object' && result.headers !== null
-				? (result.headers as Readonly<Record<string, string | readonly string[]>>)
-				: {},
+		statusCode: normalized.statusCode,
+		headers: normalized.headers,
 		effectiveUrl: request.url,
-		body: Buffer.isBuffer(result.body)
-			? result.body
-			: Buffer.from(typeof result.body === 'string' ? result.body : new Uint8Array(0)),
+		body: normalized.body,
 	};
 }
 

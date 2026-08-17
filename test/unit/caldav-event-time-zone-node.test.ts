@@ -69,7 +69,11 @@ function parameters(overrides: Partial<CreateParameters> = {}): CreateParameters
 
 function context(
 	items: readonly CreateParameters[],
-	options: { readonly continueOnFail?: boolean; readonly input?: INodeExecutionData[] } = {},
+	options: {
+		readonly continueOnFail?: boolean;
+		readonly input?: INodeExecutionData[];
+		readonly httpRequest?: ReturnType<typeof vi.fn>;
+	} = {},
 ): IExecuteFunctions {
 	return {
 		getInputData: vi
@@ -80,6 +84,7 @@ function context(
 		),
 		getNode: vi.fn().mockReturnValue(NODE),
 		continueOnFail: vi.fn().mockReturnValue(options.continueOnFail ?? false),
+		helpers: { httpRequest: options.httpRequest ?? vi.fn() },
 	} as unknown as IExecuteFunctions;
 }
 
@@ -340,6 +345,52 @@ describe('CalDAV timed event timezone normalization and errors', () => {
 			{ item: 2 },
 		]);
 	});
+
+	it.each([
+		['302 response', 302, false],
+		['307 response', 307, false],
+		['rejected 404 response', 404, true],
+	] as const)(
+		'normalizes the production anonymous adapter for a %s',
+		async (_label, statusCode, rejects) => {
+			const envelope = {
+				statusCode,
+				headers: { Location: 'https://tzdist-next.example.test/resource' },
+				body: Buffer.from(`status-${statusCode}`),
+			};
+			const httpRequest = rejects
+				? vi.fn().mockRejectedValue({ response: envelope })
+				: vi.fn().mockResolvedValue(envelope);
+			await new CalDav().execute.call(
+				context([parameters({ timeZoneMode: 'iana', timeZone: 'Europe/Prague' })], { httpRequest }),
+			);
+			const factoryInput = mocks.createCalendarEventTimeZoneExecutionContext.mock.calls[0]![0] as {
+				readonly request: (input: unknown) => Promise<{
+					readonly statusCode: number;
+					readonly headers: Readonly<Record<string, string>>;
+					readonly body: Buffer;
+				}>;
+			};
+			const response = await factoryInput.request({
+				method: 'GET',
+				url: 'https://tzdist.example.test/resource',
+			});
+			expect(httpRequest).toHaveBeenCalledWith({
+				method: 'GET',
+				url: 'https://tzdist.example.test/resource',
+				headers: undefined,
+				ignoreHttpStatusErrors: true,
+				disableFollowRedirect: true,
+				returnFullResponse: true,
+				encoding: 'arraybuffer',
+			});
+			expect(response).toMatchObject({
+				statusCode,
+				headers: { location: 'https://tzdist-next.example.test/resource' },
+			});
+			expect(response.body.toString()).toBe(`status-${statusCode}`);
+		},
+	);
 
 	it.each([
 		['SERVER_UNSUPPORTED', 'The CalDAV server does not support IANA time zones by reference.'],

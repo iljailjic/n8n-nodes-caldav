@@ -964,7 +964,7 @@ function yearlyDefinitionOccurrence(
 		const match = /^([+-]?\d)(SU|MO|TU|WE|TH|FR|SA)$/.exec(byDay);
 		if (match === null) return undefined;
 		const ordinal = Number(match[1]);
-		if (ordinal === 0) return undefined;
+		if (ordinal === 0 || Math.abs(ordinal) > 5) return undefined;
 		const weekdayIndex = WEEKDAY_INDEX[match[2]!]!;
 		if (ordinal > 0) {
 			const firstWeekday = weekday(year, month, 1);
@@ -1004,6 +1004,7 @@ function definitionTransitions(
 		throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
 	}
 	const transitions: DefinitionTransition[] = [];
+	let everyObservanceRecurs = true;
 	for (const observance of observances) {
 		const start = definitionRaw(observance, 'DTSTART');
 		const offsetFrom = definitionOffset(definitionRaw(observance, 'TZOFFSETFROM') ?? '');
@@ -1018,10 +1019,14 @@ function definitionTransitions(
 			}
 			dates.push(...property.value.raw.split(','));
 		}
+		if (new Set(dates).size !== dates.length) {
+			throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+		}
 		const rules = definitionProperties(observance, 'RRULE');
 		if (rules.length > 1 || (rules[0] !== undefined && rules[0].value.textValues !== null)) {
 			throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
 		}
+		if (rules[0] === undefined) everyObservanceRecurs = false;
 		if (rules[0] !== undefined) {
 			for (const year of new Set(targetYears.flatMap((value) => [value - 1, value, value + 1]))) {
 				if (year < Number(start.slice(0, 4)) || year < 1 || year > 9999) continue;
@@ -1029,7 +1034,7 @@ function definitionTransitions(
 				if (occurrence === undefined) {
 					throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
 				}
-				dates.push(occurrence);
+				if (!dates.includes(occurrence)) dates.push(occurrence);
 			}
 		}
 		for (const date of dates) {
@@ -1044,7 +1049,45 @@ function definitionTransitions(
 			});
 		}
 	}
-	return transitions.sort((left, right) => left.localMilliseconds - right.localMilliseconds);
+	transitions.sort((left, right) => left.localMilliseconds - right.localMilliseconds);
+	if (
+		transitions.some(
+			(transition, index) =>
+				index > 0 && transition.localMilliseconds === transitions[index - 1]!.localMilliseconds,
+		)
+	) {
+		throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+	}
+	if (observances.length > 1 && !everyObservanceRecurs) {
+		for (const year of new Set(targetYears)) {
+			if (year < 1 || year > 9999) {
+				throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+			}
+			const yearStart = wallTimestamp({
+				year,
+				month: 1,
+				day: 1,
+				hour: 0,
+				minute: 0,
+				second: 0,
+			});
+			const nextYearStart = wallTimestamp({
+				year: year + 1,
+				month: 1,
+				day: 1,
+				hour: 0,
+				minute: 0,
+				second: 0,
+			});
+			if (
+				!transitions.some((transition) => transition.localMilliseconds <= yearStart) ||
+				!transitions.some((transition) => transition.localMilliseconds >= nextYearStart)
+			) {
+				throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+			}
+		}
+	}
+	return transitions;
 }
 
 function transitionOffsetAtInstant(
@@ -1073,7 +1116,7 @@ export function projectInstantInTimeZone(
 	const timestamp = dateTimestamp(instant);
 	if (definition !== undefined) {
 		const year = instant.getUTCFullYear();
-		const transitions = definitionTransitions(definition, timeZone, [year - 1, year, year + 1]);
+		const transitions = definitionTransitions(definition, timeZone, [year]);
 		if (transitions.length === 0) throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
 		const wall = new Date(timestamp + transitionOffsetAtInstant(transitions, timestamp));
 		const parts = {

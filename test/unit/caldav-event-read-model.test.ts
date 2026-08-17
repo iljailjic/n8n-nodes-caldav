@@ -271,18 +271,6 @@ describe('preservation context identity factory', () => {
 
 	it.each([
 		[
-			'incompatible DATE and DATE-TIME',
-			'DTSTART;VALUE=DATE:20260812',
-			'RECURRENCE-ID:20260819T090000Z',
-			'INVALID_EVENT_PROPERTY',
-		],
-		[
-			'incompatible UTC and floating',
-			'DTSTART:20260812T090000Z',
-			'RECURRENCE-ID:20260819T090000',
-			'INVALID_EVENT_PROPERTY',
-		],
-		[
 			'invalid exception date',
 			'DTSTART;VALUE=DATE:20260812',
 			'RECURRENCE-ID;VALUE=DATE:20260229',
@@ -297,6 +285,20 @@ describe('preservation context identity factory', () => {
 			expect.objectContaining({ code }),
 		);
 	});
+
+	it.each([
+		['DATE and DATE-TIME', 'DTSTART;VALUE=DATE:20260812', 'RECURRENCE-ID:20260819T090000Z'],
+		['UTC and floating', 'DTSTART:20260812T090000Z', 'RECURRENCE-ID:20260819T090000'],
+	] as const)(
+		'preserves structurally valid %s mismatch for safe read-only projection',
+		(_label, start, recurrenceId) => {
+			const resource = parseEventResource([
+				...event('factory-mixed', [start]),
+				...event('factory-mixed', [recurrenceId, start]),
+			]);
+			expect(createCalendarEventPreservationContext(resource).exceptions).toHaveLength(1);
+		},
+	);
 
 	it('rejects duplicate semantic recurrence identities', () => {
 		const resource = parseEventResource([

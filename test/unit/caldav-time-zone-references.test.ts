@@ -20,6 +20,8 @@ import {
 
 const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/work/');
 
+type TimeZoneDistributionHostResolver = (hostname: string) => Promise<readonly string[]>;
+
 function response(
 	statusCode: number,
 	body = '',
@@ -52,11 +54,13 @@ interface ReferenceContext {
 function context(
 	transport: CalDavTransport,
 	request: TimeZoneDistributionRequest,
+	resolveHost: TimeZoneDistributionHostResolver = async () => ['93.184.216.34'],
 ): ReferenceContext {
 	const factory = createCalendarEventTimeZoneExecutionContext as unknown as (
 		input: FactoryInput,
+		resolveHost?: TimeZoneDistributionHostResolver,
 	) => CalendarEventTimeZoneExecutionContext;
-	return factory({ transport, request }) as unknown as ReferenceContext;
+	return factory({ transport, request }, resolveHost) as unknown as ReferenceContext;
 }
 
 function transportForServices(serviceUrls: readonly string[]): CalDavTransport {
@@ -219,6 +223,47 @@ describe('RFC 7809 capability and RFC 7808 TZDIST resolution', () => {
 		expect(urls).toContain('https://tzdist-cdn.example.test/capabilities');
 		expect(urls).not.toEqual(expect.arrayContaining([expect.stringContaining('127.0.0.1')]));
 	});
+
+	it.each([
+		['private DNS answer', 'https://private-dns.example.test/', async () => ['10.0.0.7']],
+		[
+			'mixed public and private IPv6 DNS answers',
+			'https://mixed-dns.example.test/',
+			async () => ['93.184.216.34', 'fd00::7'],
+		],
+		[
+			'IPv4-mapped IPv6 DNS answer',
+			'https://mapped-dns.example.test/',
+			async () => ['::ffff:127.0.0.1'],
+		],
+		['IPv4-mapped IPv6 literal', 'https://[::ffff:127.0.0.1]/', async () => ['93.184.216.34']],
+	] as const)('rejects a %s before anonymous transport', async (_label, service, resolveHost) => {
+		const transport = transportForServices([service]);
+		const request = anonymousSuccess();
+		const error = await captureError(
+			context(transport, request, resolveHost).resolveReference(CALENDAR_URL, 'Europe/Prague'),
+		);
+		expect(error.code).toBe(TimeZoneReferenceFailureCode.SERVER_UNSUPPORTED);
+		expect(request).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		['private rebinding', ['93.184.216.34'], ['192.168.1.8']],
+		['changed public resolution', ['93.184.216.34'], ['1.1.1.1']],
+	] as const)(
+		'pins DNS answers and rejects %s before the request',
+		async (_label, first, second) => {
+			const transport = transportForServices(['https://rebind.example.test/']);
+			const request = anonymousSuccess();
+			const resolveHost = vi.fn().mockResolvedValueOnce(first).mockResolvedValue(second);
+			const error = await captureError(
+				context(transport, request, resolveHost).resolveReference(CALENDAR_URL, 'Europe/Prague'),
+			);
+			expect(error.code).toBe(TimeZoneReferenceFailureCode.ZONE_UNAVAILABLE);
+			expect(resolveHost).toHaveBeenCalledTimes(2);
+			expect(request).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each([
 		['weak ETag', { 'content-type': 'text/calendar', etag: 'W/"weak"' }, TZDIST_ZONE_RESPONSE],
