@@ -166,6 +166,25 @@ interface TimeZoneDistributionTrustContext {
 	readonly pinnedAddresses: Map<string, string>;
 }
 
+interface TimeZoneDistributionConnectionBinding {
+	readonly hostname: string;
+	readonly address: string;
+	readonly lookup: (
+		hostname: string,
+		options: { readonly all?: boolean },
+		callback: (
+			error: NodeJS.ErrnoException | null,
+			address: string | readonly { readonly address: string; readonly family: number }[],
+			family?: number,
+		) => void,
+	) => void;
+}
+
+interface TrustedServiceTarget {
+	readonly url: AbsoluteHttpUrl;
+	readonly binding: TimeZoneDistributionConnectionBinding;
+}
+
 async function resolveTimeZoneDistributionHost(hostname: string): Promise<readonly string[]> {
 	const addresses = await lookup(hostname, { all: true, verbatim: true });
 	return Object.freeze(addresses.map(({ address }) => address));
@@ -267,10 +286,44 @@ function isPublicIpAddress(input: string): boolean {
 	return ipv4Bytes(input) !== undefined ? isPublicIpv4(input) : isPublicIpv6(input);
 }
 
+function trustedConnectionLookup(
+	hostname: string,
+	trust: TimeZoneDistributionTrustContext,
+): TimeZoneDistributionConnectionBinding['lookup'] {
+	return (requestedHostname, options, callback): void => {
+		let normalizedRequestedHostname = requestedHostname.toLowerCase();
+		if (normalizedRequestedHostname.startsWith('[') && normalizedRequestedHostname.endsWith(']')) {
+			normalizedRequestedHostname = normalizedRequestedHostname.slice(1, -1);
+		}
+		if (normalizedRequestedHostname.endsWith('.')) {
+			normalizedRequestedHostname = normalizedRequestedHostname.slice(0, -1);
+		}
+		if (normalizedRequestedHostname !== hostname) {
+			callback(new Error('untrusted anonymous target'), '');
+			return;
+		}
+		hostnameIsTrusted(hostname, trust).then(
+			(binding) => {
+				if (binding === undefined) {
+					callback(new Error('untrusted anonymous target'), '');
+					return;
+				}
+				const family = ipv4Bytes(binding.address) === undefined ? 6 : 4;
+				if (options.all === true) {
+					callback(null, [{ address: binding.address, family }]);
+					return;
+				}
+				callback(null, binding.address, family);
+			},
+			() => callback(new Error('untrusted anonymous target'), ''),
+		);
+	};
+}
+
 async function hostnameIsTrusted(
 	hostnameInput: string,
 	trust: TimeZoneDistributionTrustContext,
-): Promise<boolean> {
+): Promise<TimeZoneDistributionConnectionBinding | undefined> {
 	let hostname = hostnameInput.toLowerCase();
 	if (hostname.startsWith('[') && hostname.endsWith(']')) hostname = hostname.slice(1, -1);
 	if (hostname.endsWith('.')) hostname = hostname.slice(0, -1);
@@ -280,34 +333,39 @@ async function hostnameIsTrusted(
 		hostname.endsWith('.localhost') ||
 		hostname.endsWith('.local')
 	) {
-		return false;
+		return undefined;
 	}
 	if (ipv4Bytes(hostname) !== undefined || ipv6Bytes(hostname) !== undefined) {
-		return isPublicIpAddress(hostname);
+		return isPublicIpAddress(hostname)
+			? { hostname, address: hostname, lookup: trustedConnectionLookup(hostname, trust) }
+			: undefined;
 	}
 	let addresses: readonly string[];
 	try {
 		addresses = await trust.resolveHost(hostname);
 	} catch {
-		return false;
+		return undefined;
 	}
 	if (addresses.length === 0 || addresses.length > 32 || !addresses.every(isPublicIpAddress)) {
-		return false;
+		return undefined;
 	}
-	const identity = [...new Set(addresses.map((address) => address.toLowerCase()))]
-		.sort()
-		.join('\n');
+	const approvedAddresses = [...new Set(addresses.map((address) => address.toLowerCase()))].sort();
+	const identity = approvedAddresses.join('\n');
 	const pinned = trust.pinnedAddresses.get(hostname);
-	if (pinned !== undefined) return pinned === identity;
+	if (pinned !== undefined && pinned !== identity) return undefined;
 	trust.pinnedAddresses.set(hostname, identity);
-	return true;
+	return {
+		hostname,
+		address: approvedAddresses[0]!,
+		lookup: trustedConnectionLookup(hostname, trust),
+	};
 }
 
 async function trustedServiceUrl(
 	input: string,
 	calendarUrl: AbsoluteHttpUrl,
 	trust: TimeZoneDistributionTrustContext,
-): Promise<AbsoluteHttpUrl | undefined> {
+): Promise<TrustedServiceTarget | undefined> {
 	let value: AbsoluteHttpUrl;
 	try {
 		value = validateAbsoluteHttpUrl(input);
@@ -317,7 +375,8 @@ async function trustedServiceUrl(
 	const url = new URL(value);
 	const calendar = new URL(calendarUrl);
 	if (calendar.protocol === 'https:' && url.protocol !== 'https:') return undefined;
-	return (await hostnameIsTrusted(url.hostname, trust)) ? value : undefined;
+	const binding = await hostnameIsTrusted(url.hostname, trust);
+	return binding === undefined ? undefined : { url: value, binding };
 }
 
 function joinServiceUrl(root: AbsoluteHttpUrl, path: string): AbsoluteHttpUrl {
@@ -336,14 +395,23 @@ async function requestFollowingTrustedRedirects(
 	const visited = new Set<string>([url]);
 	let followed = 0;
 	while (true) {
-		if ((await trustedServiceUrl(url, calendarUrl, trust)) === undefined) {
+		const trustedTarget = await trustedServiceUrl(url, calendarUrl, trust);
+		if (trustedTarget === undefined) {
 			throw new Error('untrusted anonymous target');
 		}
-		const response = await request({
-			method: 'GET',
-			url,
-			...(headers === undefined ? {} : { headers }),
-		});
+		const response = await (
+			request as unknown as (
+				input: TimeZoneDistributionRequestInput,
+				binding: TimeZoneDistributionConnectionBinding,
+			) => Promise<CalDavTransportResponse>
+		)(
+			{
+				method: 'GET',
+				url,
+				...(headers === undefined ? {} : { headers }),
+			},
+			trustedTarget.binding,
+		);
 		if (!REDIRECT_STATUS_CODES.has(response.statusCode)) {
 			return { ...response, effectiveUrl: url };
 		}
@@ -357,7 +425,7 @@ async function requestFollowingTrustedRedirects(
 		}
 		let target: AbsoluteHttpUrl | undefined;
 		try {
-			target = await trustedServiceUrl(new URL(locations[0]!, url).href, calendarUrl, trust);
+			target = (await trustedServiceUrl(new URL(locations[0]!, url).href, calendarUrl, trust))?.url;
 		} catch {
 			// The sanitized discovery result below remains authoritative.
 		}
@@ -491,8 +559,9 @@ export function createCalendarEventTimeZoneExecutionContext(
 		const services = await servicesPromise;
 		let sawUsableService = false;
 		for (const advertised of services) {
-			const service = await trustedServiceUrl(advertised, calendarUrl, trust);
-			if (service === undefined) continue;
+			const trustedService = await trustedServiceUrl(advertised, calendarUrl, trust);
+			if (trustedService === undefined) continue;
+			const service = trustedService.url;
 			sawUsableService = true;
 			let capabilityPromise = capabilityCache.get(service);
 			if (capabilityPromise === undefined) {

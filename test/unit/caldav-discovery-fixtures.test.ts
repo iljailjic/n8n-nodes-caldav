@@ -788,7 +788,7 @@ describe('synthetic fixture provenance and separation', () => {
 		expect(provenance).toContain('privacy reviewed: pass');
 	});
 
-	it('runs every positive transcript offline without a network API or event-operation escape hatch', async () => {
+	it('runs every positive transcript offline with only the audited TZDIST network boundary', async () => {
 		const networkSentinel = vi.fn(() => {
 			throw new Error('network-call-sentinel');
 		});
@@ -807,9 +807,17 @@ describe('synthetic fixture provenance and separation', () => {
 		expect(networkSentinel).not.toHaveBeenCalled();
 
 		const productionSources = await readTypeScriptTree(new URL('../../nodes/', import.meta.url));
-		expect(productionSources.join('\n')).not.toMatch(
-			/from ['"]node:(?:dns|http|https|net|tls)['"]|\bfetch\s*\(|\baxios\s*\(/,
-		);
+		const productionSource = productionSources.join('\n');
+		const nativeNetworkImports = [
+			...productionSource.matchAll(/from ['"](node:(?:dns\/promises|http|https|net|tls))['"]/g),
+		].map(([, moduleName]) => moduleName);
+		expect(nativeNetworkImports.sort()).toEqual(['node:dns/promises', 'node:http', 'node:https']);
+		expect(
+			productionSource.replace(
+				/from ['"]node:(?:dns\/promises|http|https)['"]/g,
+				'from "audited-tzdist-native-boundary"',
+			),
+		).not.toMatch(/from ['"]node:(?:dns|http|https|net|tls)['"]|\bfetch\s*\(|\baxios\s*\(/);
 	});
 
 	it('keeps fixture and fixture-helper imports outside production source boundaries', async () => {

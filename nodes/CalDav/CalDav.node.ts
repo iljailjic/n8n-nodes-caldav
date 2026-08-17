@@ -7,8 +7,15 @@ import type {
 	INodeParameterResourceLocator,
 	INodeType,
 	INodeTypeDescription,
+	NodeEgressFilter,
 } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+// TZDIST is an anonymous embedded client whose socket needs a connect-time secure
+// lookup while retaining the original hostname for Host, SNI, and TLS checks.
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
+import { request as httpsRequest } from 'node:https';
 
 import {
 	CalDavCalendarCollectionGetError,
@@ -22,6 +29,7 @@ import {
 } from './discovery/timeZoneReferences';
 import type {
 	CalendarEventTimeZoneExecutionContext,
+	TimeZoneDistributionRequest,
 	TimeZoneDistributionRequestInput,
 } from './discovery/timeZoneReferences';
 import {
@@ -1850,110 +1858,122 @@ function asJson(collection: CalendarCollection): IDataObject {
 	return collection as unknown as IDataObject;
 }
 
-function anonymousResponseData(value: unknown):
-	| {
-			readonly statusCode: number;
-			readonly headers: Readonly<Record<string, string | readonly string[]>>;
-			readonly body: Buffer;
-	  }
-	| undefined {
-	if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-	let descriptors: Readonly<Record<PropertyKey, PropertyDescriptor>>;
-	try {
-		descriptors = Object.getOwnPropertyDescriptors(value);
-	} catch {
-		return undefined;
-	}
-	const data = (key: string): unknown => {
-		const descriptor = descriptors[key];
-		return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
-	};
-	const statusCode = data('statusCode');
-	if (
-		typeof statusCode !== 'number' ||
-		!Number.isInteger(statusCode) ||
-		statusCode < 100 ||
-		statusCode > 599
-	) {
-		return undefined;
-	}
-	const rawHeaders = data('headers');
-	const headers: Record<string, string | readonly string[]> = {};
-	if (typeof rawHeaders === 'object' && rawHeaders !== null && !Array.isArray(rawHeaders)) {
-		try {
-			for (const [name, descriptor] of Object.entries(
-				Object.getOwnPropertyDescriptors(rawHeaders),
-			)) {
-				if (!('value' in descriptor)) continue;
-				if (typeof descriptor.value === 'string') headers[name.toLowerCase()] = descriptor.value;
-				else if (
-					Array.isArray(descriptor.value) &&
-					descriptor.value.every((item) => typeof item === 'string')
-				) {
-					headers[name.toLowerCase()] = Object.freeze([...descriptor.value]);
-				}
-			}
-		} catch {
-			return undefined;
-		}
-	}
-	const rawBody = data('body');
-	const body = Buffer.isBuffer(rawBody)
-		? Buffer.from(rawBody)
-		: typeof rawBody === 'string'
-			? Buffer.from(rawBody)
-			: rawBody instanceof Uint8Array
-				? Buffer.from(rawBody)
-				: Buffer.alloc(0);
-	return { statusCode, headers: Object.freeze(headers), body };
+interface AnonymousTimeZoneConnectionBinding {
+	readonly hostname: string;
+	readonly address: string;
+	readonly lookup: ReturnType<NodeEgressFilter['createSecureLookup']>;
 }
 
-function rejectedAnonymousResponse(error: unknown): ReturnType<typeof anonymousResponseData> {
-	const direct = anonymousResponseData(error);
-	if (direct !== undefined) return direct;
-	if (typeof error !== 'object' || error === null) return undefined;
-	try {
-		const descriptor = Object.getOwnPropertyDescriptor(error, 'response');
-		return descriptor !== undefined && 'value' in descriptor
-			? anonymousResponseData(descriptor.value)
-			: undefined;
-	} catch {
-		return undefined;
+function normalizedConnectionHostname(hostname: string): string {
+	let normalized = hostname.toLowerCase();
+	if (normalized.startsWith('[') && normalized.endsWith(']')) {
+		normalized = normalized.slice(1, -1);
 	}
+	return normalized.endsWith('.') ? normalized.slice(0, -1) : normalized;
 }
+
+function anonymousResponseHeaders(
+	headers: IncomingHttpHeaders,
+): Readonly<Record<string, string | readonly string[]>> {
+	const normalized: Record<string, string | readonly string[]> = {};
+	for (const [name, value] of Object.entries(headers)) {
+		if (typeof value === 'string') normalized[name.toLowerCase()] = value;
+		else if (Array.isArray(value)) normalized[name.toLowerCase()] = Object.freeze([...value]);
+	}
+	return Object.freeze(normalized);
+}
+
+const ANONYMOUS_TIME_ZONE_TIMEOUT_MS = 30_000;
+const ANONYMOUS_TIME_ZONE_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const ANONYMOUS_TIME_ZONE_MAX_HEADER_BYTES = 64 * 1024;
 
 async function anonymousTimeZoneRequest(
 	execution: IExecuteFunctions,
 	request: TimeZoneDistributionRequestInput,
+	binding?: AnonymousTimeZoneConnectionBinding,
 ) {
-	const helpers = execution.helpers as unknown as {
-		readonly httpRequest: (options: unknown) => Promise<unknown>;
-	};
-	let normalized: ReturnType<typeof anonymousResponseData>;
+	let logicalUrl: URL;
 	try {
-		normalized = anonymousResponseData(
-			await helpers.httpRequest({
-				method: request.method,
-				url: request.url,
-				headers: request.headers,
-				ignoreHttpStatusErrors: true,
-				disableFollowRedirect: true,
-				returnFullResponse: true,
-				encoding: 'arraybuffer',
-			}),
-		);
-	} catch (error) {
-		normalized = rejectedAnonymousResponse(error);
-	}
-	if (normalized === undefined) {
+		logicalUrl = new URL(request.url);
+	} catch {
 		throw new NodeOperationError(execution.getNode(), 'Anonymous time zone request failed');
 	}
-	return {
-		statusCode: normalized.statusCode,
-		headers: normalized.headers,
-		effectiveUrl: request.url,
-		body: normalized.body,
-	};
+	const hostname = normalizedConnectionHostname(logicalUrl.hostname);
+	if (
+		binding === undefined ||
+		hostname !== binding.hostname ||
+		!/^[0-9a-f:.]+$/i.test(binding.address)
+	) {
+		throw new NodeOperationError(execution.getNode(), 'Anonymous time zone request failed');
+	}
+	try {
+		const egressFilter = execution.helpers.getSecureEgressFilter?.();
+		let lookup = binding.lookup;
+		if (egressFilter !== undefined) {
+			const validation = await egressFilter.validateUrl(logicalUrl);
+			if (!validation.ok) {
+				throw new NodeOperationError(execution.getNode(), 'Anonymous time zone request failed');
+			}
+			lookup = egressFilter.createSecureLookup();
+		}
+		const accept = Object.entries(request.headers ?? {}).find(
+			([name]) => name.toLowerCase() === 'accept',
+		)?.[1];
+		const headers = Object.freeze({
+			...(accept === undefined ? {} : { Accept: accept }),
+			Host: logicalUrl.host,
+		});
+		const response = await new Promise<{
+			readonly statusCode: number;
+			readonly headers: Readonly<Record<string, string | readonly string[]>>;
+			readonly body: Buffer;
+		}>((resolve, reject) => {
+			const nativeRequest = logicalUrl.protocol === 'https:' ? httpsRequest : httpRequest;
+			const client = nativeRequest(
+				logicalUrl,
+				{
+					method: 'GET',
+					headers,
+					lookup,
+					maxHeaderSize: ANONYMOUS_TIME_ZONE_MAX_HEADER_BYTES,
+					...(logicalUrl.protocol === 'https:' ? { servername: binding.hostname } : {}),
+				},
+				(incoming) => {
+					const chunks: Buffer[] = [];
+					let size = 0;
+					incoming.on('data', (chunk: Buffer | Uint8Array | string) => {
+						const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+						size += buffer.length;
+						if (size > ANONYMOUS_TIME_ZONE_MAX_RESPONSE_BYTES) {
+							incoming.destroy(new Error('anonymous response exceeded size limit'));
+							return;
+						}
+						chunks.push(buffer);
+					});
+					incoming.once('error', reject);
+					incoming.once('end', () => {
+						if (incoming.statusCode === undefined) {
+							reject(new Error('anonymous response omitted status'));
+							return;
+						}
+						resolve({
+							statusCode: incoming.statusCode,
+							headers: anonymousResponseHeaders(incoming.headers),
+							body: Buffer.concat(chunks),
+						});
+					});
+				},
+			);
+			client.setTimeout(ANONYMOUS_TIME_ZONE_TIMEOUT_MS, () => {
+				client.destroy(new Error('anonymous request timed out'));
+			});
+			client.once('error', reject);
+			client.end();
+		});
+		return { ...response, effectiveUrl: request.url };
+	} catch {
+		throw new NodeOperationError(execution.getNode(), 'Anonymous time zone request failed');
+	}
 }
 
 export class CalDav implements INodeType {
@@ -2611,7 +2631,8 @@ export class CalDav implements INodeType {
 		): CalendarEventTimeZoneExecutionContext => {
 			timeZoneContext ??= createCalendarEventTimeZoneExecutionContext({
 				transport,
-				request: (request) => anonymousTimeZoneRequest(this, request),
+				request: ((request, binding?: AnonymousTimeZoneConnectionBinding) =>
+					anonymousTimeZoneRequest(this, request, binding)) as TimeZoneDistributionRequest,
 			});
 			return timeZoneContext;
 		};

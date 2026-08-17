@@ -265,6 +265,59 @@ describe('RFC 7809 capability and RFC 7808 TZDIST resolution', () => {
 		},
 	);
 
+	it('binds anonymous transport calls to the validated DNS address', async () => {
+		const transport = transportForServices(['https://tzdist.example.test/']);
+		const request = anonymousSuccess();
+		await context(transport, request, async () => ['93.184.216.34']).resolveReference(
+			CALENDAR_URL,
+			'Europe/Prague',
+		);
+		const calls = (request as unknown as ReturnType<typeof vi.fn>).mock.calls;
+		expect(calls).toHaveLength(2);
+		for (const [, binding] of calls) {
+			expect(binding).toMatchObject({
+				hostname: 'tzdist.example.test',
+				address: '93.184.216.34',
+			});
+			expect(binding.lookup).toBeTypeOf('function');
+		}
+	});
+
+	it('rejects public-to-private rebinding inside the connect-time lookup', async () => {
+		const transport = transportForServices(['https://connect-rebind.example.test/']);
+		const resolveHost = vi
+			.fn()
+			.mockResolvedValueOnce(['93.184.216.34'])
+			.mockResolvedValueOnce(['93.184.216.34'])
+			.mockResolvedValueOnce(['127.0.0.1']);
+		const request = vi.fn(
+			async (
+				_input: unknown,
+				binding: {
+					readonly lookup: (
+						hostname: string,
+						options: { readonly all: boolean },
+						callback: (error: Error | null) => void,
+					) => void;
+				},
+			) => {
+				await new Promise<void>((resolve, reject) => {
+					binding.lookup('connect-rebind.example.test', { all: false }, (error) => {
+						if (error === null) resolve();
+						else reject(error);
+					});
+				});
+				return response(200, TZDIST_CAPABILITIES, { 'content-type': 'application/json' });
+			},
+		) as unknown as TimeZoneDistributionRequest;
+		const error = await captureError(
+			context(transport, request, resolveHost).resolveReference(CALENDAR_URL, 'Europe/Prague'),
+		);
+		expect(error.code).toBe(TimeZoneReferenceFailureCode.ZONE_UNAVAILABLE);
+		expect(resolveHost).toHaveBeenCalledTimes(3);
+		expect(request).toHaveBeenCalledTimes(1);
+	});
+
 	it.each([
 		['weak ETag', { 'content-type': 'text/calendar', etag: 'W/"weak"' }, TZDIST_ZONE_RESPONSE],
 		[

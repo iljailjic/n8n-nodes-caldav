@@ -1,11 +1,26 @@
 import type { IExecuteFunctions, INode, INodeExecutionData, INodeProperties } from 'n8n-workflow';
 import { NodeApiError, NodeOperationError } from 'n8n-workflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+// Test-only native request event doubles.
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
+import { EventEmitter } from 'node:events';
 
 const mocks = vi.hoisted(() => ({
 	createCalendarEvent: vi.fn(),
 	createN8nCalDavTransport: vi.fn(),
 	createCalendarEventTimeZoneExecutionContext: vi.fn(),
+	httpRequest: vi.fn(),
+	httpsRequest: vi.fn(),
+}));
+
+vi.mock('node:http', async (importOriginal) => ({
+	...(await importOriginal<typeof import('node:http')>()),
+	request: mocks.httpRequest,
+}));
+
+vi.mock('node:https', async (importOriginal) => ({
+	...(await importOriginal<typeof import('node:https')>()),
+	request: mocks.httpsRequest,
 }));
 
 vi.mock('../../nodes/CalDav/events/create', async (importOriginal) => ({
@@ -72,7 +87,10 @@ function context(
 	options: {
 		readonly continueOnFail?: boolean;
 		readonly input?: INodeExecutionData[];
-		readonly httpRequest?: ReturnType<typeof vi.fn>;
+		readonly secureEgressFilter?: {
+			readonly validateUrl: ReturnType<typeof vi.fn>;
+			readonly createSecureLookup: ReturnType<typeof vi.fn>;
+		};
 	} = {},
 ): IExecuteFunctions {
 	return {
@@ -84,8 +102,40 @@ function context(
 		),
 		getNode: vi.fn().mockReturnValue(NODE),
 		continueOnFail: vi.fn().mockReturnValue(options.continueOnFail ?? false),
-		helpers: { httpRequest: options.httpRequest ?? vi.fn() },
+		helpers: { getSecureEgressFilter: () => options.secureEgressFilter },
 	} as unknown as IExecuteFunctions;
+}
+
+function mockNativeResponse(statusCode: number): void {
+	mocks.httpsRequest.mockImplementation(
+		(_url: unknown, _options: unknown, onResponse: (response: EventEmitter) => void) => {
+			const request = new EventEmitter() as EventEmitter & {
+				setTimeout: ReturnType<typeof vi.fn>;
+				destroy: ReturnType<typeof vi.fn>;
+				end: ReturnType<typeof vi.fn>;
+			};
+			request.setTimeout = vi.fn();
+			request.destroy = vi.fn((error?: Error) => {
+				if (error !== undefined) request.emit('error', error);
+			});
+			request.end = vi.fn(() => {
+				const response = new EventEmitter() as EventEmitter & {
+					statusCode: number;
+					headers: Record<string, string>;
+					destroy: ReturnType<typeof vi.fn>;
+				};
+				response.statusCode = statusCode;
+				response.headers = { Location: 'https://tzdist-next.example.test/resource' };
+				response.destroy = vi.fn((error?: Error) => {
+					if (error !== undefined) response.emit('error', error);
+				});
+				onResponse(response);
+				response.emit('data', Buffer.from(`status-${statusCode}`));
+				response.emit('end');
+			});
+			return request;
+		},
+	);
 }
 
 function createProperties(): readonly INodeProperties[] {
@@ -120,6 +170,8 @@ async function captureAnyError(execution: IExecuteFunctions): Promise<Error> {
 beforeEach(() => {
 	mocks.createN8nCalDavTransport.mockReset().mockResolvedValue(TRANSPORT);
 	mocks.createCalendarEventTimeZoneExecutionContext.mockReset().mockReturnValue(TIME_ZONE_CONTEXT);
+	mocks.httpRequest.mockReset();
+	mocks.httpsRequest.mockReset();
 	mocks.createCalendarEvent.mockReset().mockImplementation(async (_transport, input) => ({
 		calendarUrl: input.calendarUrl,
 		resourceUrl: `${input.calendarUrl}synthetic-event.ics`,
@@ -347,43 +399,58 @@ describe('CalDAV timed event timezone normalization and errors', () => {
 	});
 
 	it.each([
-		['302 response', 302, false],
-		['307 response', 307, false],
-		['rejected 404 response', 404, true],
+		['302 response', 302],
+		['307 response', 307],
+		['404 response', 404],
 	] as const)(
-		'normalizes the production anonymous adapter for a %s',
-		async (_label, statusCode, rejects) => {
-			const envelope = {
-				statusCode,
-				headers: { Location: 'https://tzdist-next.example.test/resource' },
-				body: Buffer.from(`status-${statusCode}`),
-			};
-			const httpRequest = rejects
-				? vi.fn().mockRejectedValue({ response: envelope })
-				: vi.fn().mockResolvedValue(envelope);
+		'keeps the native anonymous adapter manual for a %s and binds its socket lookup',
+		async (_label, statusCode) => {
+			mockNativeResponse(statusCode);
+			const secureLookup = vi.fn();
+			const validateUrl = vi.fn().mockResolvedValue({ ok: true, value: undefined });
 			await new CalDav().execute.call(
-				context([parameters({ timeZoneMode: 'iana', timeZone: 'Europe/Prague' })], { httpRequest }),
+				context([parameters({ timeZoneMode: 'iana', timeZone: 'Europe/Prague' })], {
+					secureEgressFilter: {
+						validateUrl,
+						createSecureLookup: vi.fn().mockReturnValue(secureLookup),
+					},
+				}),
 			);
 			const factoryInput = mocks.createCalendarEventTimeZoneExecutionContext.mock.calls[0]![0] as {
-				readonly request: (input: unknown) => Promise<{
+				readonly request: (
+					input: unknown,
+					binding: {
+						readonly hostname: string;
+						readonly address: string;
+						readonly lookup: ReturnType<typeof vi.fn>;
+					},
+				) => Promise<{
 					readonly statusCode: number;
 					readonly headers: Readonly<Record<string, string>>;
 					readonly body: Buffer;
 				}>;
 			};
-			const response = await factoryInput.request({
+			const response = await factoryInput.request(
+				{
+					method: 'GET',
+					url: 'https://tzdist.example.test/resource',
+				},
+				{ hostname: 'tzdist.example.test', address: '93.184.216.34', lookup: vi.fn() },
+			);
+			expect(validateUrl).toHaveBeenCalledWith(
+				expect.objectContaining({ href: 'https://tzdist.example.test/resource' }),
+			);
+			expect(mocks.httpsRequest).toHaveBeenCalledTimes(1);
+			const [target, options] = mocks.httpsRequest.mock.calls[0]!;
+			expect(target).toEqual(
+				expect.objectContaining({ href: 'https://tzdist.example.test/resource' }),
+			);
+			expect(options).toMatchObject({
 				method: 'GET',
-				url: 'https://tzdist.example.test/resource',
+				headers: { Host: 'tzdist.example.test' },
+				servername: 'tzdist.example.test',
 			});
-			expect(httpRequest).toHaveBeenCalledWith({
-				method: 'GET',
-				url: 'https://tzdist.example.test/resource',
-				headers: undefined,
-				ignoreHttpStatusErrors: true,
-				disableFollowRedirect: true,
-				returnFullResponse: true,
-				encoding: 'arraybuffer',
-			});
+			expect((options as { readonly lookup?: unknown }).lookup).toBe(secureLookup);
 			expect(response).toMatchObject({
 				statusCode,
 				headers: { location: 'https://tzdist-next.example.test/resource' },
@@ -391,6 +458,19 @@ describe('CalDAV timed event timezone normalization and errors', () => {
 			expect(response.body.toString()).toBe(`status-${statusCode}`);
 		},
 	);
+
+	it('refuses anonymous adapter I/O without an approved connection binding', async () => {
+		await new CalDav().execute.call(
+			context([parameters({ timeZoneMode: 'iana', timeZone: 'Europe/Prague' })]),
+		);
+		const factoryInput = mocks.createCalendarEventTimeZoneExecutionContext.mock.calls[0]![0] as {
+			readonly request: (input: unknown) => Promise<unknown>;
+		};
+		await expect(
+			factoryInput.request({ method: 'GET', url: 'https://tzdist.example.test/resource' }),
+		).rejects.toThrow('Anonymous time zone request failed');
+		expect(mocks.httpsRequest).not.toHaveBeenCalled();
+	});
 
 	it.each([
 		['SERVER_UNSUPPORTED', 'The CalDAV server does not support IANA time zones by reference.'],
