@@ -1175,13 +1175,7 @@ export function assertVTimeZoneCovers(
 				return unrepresentableTimeZone();
 			}
 		}
-	} catch (error) {
-		if (
-			error instanceof CalDavVTimeZoneGenerationError &&
-			error.code === CalDavVTimeZoneGenerationErrorCode.INVALID_COVERAGE
-		) {
-			throw error;
-		}
+	} catch {
 		return unrepresentableTimeZone();
 	}
 }

@@ -1261,12 +1261,16 @@ function reconcileTimeZoneDefinitions(
 	context: CalendarEventPreservationContext,
 	master: ICalendarComponent,
 	timeZoneDefinition?: ICalendarComponent,
+	removedTimeZoneDefinition?: ICalendarComponent,
 ): readonly ICalendarEntry[] {
 	const oldTimeZoneId = masterTimeZoneId(context.master);
 	const newTimeZoneId = masterTimeZoneId(master);
 	let calendarEntries = context.resource.calendar.entries.map((entry) =>
 		entry === context.master ? master : entry,
 	);
+	if (removedTimeZoneDefinition !== undefined) {
+		calendarEntries = calendarEntries.filter((entry) => entry !== removedTimeZoneDefinition);
+	}
 	if (oldTimeZoneId !== undefined && oldTimeZoneId !== newTimeZoneId) {
 		const retainedReference = calendarEntries.some(
 			(entry) =>
@@ -1317,6 +1321,7 @@ function constructResource(
 	projectInstant: CalendarEventInstantProjector,
 	renderedTimeZone?: string,
 	timeZoneDefinition?: ICalendarComponent,
+	removedTimeZoneDefinition?: ICalendarComponent,
 ): ICalendarResource {
 	const masterEntries = [...context.master.entries];
 	for (const field of PATCH_FIELDS) {
@@ -1347,7 +1352,12 @@ function constructResource(
 		name: context.master.name,
 		entries: masterEntries,
 	});
-	const calendarEntries = reconcileTimeZoneDefinitions(context, master, timeZoneDefinition);
+	const calendarEntries = reconcileTimeZoneDefinitions(
+		context,
+		master,
+		timeZoneDefinition,
+		removedTimeZoneDefinition,
+	);
 	Object.freeze(calendarEntries);
 	const calendar = Object.freeze({
 		kind: 'component' as const,
@@ -1364,6 +1374,7 @@ export function applyCalendarEventPatch(
 	projectInstant: CalendarEventInstantProjector = projectInstantInTimeZone,
 	renderedTimeZone?: string,
 	timeZoneDefinition?: ICalendarComponent,
+	removedTimeZoneDefinition?: ICalendarComponent,
 ): ICalendarResource {
 	const canonicalContext = validateStage(
 		() => snapshotCanonicalContext(context),
@@ -1393,5 +1404,6 @@ export function applyCalendarEventPatch(
 		projectInstant,
 		renderedTimeZone,
 		timeZoneDefinition,
+		removedTimeZoneDefinition,
 	);
 }

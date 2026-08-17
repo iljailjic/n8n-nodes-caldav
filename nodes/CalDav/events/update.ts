@@ -33,7 +33,11 @@ import {
 import type { CalendarEventPatch } from '../icalendar/patcher';
 import { serializeICalendarResource } from '../icalendar/serializer';
 import type { CalendarEventInstantProjector } from '../icalendar/serializer';
-import { assertVTimeZoneCovers, projectInstantInTimeZone } from '../icalendar/timeZones';
+import {
+	assertVTimeZoneCovers,
+	canonicalizeIanaTimeZone,
+	projectInstantInTimeZone,
+} from '../icalendar/timeZones';
 import { CalDavTransportError, CalDavTransportErrorCode } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import { normalizeCalendarCollectionUrl, validateAbsoluteHttpUrl } from '../transport/url';
@@ -342,6 +346,68 @@ function embeddedTimeZoneDefinition(
 	return matches.length === 1 ? matches[0] : undefined;
 }
 
+type RetainedTimeZoneOwnership = 'clear' | 'referenced' | 'unsafe';
+
+function propertyTargetOwnership(
+	property: ICalendarProperty,
+	timeZone: string,
+): RetainedTimeZoneOwnership {
+	const parameters = property.parameters.filter(
+		(parameter) => parameter.name.toUpperCase() === 'TZID',
+	);
+	if (parameters.length === 0) return 'clear';
+	if (parameters.length !== 1 || parameters[0]!.values.length !== 1) return 'unsafe';
+	try {
+		return canonicalizeIanaTimeZone(parameters[0]!.values[0]!.value) === timeZone
+			? 'referenced'
+			: 'clear';
+	} catch {
+		return 'unsafe';
+	}
+}
+
+function retainedTargetOwnership(
+	resource: ICalendarResource,
+	master: ICalendarComponent,
+	definition: ICalendarComponent,
+	timeZone: string,
+): RetainedTimeZoneOwnership {
+	const inspect = (
+		component: ICalendarComponent,
+		skipMasterBounds: boolean,
+	): RetainedTimeZoneOwnership => {
+		let result: RetainedTimeZoneOwnership = 'clear';
+		for (const entry of component.entries) {
+			if (
+				skipMasterBounds &&
+				entry.kind === 'property' &&
+				['DTSTART', 'DTEND'].includes(entry.name.toUpperCase())
+			) {
+				continue;
+			}
+			const ownership =
+				entry.kind === 'property'
+					? propertyTargetOwnership(entry, timeZone)
+					: inspect(entry, false);
+			if (ownership === 'unsafe') return ownership;
+			if (ownership === 'referenced') result = ownership;
+		}
+		return result;
+	};
+
+	let result: RetainedTimeZoneOwnership = 'clear';
+	for (const entry of resource.calendar.entries) {
+		if (entry === definition) continue;
+		const ownership =
+			entry.kind === 'property'
+				? propertyTargetOwnership(entry, timeZone)
+				: inspect(entry, entry === master);
+		if (ownership === 'unsafe') return ownership;
+		if (ownership === 'referenced') result = ownership;
+	}
+	return result;
+}
+
 export async function updateCalendarEvent(
 	transport: CalDavTransport,
 	input: CalendarEventUpdateInput,
@@ -401,6 +467,8 @@ export async function updateCalendarEvent(
 			: undefined;
 	let projectInstant: CalendarEventInstantProjector | undefined;
 	let authoredTimeZoneDefinition: ICalendarComponent | undefined;
+	let removedTimeZoneDefinition: ICalendarComponent | undefined;
+	let renderedAuthoredTimeZone: string | undefined;
 	if (effectiveTimeZone?.timeZoneMode === 'iana') {
 		if (timedCurrent === undefined) {
 			throw new CalDavCalendarEventPatchError(
@@ -428,15 +496,33 @@ export async function updateCalendarEvent(
 				projectInstantInTimeZone(instant, selectedTimeZone, definition);
 		} else {
 			const reusableDefinitions = current.context.resource.calendar.entries.filter(
-				(entry): entry is ICalendarComponent =>
-					entry.kind === 'component' &&
-					entry.name.toUpperCase() === 'VTIMEZONE' &&
-					directProperties(entry, 'TZID').length === 1 &&
-					directProperties(entry, 'TZID')[0]!.value.textValues?.length === 1 &&
-					directProperties(entry, 'TZID')[0]!.value.textValues![0] === effectiveTimeZone.timeZone,
+				(entry): entry is ICalendarComponent => {
+					if (entry.kind !== 'component' || entry.name.toUpperCase() !== 'VTIMEZONE') {
+						return false;
+					}
+					const identifiers = directProperties(entry, 'TZID');
+					if (identifiers.length !== 1 || identifiers[0]!.value.textValues?.length !== 1) {
+						return false;
+					}
+					try {
+						return (
+							canonicalizeIanaTimeZone(identifiers[0]!.value.textValues[0]!) ===
+							effectiveTimeZone.timeZone
+						);
+					} catch {
+						return false;
+					}
+				},
 			);
 			if (reusableDefinitions.length > 1) {
 				throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
+			}
+			if (reusableDefinitions[0] !== undefined) {
+				try {
+					assertVTimeZoneCovers(reusableDefinitions[0], effectiveTimeZone.timeZone, interval);
+				} catch {
+					throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
+				}
 			}
 			const authoringInput = {
 				calendarUrl: snapshot.calendarUrl,
@@ -449,7 +535,24 @@ export async function updateCalendarEvent(
 			};
 			const selection = await resolveCalendarEventTimeZoneAuthoring(authoringInput);
 			const definition = selection.definition;
-			if (selection.embed) authoredTimeZoneDefinition = definition;
+			if (selection.embed) {
+				authoredTimeZoneDefinition = definition;
+				if (definition === reusableDefinitions[0]) {
+					renderedAuthoredTimeZone = directProperties(definition, 'TZID')[0]!.value.textValues![0];
+				}
+			} else if (reusableDefinitions[0] !== undefined) {
+				if (
+					retainedTargetOwnership(
+						current.context.resource,
+						current.context.master,
+						reusableDefinitions[0],
+						effectiveTimeZone.timeZone,
+					) !== 'clear'
+				) {
+					throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
+				}
+				removedTimeZoneDefinition = reusableDefinitions[0];
+			}
 			projectInstant = (instant, selectedTimeZone) =>
 				projectInstantInTimeZone(instant, selectedTimeZone, definition);
 		}
@@ -498,8 +601,9 @@ export async function updateCalendarEvent(
 			effectivePatch,
 			modifiedAt,
 			projectInstant,
-			implicitCurrentTimeZone === undefined ? undefined : originalTimeZoneId,
+			implicitCurrentTimeZone === undefined ? renderedAuthoredTimeZone : originalTimeZoneId,
 			authoredTimeZoneDefinition,
+			removedTimeZoneDefinition,
 		);
 	} catch (error) {
 		if (
