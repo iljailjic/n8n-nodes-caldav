@@ -944,6 +944,9 @@ describe('Radicale calendar-event UID resolution', () => {
 				accessMode: 'editable',
 				start: '2040-01-02T10:00:00Z',
 				end: '2040-01-02T10:30:00Z',
+				timeZoneMode: 'utc',
+				startLocal: '2040-01-02T10:00:00',
+				endLocal: '2040-01-02T10:30:00',
 			};
 			expect(directResult.event).toEqual(expectedEvent);
 			expect(uidResult.event).toEqual(expectedEvent);
@@ -1092,6 +1095,9 @@ describe('Radicale collision-safe Event Create', () => {
 				accessMode: 'editable',
 				start: '2040-02-03T10:00:00Z',
 				end: '2040-02-03T11:00:00Z',
+				timeZoneMode: 'utc',
+				startLocal: '2040-02-03T10:00:00',
+				endLocal: '2040-02-03T11:00:00',
 			});
 			const readBack = await getCalendarEventByResourceUrl(
 				transport(run),
@@ -1255,6 +1261,9 @@ describe('Radicale conditional calendar-event mutations', () => {
 				accessMode: 'editable',
 				start: '2040-01-02T10:00:00Z',
 				end: '2040-01-02T10:30:00Z',
+				timeZoneMode: 'utc',
+				startLocal: '2040-01-02T10:00:00',
+				endLocal: '2040-01-02T10:30:00',
 			});
 			expect(readBack.context.resource.originalIcs).not.toMatch(
 				/(^|\r?\n)(?:X-|BEGIN:VTIMEZONE|BEGIN:VALARM)/,
@@ -1478,6 +1487,9 @@ describe('Radicale conditional Event Update operation', () => {
 						accessMode: 'editable',
 						start: '2040-01-02T10:00:00Z',
 						end: '2040-01-02T10:30:00Z',
+						timeZoneMode: 'utc',
+						startLocal: '2040-01-02T10:00:00',
+						endLocal: '2040-01-02T10:30:00',
 					},
 					pairedItem: { item: 0 },
 				},
