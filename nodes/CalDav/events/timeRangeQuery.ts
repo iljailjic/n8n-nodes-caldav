@@ -2,7 +2,7 @@ import { mapCalendarEventResourceWithTimeZoneContext } from '../icalendar/eventR
 import type { CalendarEventReadResult } from '../icalendar/eventReadModel';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import { parseICalendarResource } from '../icalendar/parser';
-import { CalDavMethod } from '../transport/http';
+import { CalDavMethod, decodeCalDavTextBody } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import { resolveCalDavHref } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
@@ -132,7 +132,13 @@ export async function queryCalendarEventsByTimeRange(
 		throw new CalDavXmlProtocolError('INVALID_MULTISTATUS');
 	}
 
-	const multiStatus = parseDavMultiStatus(response.body.toString('utf8'));
+	let decodedResponse: string;
+	try {
+		decodedResponse = decodeCalDavTextBody(response.body, response.headers, { xml: true });
+	} catch {
+		invalidResponse();
+	}
+	const multiStatus = parseDavMultiStatus(decodedResponse);
 	const candidates = new Map<AbsoluteHttpUrl, ResourceCandidate>();
 
 	for (const resourceResponse of multiStatus.responses) {

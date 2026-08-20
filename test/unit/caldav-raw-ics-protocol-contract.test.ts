@@ -246,7 +246,10 @@ describe('Raw ICS REPORT provenance and XML character semantics', () => {
 		const results = await queryCalendarEventsByTimeRange(transport, CALENDAR_URL, RANGE);
 
 		expect(results.map(({ event }) => event.uid)).toEqual(['a@example.test', 'b@example.test']);
-		expect(results.map(rawIcs)).toEqual([first, second]);
+		expect(results.map(rawIcs)).toEqual([
+			first.replaceAll('\r\n', '\n'),
+			second.replaceAll('\r\n', '\n'),
+		]);
 		expect(transport.request).toHaveBeenCalledOnce();
 	});
 
@@ -255,7 +258,11 @@ describe('Raw ICS REPORT provenance and XML character semantics', () => {
 		const oversized = exactSizeEventIcs(ICALENDAR_MAX_RESOURCE_BYTES + 1);
 		const xml = multiStatus(
 			reportResponse('/calendars/raw/good.ics', '"good"', xmlText(good)) +
-				reportResponse('/calendars/raw/oversized.ics', '"oversized"', xmlText(oversized)),
+				reportResponse(
+					'/calendars/raw/oversized.ics',
+					'"oversized"',
+					xmlText(oversized).replaceAll('\r\n', '&#13;\n'),
+				),
 		);
 		const error = await captureFailure(
 			queryCalendarEventsByTimeRange(

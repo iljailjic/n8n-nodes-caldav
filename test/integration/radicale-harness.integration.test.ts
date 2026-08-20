@@ -893,6 +893,7 @@ describe('Radicale authenticated discovery', () => {
 			);
 			const put = await authenticatedFetch(run, resourceUrl, 'PUT', source);
 			expect([201, 204]).toContain(put.status);
+			const storedSource = await (await authenticatedFetch(run, resourceUrl)).text();
 
 			const result = await getCalendarEventByResourceUrl(
 				transport(run),
@@ -911,6 +912,8 @@ describe('Radicale authenticated discovery', () => {
 				startLocal: '2040-07-15T10:00:00',
 				endLocal: '2040-07-15T11:00:00',
 			});
+			expect(result.rawIcs).toBe(storedSource);
+			expect(result.context.resource.originalIcs).toBe(storedSource);
 			expect(JSON.stringify(result)).not.toContain(run.password);
 			expect(JSON.stringify(result)).not.toContain(basicAuthorization(run));
 		} finally {
@@ -957,9 +960,10 @@ describe('Radicale authenticated discovery', () => {
 				startLocal: '2040-07-15T10:00:00',
 				endLocal: '2040-07-15T11:00:00',
 			});
+			expect(created).not.toHaveProperty('rawIcs');
 			expect(resolveReference).toHaveBeenCalledOnce();
 			expect(request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method)).toEqual(
-				['PUT', 'GET'],
+				['PUT'],
 			);
 			let storedBody = await (await authenticatedFetch(run, created.resourceUrl)).text();
 			expect(storedBody.match(/BEGIN:VTIMEZONE/g)).toHaveLength(1);
@@ -1042,7 +1046,7 @@ describe('Radicale authenticated discovery', () => {
 			expect(storedBody).toContain('TZID:America/New_York');
 			expect(storedBody).toContain('DTSTART;TZID=America/New_York:20400715T043000');
 			expect(storedBody).not.toContain('TZID:Europe/Prague');
-			expect(JSON.stringify(zoneChanged)).not.toMatch(/synthetic unavailable|BEGIN:VTIMEZONE/);
+			expect(JSON.stringify(zoneChanged)).not.toContain('synthetic unavailable');
 		} finally {
 			await teardownRun(run);
 		}
@@ -1739,6 +1743,7 @@ describe('Radicale conditional Event Update operation', () => {
 						timeZoneMode: 'utc',
 						startLocal: '2040-01-02T10:00:00',
 						endLocal: '2040-01-02T10:30:00',
+						rawIcs: expect.stringContaining('X-UNKNOWN;X-PARAM=MiXeD:opaque-preservation-oracle'),
 					},
 					pairedItem: { item: 0 },
 				},
@@ -2139,7 +2144,7 @@ describe('Radicale issue #41 all-day event interoperability', () => {
 			const createMethods = requests.mock.calls.map(
 				([options]) => (options as N8nCalDavRequestOptions).method,
 			);
-			expect(createMethods).toEqual(['PUT', 'GET', 'PUT', 'GET']);
+			expect(createMethods).toEqual(['PUT', 'PUT']);
 
 			for (const created of [leap, year]) {
 				const raw = await authenticatedFetch(run, created.resourceUrl);
@@ -2329,7 +2334,7 @@ describe('Radicale extended VEVENT metadata round trip', () => {
 				etag: expect.any(String),
 			});
 			expect(request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method)).toEqual(
-				['PUT', 'GET'],
+				['PUT'],
 			);
 
 			const direct = await getCalendarEventByResourceUrl(
@@ -2342,16 +2347,21 @@ describe('Radicale extended VEVENT metadata round trip', () => {
 				status: 'tentative',
 				transparency: 'opaque',
 			});
+			const directStoredBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
+			expect(direct.rawIcs).toBe(directStoredBody);
 			const many = await queryCalendarEventsByTimeRange(inspectedTransport, calendarUrl, {
 				start: new Date('2040-08-20T09:59:59Z'),
 				end: new Date('2040-08-20T11:00:01Z'),
 			});
-			expect(many.find(({ event }) => event.uid === uid)?.event).toMatchObject({
+			const selectedMany = many.find(({ event }) => event.uid === uid);
+			expect(selectedMany?.event).toMatchObject({
 				resourceUrl: expectedResourceUrl,
 				categories: ['Planning, review', 'semi;colon', 'path\\name', 'line\nnext'],
 				status: 'tentative',
 				transparency: 'opaque',
 			});
+			expect(selectedMany?.rawIcs).toContain(`UID:${uid}`);
+			expect(selectedMany?.rawIcs).not.toContain('<d:multistatus');
 
 			const seeded = await authenticatedFetch(run, expectedResourceUrl);
 			const seededBody = (await seeded.text())
@@ -2379,6 +2389,7 @@ describe('Radicale extended VEVENT metadata round trip', () => {
 				etag: expect.any(String),
 			});
 			let storedBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
+			expect(preserved.rawIcs).toBe(storedBody);
 			expect(storedBody).toContain('STATUS;X-ORIGIN=seed:TENTATIVE');
 			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=metadata:preserved');
 			expect(request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method)).toEqual(
@@ -2409,6 +2420,7 @@ describe('Radicale extended VEVENT metadata round trip', () => {
 			expect(updated).not.toHaveProperty('transparency');
 			expect(updated.etag).not.toBe(preserved.etag);
 			storedBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
+			expect(updated.rawIcs).toBe(storedBody);
 			expect(storedBody).toContain('CATEGORIES:Updated,Case,case');
 			expect(storedBody).toContain('STATUS:CONFIRMED');
 			expect(storedBody).not.toContain('TRANSP:');
@@ -2445,6 +2457,7 @@ describe('Radicale extended VEVENT metadata round trip', () => {
 			expect(upserted.event).not.toHaveProperty('categories');
 			expect(upserted.event.etag).not.toBe(updated.etag);
 			storedBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
+			expect(upserted.event.rawIcs).toBe(storedBody);
 			expect(storedBody).toContain('STATUS:CANCELLED');
 			expect(storedBody).toContain('TRANSP:TRANSPARENT');
 			expect(storedBody).not.toContain('CATEGORIES:');
@@ -2498,6 +2511,7 @@ describe('Radicale deterministic Event Upsert', () => {
 				action: 'create',
 				event: { resourceUrl: expectedResourceUrl, uid, summary: 'Upsert first version' },
 			});
+			expect(created.event).not.toHaveProperty('rawIcs');
 			expect(uidFactory).not.toHaveBeenCalled();
 
 			const seeded = await authenticatedFetch(run, expectedResourceUrl);
@@ -2552,9 +2566,32 @@ describe('Radicale deterministic Event Upsert', () => {
 			expect(allRequests.filter(({ method }) => method === 'REPORT')).toHaveLength(2);
 			const stored = await authenticatedFetch(run, expectedResourceUrl);
 			const storedBody = await stored.text();
+			expect(updated.event.rawIcs).toBe(storedBody);
 			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=MiXeD:preserved-by-upsert');
 			expect(storedBody).toContain('SUMMARY:Upsert second version');
 			expect(storedBody).not.toContain('LOCATION:Remove this location');
+
+			request.mockClear();
+			const noOp = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-03-02T10:00:00Z'),
+					end: new Date('2040-03-02T11:00:00Z'),
+					summary: 'Upsert second version',
+					location: { kind: 'remove' },
+					url: { kind: 'set', value: 'urn:example:upsert:second' },
+				},
+				{ clock, uidFactory },
+			);
+			expect(noOp).toMatchObject({ action: 'update', event: { uid } });
+			expect(noOp.event.rawIcs).toContain('SUMMARY:Upsert second version');
+			expect(noOp.event.rawIcs).toContain('X-UNKNOWN;X-SOURCE=MiXeD:preserved-by-upsert');
+			expect(request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method)).toEqual(
+				['REPORT'],
+			);
 		} finally {
 			await teardownRun(run);
 		}
@@ -2677,7 +2714,7 @@ describe('Radicale deterministic Event Upsert', () => {
 			expect(storedBody).toContain('DTSTART;TZID=Europe/Prague:20400715T103000');
 			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=IANA:preserved-by-upsert');
 			expect(storedBody).toContain('DESCRIPTION:Preserve IANA description');
-			expect(JSON.stringify(updated)).not.toMatch(/synthetic unavailable|BEGIN:VTIMEZONE/);
+			expect(JSON.stringify(updated)).not.toContain('synthetic unavailable');
 		} finally {
 			await teardownRun(run);
 		}

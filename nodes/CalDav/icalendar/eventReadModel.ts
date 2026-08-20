@@ -138,6 +138,8 @@ export interface ReadOnlyCalendarEvent extends CalendarEventCommon {
 
 export type CalendarEvent = EditableCalendarEvent | ReadOnlyCalendarEvent;
 
+export type CalendarEventWithRawIcs = CalendarEvent & { readonly rawIcs: string };
+
 export interface CalendarEventPreservationContext {
 	readonly resource: ICalendarResource;
 	readonly master: ICalendarComponent;
@@ -147,6 +149,7 @@ export interface CalendarEventPreservationContext {
 export interface CalendarEventReadResult {
 	readonly event: CalendarEvent;
 	readonly context: CalendarEventPreservationContext;
+	readonly rawIcs: string;
 }
 
 const PROJECTED_SINGLETONS = [
@@ -846,7 +849,7 @@ export function mapCalendarEventResource(
 				...(extensions !== undefined ? { extensions } : {}),
 			});
 		}
-		return Object.freeze({ event, context });
+		return Object.freeze({ event, context, rawIcs: input.resource.originalIcs });
 	}
 
 	let timed:
@@ -1008,7 +1011,7 @@ export function mapCalendarEventResource(
 					...(extensions !== undefined ? { extensions } : {}),
 				},
 	) satisfies CalendarEvent;
-	return Object.freeze({ event, context });
+	return Object.freeze({ event, context, rawIcs: input.resource.originalIcs });
 }
 
 function referencedTimeZone(resource: ICalendarResource): IanaTimeZoneId | undefined {

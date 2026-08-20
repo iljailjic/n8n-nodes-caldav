@@ -137,7 +137,10 @@ describe('Raw ICS mutation result and request matrix contract', () => {
 		);
 
 		expect(methods(requests)).toEqual([CalDavMethod.REPORT]);
-		expect(result).toMatchObject({ action: 'update', event: { rawIcs } });
+		expect(result).toMatchObject({
+			action: 'update',
+			event: { rawIcs: rawIcs.replaceAll('\r\n', '\n') },
+		});
 	});
 
 	it('Update returns only the authoritative post-PUT GET body', async () => {

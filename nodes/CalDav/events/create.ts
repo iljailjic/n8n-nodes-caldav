@@ -14,8 +14,7 @@ import type { CalDavTransport } from '../transport/http';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
 import { prepareCalendarEventCreate } from './createPreparation';
-import { getCalendarEventByResourceUrl } from './getByResourceUrl';
-import { createCalendarEventResource } from './mutations';
+import { createCalendarEventResource, getCalendarEventMutationEtag } from './mutations';
 
 export { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
 
@@ -57,23 +56,6 @@ function safeStatusCode(error: unknown): number | undefined {
 	return error instanceof CalDavTransportError ? error.statusCode : undefined;
 }
 
-function isDirectCalendarChild(
-	calendarUrl: AbsoluteHttpUrl,
-	resourceUrl: AbsoluteHttpUrl,
-): boolean {
-	try {
-		const calendar = new URL(calendarUrl);
-		const resource = new URL(resourceUrl);
-		if (calendar.origin !== resource.origin || !resource.pathname.startsWith(calendar.pathname)) {
-			return false;
-		}
-		const child = resource.pathname.slice(calendar.pathname.length);
-		return child.length > 0 && !child.endsWith('/') && !child.includes('/');
-	} catch {
-		return false;
-	}
-}
-
 export async function createCalendarEvent(
 	transport: CalDavTransport,
 	input: CalendarEventCreateInput,
@@ -88,33 +70,23 @@ export async function createCalendarEvent(
 		prepared.calendarData,
 	);
 
-	try {
-		const confirmed = await getCalendarEventByResourceUrl(
-			transport,
-			input.calendarUrl,
-			created.resourceUrl,
-			{ ...(timeZoneContext === undefined ? {} : { timeZoneContext }) },
-		);
-		if (
-			confirmed.event.etag === undefined ||
-			confirmed.event.uid !== prepared.uid ||
-			!isDirectCalendarChild(input.calendarUrl, confirmed.event.resourceUrl)
-		) {
+	let resourceUrl = created.resourceUrl;
+	let etag = created.etag;
+	if (etag === undefined) {
+		try {
+			const metadata = await getCalendarEventMutationEtag(
+				transport,
+				input.calendarUrl,
+				resourceUrl,
+			);
+			resourceUrl = metadata.resourceUrl;
+			etag = metadata.etag;
+		} catch (error) {
 			throw new CalDavCalendarEventCreateError(
 				CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED,
+				safeStatusCode(error),
 			);
 		}
-		return Object.freeze({ ...confirmed.event, etag: confirmed.event.etag });
-	} catch (error) {
-		if (
-			error instanceof CalDavCalendarEventCreateError &&
-			error.code === CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED
-		) {
-			throw error;
-		}
-		throw new CalDavCalendarEventCreateError(
-			CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED,
-			safeStatusCode(error),
-		);
 	}
+	return Object.freeze({ ...prepared.event, resourceUrl, etag });
 }

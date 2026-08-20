@@ -1168,7 +1168,7 @@ function isValidXmlText(value: string): boolean {
 	return true;
 }
 
-function eventJson(event: CalendarEvent): IDataObject {
+function eventJson(event: CalendarEvent, rawIcs?: string): IDataObject {
 	const legacy = event as unknown as {
 		readonly calendarUrl: string;
 		readonly resourceUrl: string;
@@ -1209,6 +1209,7 @@ function eventJson(event: CalendarEvent): IDataObject {
 			...(legacy.alarms === undefined ? {} : { alarms: legacy.alarms as unknown as IDataObject[] }),
 			...(legacy.start === undefined ? {} : { start: legacy.start }),
 			...(legacy.end === undefined ? {} : { end: legacy.end }),
+			...(rawIcs === undefined ? {} : { rawIcs }),
 		};
 	}
 	return {
@@ -1244,6 +1245,7 @@ function eventJson(event: CalendarEvent): IDataObject {
 			: { recurrence: event.recurrence as unknown as IDataObject }),
 		...(event.alarms === undefined ? {} : { alarms: event.alarms as unknown as IDataObject[] }),
 		...(event.extensions === undefined ? {} : { extensions: event.extensions as IDataObject }),
+		...(rawIcs === undefined ? {} : { rawIcs }),
 	};
 }
 
@@ -4574,7 +4576,13 @@ export class CalDav implements INodeType {
 						uidFactory: () => resolveCalendarEventUid(undefined),
 					});
 					returnData.push({
-						json: { action: result.action, ...eventJson(result.event) },
+						json: {
+							action: result.action,
+							...eventJson(
+								result.event,
+								result.action === 'update' ? result.event.rawIcs : undefined,
+							),
+						},
 						pairedItem: { item: itemIndex },
 					});
 				} catch (error) {
@@ -4616,7 +4624,7 @@ export class CalDav implements INodeType {
 					);
 					const selected = input.limit === undefined ? results : results.slice(0, input.limit);
 					const projected = selected.map((result) => ({
-						json: eventJson(result.event),
+						json: eventJson(result.event, result.rawIcs),
 						pairedItem: { item: itemIndex },
 					}));
 					returnData.push(...projected);
@@ -4662,7 +4670,10 @@ export class CalDav implements INodeType {
 						() => new Date(),
 						ensureTimeZoneContext(getTransport),
 					);
-					returnData.push({ json: eventJson(updated), pairedItem: { item: itemIndex } });
+					returnData.push({
+						json: eventJson(updated, updated.rawIcs),
+						pairedItem: { item: itemIndex },
+					});
 				} catch (error) {
 					const failure = eventUpdateFailure(error);
 					if (this.continueOnFail()) {
@@ -4959,7 +4970,10 @@ export class CalDav implements INodeType {
 							: await getCalendarEventByResourceUrl(getTransport, calendarUrl, resourceUrl, {
 									timeZoneContext: ensureTimeZoneContext(getTransport),
 								});
-					returnData.push({ json: eventJson(result.event), pairedItem: { item: itemIndex } });
+					returnData.push({
+						json: eventJson(result.event, result.rawIcs),
+						pairedItem: { item: itemIndex },
+					});
 				} catch (error) {
 					const failure = eventGetFailure(error);
 					if (this.continueOnFail()) {

@@ -143,14 +143,9 @@ describe('calendar-event Create coordinator public contract', () => {
 		expectTypeOf(createCalendarEvent).returns.toEqualTypeOf<Promise<CreatedCalendarEvent>>();
 	});
 
-	it('maps an opaque Unicode UID injectively and returns its authoritative read-back', async () => {
+	it('maps an opaque Unicode UID injectively and returns its authored raw-free state', async () => {
 		const requests = transport(async (request) =>
-			request.method === CalDavMethod.PUT
-				? response(201, request.url)
-				: response(200, request.url, {
-						etag: ' W/"opaque etag" ',
-						body: eventData('opaque ../UID/🚀?one'),
-					}),
+			response(201, request.url, { etag: ' W/"opaque etag" ' }),
 		);
 		const createInput = input({
 			description: '',
@@ -182,7 +177,7 @@ describe('calendar-event Create coordinator public contract', () => {
 		});
 
 		const request = requests.request.mock.calls[0]?.[0] as CalDavTransportRequest;
-		expect(requests.request).toHaveBeenCalledTimes(2);
+		expect(requests.request).toHaveBeenCalledOnce();
 		expect(request).toMatchObject({
 			method: CalDavMethod.PUT,
 			url: expectedResourceUrl,
@@ -269,7 +264,7 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(JSON.stringify(error)).not.toMatch(/Prague|calendar\.example|0001|9999|private/i);
 	});
 
-	it('reuses one generated UID across all-day DATE serialization, resource identity, authoritative GET, and output', async () => {
+	it('reuses one generated UID across all-day DATE serialization, resource identity, and output', async () => {
 		const authoritativeBody = [
 			'BEGIN:VCALENDAR',
 			'VERSION:2.0',
@@ -289,12 +284,10 @@ describe('calendar-event Create coordinator public contract', () => {
 			CALENDAR_URL,
 		).href;
 		const requests = transport(async (request) =>
-			request.method === CalDavMethod.PUT
-				? response(201, request.url)
-				: response(200, request.url, {
-						etag: '"all-day-generated-etag"',
-						body: authoritativeBody,
-					}),
+			response(201, request.url, {
+				etag: '"all-day-generated-etag"',
+				body: authoritativeBody,
+			}),
 		);
 		const allDayInput = {
 			calendarUrl: CALENDAR_URL,
@@ -307,11 +300,9 @@ describe('calendar-event Create coordinator public contract', () => {
 		const created = await createCalendarEvent(requests, allDayInput, () => FIXED_CLOCK);
 
 		expect(mocks.randomUUID).toHaveBeenCalledTimes(1);
-		expect(requests.request).toHaveBeenCalledTimes(2);
+		expect(requests.request).toHaveBeenCalledOnce();
 		const put = requests.request.mock.calls[0]?.[0] as CalDavTransportRequest;
-		const get = requests.request.mock.calls[1]?.[0] as CalDavTransportRequest;
 		expect(put).toMatchObject({ method: CalDavMethod.PUT, url: expectedResourceUrl });
-		expect(get).toEqual({ method: CalDavMethod.GET, url: expectedResourceUrl });
 		const unfolded = put.body?.replace(/\r\n[ \t]/gu, '');
 		expect(unfolded?.split('\r\n').filter((line) => line === `UID:${GENERATED_UID}`)).toHaveLength(
 			1,
@@ -339,12 +330,7 @@ describe('calendar-event Create coordinator public contract', () => {
 			'00000000-0000-4000-8000-000000000003',
 		];
 		for (const uid of generated) mocks.randomUUID.mockReturnValueOnce(uid);
-		let readIndex = 0;
-		const requests = transport(async (request) => {
-			if (request.method === CalDavMethod.PUT) return response(201, request.url);
-			const uid = generated[readIndex++]!;
-			return response(200, request.url, { body: eventData(uid) });
-		});
+		const requests = transport(async (request) => response(201, request.url));
 
 		const created = [];
 		for (let index = 0; index < generated.length; index += 1) {
@@ -354,8 +340,7 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(mocks.randomUUID).toHaveBeenCalledTimes(3);
 		expect(created.map(({ uid }) => uid)).toEqual(generated);
 		expect(new Set(created.map(({ resourceUrl }) => resourceUrl)).size).toBe(3);
-		expect(readIndex).toBe(3);
-		expect(requests.request).toHaveBeenCalledTimes(6);
+		expect(requests.request).toHaveBeenCalledTimes(3);
 	});
 
 	it('accepts the exact 255-octet resource-segment boundary and rejects the first overflow before clock or I/O', async () => {
@@ -368,7 +353,7 @@ describe('calendar-event Create coordinator public contract', () => {
 				: response(200, request.url, { body: eventData(acceptedUid) }),
 		);
 		await createCalendarEvent(acceptedTransport, input({ uid: acceptedUid }), () => FIXED_CLOCK);
-		expect(acceptedTransport.request).toHaveBeenCalledTimes(2);
+		expect(acceptedTransport.request).toHaveBeenCalledOnce();
 
 		const rejectedTransport = transport(async (request) => response(201, request.url));
 		const clock = vi.fn(() => FIXED_CLOCK);
@@ -441,7 +426,7 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(requests.request).not.toHaveBeenCalled();
 	});
 
-	it('always performs one authoritative body GET after the valid PUT', async () => {
+	it('uses one metadata-only GET when a valid PUT omits its required ETag', async () => {
 		const requestedUrls: string[] = [];
 		const requests = transport(async (request) => {
 			requestedUrls.push(request.url);
@@ -465,9 +450,10 @@ describe('calendar-event Create coordinator public contract', () => {
 			'https://calendar.example.test/calendars/selected/canonical-created.ics',
 		);
 		expect(result.etag).toBe('');
+		expect(result).not.toHaveProperty('rawIcs');
 	});
 
-	it('returns a safe read-only authoritative projection after a completed mutation', async () => {
+	it('does not substitute a read-back representation or raw body after a completed mutation', async () => {
 		const readOnlyBody = eventData('opaque ../UID/🚀?one')
 			.replace('DTSTART:20400102T100000Z', 'DTSTART:20400102T100000')
 			.replace('DTEND:20400102T110000Z', 'DTEND:20400102T110000');
@@ -478,12 +464,11 @@ describe('calendar-event Create coordinator public contract', () => {
 		);
 		await expect(createCalendarEvent(requests, input(), () => FIXED_CLOCK)).resolves.toMatchObject({
 			uid: 'opaque ../UID/🚀?one',
-			etag: '"read-only-etag"',
-			timeMode: 'unsupported',
-			accessMode: 'readOnly',
-			readOnlyReason: 'unsupportedTimeRepresentation',
+			etag: '"created-etag"',
+			timeMode: 'timed',
+			accessMode: 'editable',
 		});
-		expect(requests.request).toHaveBeenCalledTimes(2);
+		expect(requests.request).toHaveBeenCalledOnce();
 	});
 
 	it('does not repair malformed PUT ETag metadata with GET', async () => {
