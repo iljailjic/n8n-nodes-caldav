@@ -141,6 +141,8 @@ describe('CalDAV transport public contract', () => {
 				'CalDavRemoteProtocolError',
 				'CalDavResponseLimitError',
 				'CalDavTimeoutError',
+				'CalDavTextDecodingError',
+				'CalDavTextDecodingFailureCode',
 				'CalDavTlsError',
 				'CalDavTransportError',
 				'CalDavTransportErrorCode',
@@ -148,6 +150,7 @@ describe('CalDAV transport public contract', () => {
 				'createCalDavTransport',
 				'createN8nCalDavRequestHelperAdapter',
 				'createN8nCalDavTransport',
+				'decodeCalDavTextBody',
 			].sort(),
 		);
 		expect(CALDAV_CREDENTIAL_TYPE).toBe('calDavApi');

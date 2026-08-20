@@ -64,6 +64,135 @@ export interface CalDavTransportResponse {
 	readonly body: Buffer;
 }
 
+export const CalDavTextDecodingFailureCode = Object.freeze({
+	INVALID_ENCODING: 'INVALID_TEXT_ENCODING',
+} as const);
+
+export class CalDavTextDecodingError extends Error {
+	readonly code = CalDavTextDecodingFailureCode.INVALID_ENCODING;
+
+	constructor() {
+		super('The CalDAV response uses an invalid or unsupported text encoding.');
+		this.name = 'CalDavTextDecodingError';
+	}
+}
+
+export interface CalDavTextDecodingOptions {
+	readonly xml?: boolean;
+}
+
+type SupportedTextCharset = 'utf8' | 'ascii';
+
+function invalidTextEncoding(): never {
+	throw new CalDavTextDecodingError();
+}
+
+function normalizedTextCharset(value: string): SupportedTextCharset {
+	const normalized = asciiLowercase(value.trim());
+	if (normalized === 'utf-8' || normalized === 'utf8') return 'utf8';
+	if (normalized === 'us-ascii') return 'ascii';
+	return invalidTextEncoding();
+}
+
+function responseHeaderValues(
+	headers: CalDavResponseHeaders,
+	requestedName: string,
+): readonly string[] {
+	const values: string[] = [];
+	try {
+		for (const name of Object.keys(headers)) {
+			if (asciiLowercase(name) !== requestedName) continue;
+			const value = headers[name];
+			if (typeof value === 'string') values.push(value);
+			else if (Array.isArray(value) && value.every((entry) => typeof entry === 'string')) {
+				values.push(...value);
+			} else invalidTextEncoding();
+		}
+	} catch (error) {
+		if (error instanceof CalDavTextDecodingError) throw error;
+		return invalidTextEncoding();
+	}
+	return values;
+}
+
+function declaredContentTypeCharset(
+	headers: CalDavResponseHeaders,
+): SupportedTextCharset | undefined {
+	const declarations: SupportedTextCharset[] = [];
+	for (const contentType of responseHeaderValues(headers, 'content-type')) {
+		const markerCount = contentType.match(/;\s*charset\s*=/gi)?.length ?? 0;
+		const matches = [
+			...contentType.matchAll(/;\s*charset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;\s,]+))/gi),
+		];
+		if (matches.length !== markerCount) invalidTextEncoding();
+		for (const match of matches) {
+			declarations.push(normalizedTextCharset(match[1] ?? match[2] ?? match[3] ?? ''));
+		}
+	}
+	if (new Set(declarations).size > 1) invalidTextEncoding();
+	return declarations[0];
+}
+
+function leadingBom(input: Uint8Array): 'utf8' | 'unsupported' | undefined {
+	if (input.length >= 4) {
+		if (
+			(input[0] === 0x00 && input[1] === 0x00 && input[2] === 0xfe && input[3] === 0xff) ||
+			(input[0] === 0xff && input[1] === 0xfe && input[2] === 0x00 && input[3] === 0x00)
+		) {
+			return 'unsupported';
+		}
+	}
+	if (input.length >= 3 && input[0] === 0xef && input[1] === 0xbb && input[2] === 0xbf) {
+		return 'utf8';
+	}
+	if (
+		input.length >= 2 &&
+		((input[0] === 0xfe && input[1] === 0xff) || (input[0] === 0xff && input[1] === 0xfe))
+	) {
+		return 'unsupported';
+	}
+	return undefined;
+}
+
+function declaredXmlCharset(input: Uint8Array): SupportedTextCharset | undefined {
+	const prefix = Buffer.from(
+		input.buffer,
+		input.byteOffset,
+		Math.min(input.byteLength, 512),
+	).toString('latin1');
+	const declaration = /^<\?xml\s+([^?]*?)\?>/.exec(prefix);
+	if (declaration === null) return undefined;
+	const encoding = /(?:^|\s)encoding\s*=\s*(["'])([^"']+)\1/.exec(declaration[1] ?? '');
+	return encoding === null ? undefined : normalizedTextCharset(encoding[2] ?? '');
+}
+
+export function decodeCalDavTextBody(
+	input: Uint8Array,
+	headers: CalDavResponseHeaders,
+	options: CalDavTextDecodingOptions = {},
+): string {
+	const bom = leadingBom(input);
+	if (bom === 'unsupported') return invalidTextEncoding();
+	const body = bom === 'utf8' ? input.subarray(3) : input;
+	const contentTypeCharset = declaredContentTypeCharset(headers);
+	const xmlCharset = options.xml === true ? declaredXmlCharset(body) : undefined;
+	const declarations = [contentTypeCharset, xmlCharset, bom === 'utf8' ? 'utf8' : undefined].filter(
+		(value): value is SupportedTextCharset => value !== undefined,
+	);
+	if (new Set(declarations).size > 1) return invalidTextEncoding();
+	const charset = declarations[0] ?? 'utf8';
+
+	if (charset === 'ascii') {
+		for (const octet of body) if (octet > 0x7f) return invalidTextEncoding();
+		return Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('ascii');
+	}
+	try {
+		return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(body);
+	} catch {
+		return invalidTextEncoding();
+	}
+}
+
 export type N8nCalDavRequestOptions = Omit<
 	IHttpRequestOptions,
 	| 'method'

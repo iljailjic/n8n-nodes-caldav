@@ -99,7 +99,7 @@ function issue41Patch(value: Record<string, unknown>): CalendarEventPatch {
 }
 
 describe('issue #41 authoritative Create request flow', () => {
-	it('performs exactly conditional PUT then one authoritative GET and returns canonical current state', async () => {
+	it('performs exactly one conditional PUT and returns the authored state with its ETag', async () => {
 		const requests = transport(async (request) => {
 			if (request.method === CalDavMethod.PUT) {
 				return response(201, request.url, { etag: '"provisional-put-etag"' });
@@ -119,11 +119,11 @@ describe('issue #41 authoritative Create request flow', () => {
 			() => new Date('2040-01-01T00:00:00.987Z'),
 		);
 
-		expect(requests.request).toHaveBeenCalledTimes(2);
+		expect(requests.request).toHaveBeenCalledOnce();
 		const observed = requests.request.mock.calls.map(
 			([request]) => request as CalDavTransportRequest,
 		);
-		expect(observed.map(({ method }) => method)).toEqual([CalDavMethod.PUT, CalDavMethod.GET]);
+		expect(observed.map(({ method }) => method)).toEqual([CalDavMethod.PUT]);
 		expect(observed[0]).toMatchObject({
 			headers: {
 				'If-None-Match': '*',
@@ -132,13 +132,12 @@ describe('issue #41 authoritative Create request flow', () => {
 		});
 		expect(observed[0]?.body).toContain('DTSTART;VALUE=DATE:20240229\r\n');
 		expect(observed[0]?.body).toContain('DTEND;VALUE=DATE:20240301\r\n');
-		expect(observed[1]).toEqual({ method: CalDavMethod.GET, url: observed[0]?.url });
 		expect(result).toEqual({
 			calendarUrl: CALENDAR_URL,
-			resourceUrl: CANONICAL_URL,
-			etag: ' W/"authoritative-etag" ',
+			resourceUrl: observed[0]?.url,
+			etag: '"provisional-put-etag"',
 			uid: 'authoritative-create',
-			summary: 'Server authoritative summary',
+			summary: 'Authoritative Create',
 			timeMode: 'allDay',
 			accessMode: 'editable',
 			startDate: '2024-02-29',
@@ -146,7 +145,7 @@ describe('issue #41 authoritative Create request flow', () => {
 		});
 	});
 
-	it('treats a safely identified read-only transformation as successful completion', async () => {
+	it('does not add a read to discover a server-side representation change', async () => {
 		const requests = transport(async (request) =>
 			request.method === CalDavMethod.PUT
 				? response(201, request.url)
@@ -167,14 +166,13 @@ describe('issue #41 authoritative Create request flow', () => {
 			),
 		).resolves.toMatchObject({
 			uid: 'authoritative-create',
-			timeMode: 'unsupported',
-			accessMode: 'readOnly',
-			readOnlyReason: 'unsupportedTimeRepresentation',
+			timeMode: 'timed',
+			accessMode: 'editable',
 		});
-		expect(requests.request).toHaveBeenCalledTimes(2);
+		expect(requests.request).toHaveBeenCalledOnce();
 	});
 
-	it('reports a sanitized partial success for malformed confirmation without retry or rollback', async () => {
+	it('does not fetch or expose a private confirmation body after PUT metadata succeeds', async () => {
 		const privateSentinels = [
 			'private-create-uid',
 			'https://private.example.test/path/event.ics',
@@ -200,27 +198,21 @@ describe('issue #41 authoritative Create request flow', () => {
 					}),
 		);
 
-		let failure: unknown;
-		try {
-			await createCalendarEvent(
-				requests,
-				{ ...issue41CreateInput('allDay'), uid: 'private-create-uid' } as never,
-				() => new Date('2040-01-01T00:00:00Z'),
-			);
-		} catch (error) {
-			failure = error;
-		}
-		expect(failure).toBeInstanceOf(Error);
-		expect(requests.request).toHaveBeenCalledTimes(2);
+		const created = await createCalendarEvent(
+			requests,
+			{ ...issue41CreateInput('allDay'), uid: 'private-create-uid' } as never,
+			() => new Date('2040-01-01T00:00:00Z'),
+		);
+		expect(requests.request).toHaveBeenCalledOnce();
 		expect(requests.request.mock.calls.map(([request]) => request.method)).toEqual([
 			CalDavMethod.PUT,
-			CalDavMethod.GET,
 		]);
 		expect(requests.request.mock.calls.flat()).not.toEqual(
 			expect.arrayContaining([expect.objectContaining({ method: CalDavMethod.DELETE })]),
 		);
-		for (const sentinel of privateSentinels)
-			expect(JSON.stringify(failure)).not.toContain(sentinel);
+		expect(created).not.toHaveProperty('rawIcs');
+		for (const sentinel of privateSentinels.slice(1))
+			expect(JSON.stringify(created)).not.toContain(sentinel);
 	});
 });
 

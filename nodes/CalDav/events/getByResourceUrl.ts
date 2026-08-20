@@ -1,8 +1,14 @@
+/* eslint-disable @n8n/community-nodes/require-node-api-error -- The accepted application-service contract exposes sanitized parser failures outside the n8n UI boundary. */
+
 import { mapCalendarEventResourceWithTimeZoneContext } from '../icalendar/eventReadModel';
 import type { CalendarEventReadResult } from '../icalendar/eventReadModel';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
-import { parseICalendarResource } from '../icalendar/parser';
-import { CalDavMethod } from '../transport/http';
+import {
+	CalDavICalendarParseError,
+	ICALENDAR_MAX_RESOURCE_BYTES,
+	parseICalendarResource,
+} from '../icalendar/parser';
+import { CalDavMethod, decodeCalDavTextBody } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import { normalizeCalendarCollectionUrl, validateAbsoluteHttpUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
@@ -96,7 +102,16 @@ export async function getCalendarEventByResourceUrl(
 		return fail(CalendarEventResourceGetFailureCode.INVALID_RESPONSE);
 	}
 
-	const resource = parseICalendarResource(response.body);
+	if (response.body.byteLength > ICALENDAR_MAX_RESOURCE_BYTES) {
+		throw new CalDavICalendarParseError('MAX_RESOURCE_SIZE_EXCEEDED');
+	}
+	let decodedBody: string;
+	try {
+		decodedBody = decodeCalDavTextBody(response.body, response.headers);
+	} catch {
+		throw new CalDavICalendarParseError('INVALID_UTF8');
+	}
+	const resource = parseICalendarResource(Buffer.from(decodedBody, 'utf8'));
 	return await mapCalendarEventResourceWithTimeZoneContext(
 		{
 			calendarUrl: normalizedCalendarUrl,

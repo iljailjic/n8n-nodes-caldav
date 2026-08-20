@@ -868,6 +868,7 @@ describe('calendar event Update coordinator requests and authoritative result', 
 			timeZoneMode: 'utc',
 			startLocal: '2040-01-02T10:00:00',
 			endLocal: '2040-01-02T10:30:00',
+			rawIcs: confirmed.result.rawIcs,
 		});
 		expect(Object.isFrozen(result)).toBe(true);
 		expect(confirmed.calendarData).toContain('X-UNKNOWN;X-SOURCE=MiXeD:opaque-value');
@@ -901,7 +902,7 @@ describe('calendar event Update coordinator requests and authoritative result', 
 
 		await expect(
 			updateCalendarEvent(TRANSPORT, resourceInput(patch), () => CLOCK),
-		).resolves.toEqual(readOnlyConfirmed.event);
+		).resolves.toEqual({ ...readOnlyConfirmed.event, rawIcs: readOnlyConfirmed.rawIcs });
 		expect(mocks.updateCalendarEventResource).toHaveBeenCalledTimes(1);
 		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledTimes(2);
 	});

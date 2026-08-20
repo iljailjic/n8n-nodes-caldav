@@ -309,7 +309,8 @@ describe('calendar-event UID REPORT request and successful mapping', () => {
 			startLocal: '2040-01-02T10:00:00',
 			endLocal: '2040-01-02T10:30:00',
 		});
-		expect(Object.keys(result).sort()).toEqual(['context', 'event']);
+		expect(Object.keys(result).sort()).toEqual(['context', 'event', 'rawIcs']);
+		expect(result.rawIcs).toBe(ics);
 		expect(result.context.resource.originalIcs).toBe(ics);
 		expect(result.context.master).toBe(result.context.resource.calendar.entries[1]);
 		expect(result.context.exceptions).toEqual([]);

@@ -65,6 +65,34 @@ Event operations cover timed and all-day events, UTC and IANA time zones,
 description, location, URL, categories, status, transparency, reminders,
 recurrence, and raw iCalendar data.
 
+Successful event reads expose the source calendar object as the flat `rawIcs`
+JSON string alongside normalized event fields:
+
+| Operation                 | `rawIcs` result                                              |
+| ------------------------- | ------------------------------------------------------------ |
+| Event Get by resource URL | Exact decoded direct GET body                                |
+| Event Get by UID          | Selected REPORT `calendar-data` character content            |
+| Event Get Many            | Corresponding REPORT `calendar-data` content for each item   |
+| Event Create              | Omitted                                                      |
+| Event Update              | Authoritative post-update GET body                           |
+| Event Upsert Create       | Omitted                                                      |
+| Event Upsert Update       | UID lookup content for a no-op, otherwise the final GET body |
+
+Direct GET preserves the decoded calendar-resource body except for removing an
+optional leading UTF-8 BOM. REPORT results follow XML character semantics, so
+entities and CDATA are decoded and literal XML line endings are normalized.
+Neither path unfolds, refolds, trims, or reconstructs the returned value.
+
+Each decoded calendar resource is limited to 5 MiB, and the complete CalDAV
+response is limited to 10 MiB. Limits are enforced without truncation. JSON
+serialization may escape control characters, but parsing the workflow item
+recovers the same JavaScript string.
+
+> [!WARNING]
+> `rawIcs` is sensitive workflow output and can contain calendar information
+> that is absent from normalized fields. It follows normal n8n execution-data
+> retention, so configure retention and access controls accordingly.
+
 For Event Create, supply a UID to preserve that exact event identity, or leave
 UID blank to generate a standards-compliant UUID. Each separate Create with a
 blank UID generates a new identity; omission is not an idempotency mechanism.

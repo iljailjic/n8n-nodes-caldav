@@ -97,10 +97,12 @@ export interface CalendarEventUpsertDependencies {
 
 export type UpsertedCalendarEvent = CalendarEvent & { readonly etag: string };
 
-export interface CalendarEventUpsertResult {
-	readonly action: 'create' | 'update';
-	readonly event: UpsertedCalendarEvent;
-}
+export type CalendarEventUpsertResult =
+	| { readonly action: 'create'; readonly event: UpsertedCalendarEvent }
+	| {
+			readonly action: 'update';
+			readonly event: UpsertedCalendarEvent & { readonly rawIcs: string };
+	  };
 
 export const CalendarEventUpsertFailureCode = Object.freeze({
 	CONCURRENCY_CONFLICT: 'UPSERT_CONCURRENCY_CONFLICT',

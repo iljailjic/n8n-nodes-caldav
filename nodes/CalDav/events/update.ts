@@ -20,6 +20,7 @@ import {
 import type {
 	CalendarEvent,
 	CalendarEventReadResult,
+	CalendarEventWithRawIcs,
 	UtcDateTimeString,
 } from '../icalendar/eventReadModel';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
@@ -75,7 +76,7 @@ export interface CalendarEventUpdateInput {
 
 export type CalendarEventUpdateClock = () => Date;
 
-export type UpdatedCalendarEvent = CalendarEvent & {
+export type UpdatedCalendarEvent = CalendarEventWithRawIcs & {
 	readonly etag: string;
 };
 
@@ -1055,7 +1056,11 @@ async function updateCalendarEventInternal(
 		) {
 			return confirmationFailed();
 		}
-		return Object.freeze({ ...confirmed.event, etag: confirmed.event.etag });
+		return Object.freeze({
+			...confirmed.event,
+			rawIcs: confirmed.rawIcs,
+			etag: confirmed.event.etag,
+		});
 	} catch (error) {
 		if (error instanceof CalDavCalendarEventUpdateError) throw error;
 		return confirmationFailed(error);
@@ -1104,7 +1109,11 @@ export async function updateResolvedCalendarEvent(
 		) {
 			return Object.freeze({
 				kind: 'noChange',
-				event: Object.freeze({ ...input.current.event, etag: input.etag }),
+				event: Object.freeze({
+					...input.current.event,
+					rawIcs: input.current.rawIcs,
+					etag: input.etag,
+				}),
 			});
 		}
 		throw error;

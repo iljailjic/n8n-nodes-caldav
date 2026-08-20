@@ -32,24 +32,6 @@ function response(statusCode: number, effectiveUrl: string, body = ''): CalDavTr
 	};
 }
 
-function authoritativeResource(): string {
-	return [
-		'BEGIN:VCALENDAR',
-		'VERSION:2.0',
-		'PRODID:-//example.test//recurrence request oracle//EN',
-		'BEGIN:VEVENT',
-		'UID:recurring-utc@example.test',
-		'DTSTAMP:20400101T000000Z',
-		'DTSTART:20400102T100000Z',
-		'DTEND:20400102T110000Z',
-		'RRULE:FREQ=DAILY;COUNT=3',
-		'SUMMARY:Recurring UTC event',
-		'END:VEVENT',
-		'END:VCALENDAR',
-		'',
-	].join('\r\n');
-}
-
 function recurringInput(): CalendarEventCreateInput {
 	return {
 		calendarUrl: CALENDAR_URL,
@@ -63,14 +45,11 @@ function recurringInput(): CalendarEventCreateInput {
 }
 
 describe('recurrence Create request ordering', () => {
-	it('validates and authors recurrence before one conditional PUT, then performs only authoritative GET', async () => {
+	it('validates and authors recurrence before one conditional PUT and uses its authoritative ETag', async () => {
 		const requests: MockTransport = {
 			serverUrl: 'https://calendar.example.test/',
 			request: vi.fn(async (request: CalDavTransportRequest) => {
 				if (request.method === CalDavMethod.PUT) return response(201, request.url);
-				if (request.method === CalDavMethod.GET) {
-					return response(200, request.url, authoritativeResource());
-				}
 				throw new Error(`Unexpected method ${request.method}.`);
 			}),
 		};
@@ -81,7 +60,7 @@ describe('recurrence Create request ordering', () => {
 		const history = requests.request.mock.calls.map(
 			([request]) => request as CalDavTransportRequest,
 		);
-		expect(history.map(({ method }) => method)).toEqual([CalDavMethod.PUT, CalDavMethod.GET]);
+		expect(history.map(({ method }) => method)).toEqual([CalDavMethod.PUT]);
 		expect(history.every(({ url }) => url === RESOURCE_URL)).toBe(true);
 		expect(history[0]).toMatchObject({
 			headers: {
