@@ -13,6 +13,7 @@ import type {
 	ICalendarProperty,
 	ICalendarResource,
 } from './parser';
+import type { CalendarEventStatus, CalendarEventTransparency } from './eventReadModel';
 import { projectInstantInTimeZone } from './timeZones';
 import type { CalendarEventTimeZone, IanaTimeZoneId, LocalDateTimeString } from './timeZones';
 import { isAbsoluteICalendarUri } from './uri';
@@ -26,6 +27,9 @@ interface BasicEventSerializationCommon {
 	readonly description?: string;
 	readonly location?: string;
 	readonly url?: string;
+	readonly categories?: readonly string[];
+	readonly status?: CalendarEventStatus;
+	readonly transparency?: CalendarEventTransparency;
 }
 
 export type BasicUtcEventSerializationInput = BasicEventSerializationCommon &
@@ -65,7 +69,10 @@ export type BasicUtcEventSerializationField =
 	| 'summary'
 	| 'description'
 	| 'location'
-	| 'url';
+	| 'url'
+	| 'categories'
+	| 'status'
+	| 'transparency';
 
 export const CalDavICalendarSerializeErrorCode = Object.freeze({
 	INVALID_INPUT: 'INVALID_INPUT',
@@ -109,6 +116,9 @@ interface BasicInputSnapshotCommon {
 	readonly description?: string;
 	readonly location?: string;
 	readonly url?: string;
+	readonly categories?: readonly string[];
+	readonly status?: CalendarEventStatus;
+	readonly transparency?: CalendarEventTransparency;
 }
 
 type BasicInputSnapshot = BasicInputSnapshotCommon &
@@ -276,6 +286,58 @@ function optionalText(value: unknown, field: 'description' | 'location'): string
 	return value;
 }
 
+function authoredCategories(value: unknown): readonly string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) fail('INVALID_INPUT', 'categories');
+	if (value.length === 0) fail('INVALID_TEXT', 'categories');
+
+	let descriptors: Readonly<Record<string, PropertyDescriptor>>;
+	try {
+		if (Object.getOwnPropertySymbols(value).length > 0) fail('INVALID_INPUT', 'categories');
+		descriptors = Object.getOwnPropertyDescriptors(value);
+	} catch {
+		return fail('INVALID_INPUT', 'categories');
+	}
+	const expectedKeys = new Set(['length']);
+	const categories: string[] = [];
+	const seen = new Set<string>();
+	for (let index = 0; index < value.length; index += 1) {
+		const key = String(index);
+		expectedKeys.add(key);
+		const descriptor = descriptors[key];
+		if (
+			descriptor === undefined ||
+			!descriptor.enumerable ||
+			!('value' in descriptor) ||
+			typeof descriptor.value !== 'string'
+		) {
+			fail('INVALID_INPUT', 'categories');
+		}
+		const category = descriptor.value;
+		if (category.length === 0 || !isValidText(category)) fail('INVALID_TEXT', 'categories');
+		if (!seen.has(category)) {
+			seen.add(category);
+			categories.push(category);
+		}
+	}
+	if (Object.keys(descriptors).some((key) => !expectedKeys.has(key))) {
+		fail('INVALID_INPUT', 'categories');
+	}
+	return Object.freeze(categories);
+}
+
+function authoredStatus(value: unknown): CalendarEventStatus | undefined {
+	if (value === undefined) return undefined;
+	if (value === 'tentative' || value === 'confirmed' || value === 'cancelled') return value;
+	return fail('INVALID_INPUT', 'status');
+}
+
+function authoredTransparency(value: unknown): CalendarEventTransparency | undefined {
+	if (value === undefined) return undefined;
+	if (value === 'opaque' || value === 'transparent') return value;
+	return fail('INVALID_INPUT', 'transparency');
+}
+
 function dateTimestamp(value: unknown, field: 'dtstamp' | 'start' | 'end'): number {
 	if (value === undefined) fail('MISSING_REQUIRED_FIELD', field);
 	if (!(value instanceof Date)) fail('INVALID_INPUT', field);
@@ -368,13 +430,27 @@ function snapshotBasicInput(
 		if (!isAbsoluteICalendarUri(urlValue)) fail('INVALID_URI', 'url');
 		url = urlValue;
 	}
+	const categories = authoredCategories(input.categories);
+	const status = authoredStatus(input.status);
+	const transparency = authoredTransparency(input.transparency);
 	if (
 		(time.timeMode === 'timed' && time.end <= time.start) ||
 		(time.timeMode === 'allDay' && time.endDate <= time.startDate)
 	) {
 		fail('INVALID_TIME_RANGE');
 	}
-	return { uid, dtstamp, ...time, summary, description, location, url };
+	return {
+		uid,
+		dtstamp,
+		...time,
+		summary,
+		description,
+		location,
+		url,
+		categories,
+		status,
+		transparency,
+	};
 }
 
 function formatUtcDateTime(timestamp: number): string {
@@ -391,13 +467,17 @@ function formatUtcDateTime(timestamp: number): string {
 	);
 }
 
-function textProperty(name: string, value: string): ICalendarProperty {
+function textValuesProperty(name: string, values: readonly string[]): ICalendarProperty {
 	return {
 		kind: 'property',
 		name,
 		parameters: [],
-		value: { kind: 'value', valueType: 'TEXT', raw: '', textValues: [value] },
+		value: { kind: 'value', valueType: 'TEXT', raw: '', textValues: [...values] },
 	};
+}
+
+function textProperty(name: string, value: string): ICalendarProperty {
+	return textValuesProperty(name, [value]);
 }
 
 function rawProperty(name: string, valueType: string, raw: string): ICalendarProperty {
@@ -484,6 +564,15 @@ function basicResource(
 	}
 	if (input.location !== undefined) eventEntries.push(textProperty('LOCATION', input.location));
 	if (input.url !== undefined) eventEntries.push(rawProperty('URL', 'URI', input.url));
+	if (input.categories !== undefined) {
+		eventEntries.push(textValuesProperty('CATEGORIES', input.categories));
+	}
+	if (input.status !== undefined) {
+		eventEntries.push(textProperty('STATUS', input.status.toUpperCase()));
+	}
+	if (input.transparency !== undefined) {
+		eventEntries.push(textProperty('TRANSP', input.transparency.toUpperCase()));
+	}
 
 	return {
 		kind: 'resource',

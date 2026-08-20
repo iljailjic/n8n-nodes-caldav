@@ -333,6 +333,70 @@ function semanticallyEquivalent(left: ICalendarResource, right: ICalendarResourc
 	return left.kind === right.kind && sameComponent(left.calendar, right.calendar);
 }
 
+const RELOCATABLE_METADATA_NAMES = new Set(['CATEGORIES', 'STATUS', 'TRANSP']);
+
+function sameComponentAllowingMetadataPlacement(
+	left: ICalendarComponent,
+	right: ICalendarComponent,
+): boolean {
+	if (left.kind !== right.kind || left.name !== right.name) return false;
+	if (timeZoneEntryOrderIsInsignificant(left)) return sameComponent(left, right);
+	if (left.name.toUpperCase() !== 'VEVENT') {
+		return (
+			left.entries.length === right.entries.length &&
+			left.entries.every((entry, index) => {
+				const candidate = right.entries[index]!;
+				return entry.kind === 'component' && candidate.kind === 'component'
+					? sameComponentAllowingMetadataPlacement(entry, candidate)
+					: sameEntry(entry, candidate);
+			})
+		);
+	}
+
+	const metadata = (component: ICalendarComponent, name: string): readonly ICalendarProperty[] =>
+		component.entries.filter(
+			(entry): entry is ICalendarProperty =>
+				entry.kind === 'property' && entry.name.toUpperCase() === name,
+		);
+	for (const name of RELOCATABLE_METADATA_NAMES) {
+		const leftProperties = metadata(left, name);
+		const rightProperties = metadata(right, name);
+		if (
+			leftProperties.length !== rightProperties.length ||
+			!leftProperties.every((property, index) => sameProperty(property, rightProperties[index]!))
+		) {
+			return false;
+		}
+	}
+
+	const withoutMetadata = (component: ICalendarComponent): readonly ICalendarEntry[] =>
+		component.entries.filter(
+			(entry) =>
+				entry.kind !== 'property' || !RELOCATABLE_METADATA_NAMES.has(entry.name.toUpperCase()),
+		);
+	const leftEntries = withoutMetadata(left);
+	const rightEntries = withoutMetadata(right);
+	return (
+		leftEntries.length === rightEntries.length &&
+		leftEntries.every((entry, index) => {
+			const candidate = rightEntries[index]!;
+			return entry.kind === 'component' && candidate.kind === 'component'
+				? sameComponentAllowingMetadataPlacement(entry, candidate)
+				: sameEntry(entry, candidate);
+		})
+	);
+}
+
+function semanticallyEquivalentAllowingMetadataPlacement(
+	left: ICalendarResource,
+	right: ICalendarResource,
+): boolean {
+	return (
+		left.kind === right.kind &&
+		sameComponentAllowingMetadataPlacement(left.calendar, right.calendar)
+	);
+}
+
 function sameComponentIgnoringRevisionMetadata(
 	left: ICalendarComponent,
 	right: ICalendarComponent,
@@ -760,6 +824,10 @@ async function updateCalendarEventInternal(
 			confirmed.event.uid !== current.event.uid ||
 			(confirmed.event.accessMode === 'editable' &&
 				!semanticallyEquivalent(patchedResource, confirmed.context.resource) &&
+				!semanticallyEquivalentAllowingMetadataPlacement(
+					patchedResource,
+					confirmed.context.resource,
+				) &&
 				(resolvedCurrent === undefined ||
 					!semanticallyEquivalentIgnoringRevisionMetadata(
 						patchedResource,

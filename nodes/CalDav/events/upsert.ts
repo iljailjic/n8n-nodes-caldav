@@ -1,7 +1,12 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The application service exposes sanitized domain failures outside the n8n UI boundary. */
 
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
-import type { CalendarDateString, CalendarEvent } from '../icalendar/eventReadModel';
+import type {
+	CalendarDateString,
+	CalendarEvent,
+	CalendarEventStatus,
+	CalendarEventTransparency,
+} from '../icalendar/eventReadModel';
 import type { CalendarEventPatch, OptionalFieldPatch } from '../icalendar/patcher';
 import { isAbsoluteICalendarUri } from '../icalendar/uri';
 import {
@@ -50,6 +55,9 @@ interface CalendarEventUpsertCommon {
 	readonly description?: OptionalFieldPatch<string>;
 	readonly location?: OptionalFieldPatch<string>;
 	readonly url?: OptionalFieldPatch<string>;
+	readonly categories?: OptionalFieldPatch<readonly string[]>;
+	readonly status?: OptionalFieldPatch<CalendarEventStatus>;
+	readonly transparency?: OptionalFieldPatch<CalendarEventTransparency>;
 }
 
 export type CalendarEventUpsertInput = CalendarEventUpsertCommon &
@@ -115,6 +123,9 @@ const MESSAGES = {
 	INVALID_DESCRIPTION: 'Description must be a valid iCalendar text value.',
 	INVALID_LOCATION: 'Location must be a valid iCalendar text value.',
 	INVALID_URL: 'URL must be a valid absolute URI without a fragment.',
+	INVALID_CATEGORIES: 'Categories must be a non-empty list of valid iCalendar text values.',
+	INVALID_STATUS: 'Status must be Tentative, Confirmed, or Cancelled.',
+	INVALID_TRANSPARENCY: 'Transparency must be Opaque or Transparent.',
 	UNREPRESENTABLE_START:
 		'Start cannot be represented unambiguously in the selected IANA time zone. Use UTC mode for this instant.',
 	UNREPRESENTABLE_END:
@@ -200,6 +211,83 @@ function optionalPatch(
 		validate(value.value)
 	) {
 		return Object.freeze({ kind: 'set', value: value.value });
+	}
+	return invalid(message);
+}
+
+function categoryList(value: unknown): readonly string[] | undefined {
+	if (!Array.isArray(value) || value.length === 0) return undefined;
+	let descriptors: Readonly<Record<string, PropertyDescriptor>>;
+	try {
+		if (Object.getOwnPropertySymbols(value).length > 0) return undefined;
+		descriptors = Object.getOwnPropertyDescriptors(value);
+	} catch {
+		return undefined;
+	}
+	const expectedKeys = new Set(['length']);
+	const categories: string[] = [];
+	const seen = new Set<string>();
+	for (let index = 0; index < value.length; index += 1) {
+		const key = String(index);
+		expectedKeys.add(key);
+		const descriptor = descriptors[key];
+		if (
+			descriptor === undefined ||
+			!descriptor.enumerable ||
+			!('value' in descriptor) ||
+			typeof descriptor.value !== 'string' ||
+			descriptor.value.length === 0 ||
+			!isValidICalendarText(descriptor.value)
+		) {
+			return undefined;
+		}
+		if (!seen.has(descriptor.value)) {
+			seen.add(descriptor.value);
+			categories.push(descriptor.value);
+		}
+	}
+	if (Object.keys(descriptors).some((key) => !expectedKeys.has(key))) return undefined;
+	return Object.freeze(categories);
+}
+
+function categoriesPatch(value: unknown): OptionalFieldPatch<readonly string[]> {
+	if (!isRecord(value)) return invalid(MESSAGES.INVALID_CATEGORIES);
+	const keys = Reflect.ownKeys(value);
+	if (value.kind === 'remove' && keys.length === 1 && keys[0] === 'kind') {
+		return Object.freeze({ kind: 'remove' });
+	}
+	const categories = categoryList(value.value);
+	if (
+		value.kind === 'set' &&
+		keys.length === 2 &&
+		keys.includes('kind') &&
+		keys.includes('value') &&
+		categories !== undefined
+	) {
+		return Object.freeze({ kind: 'set', value: categories });
+	}
+	return invalid(MESSAGES.INVALID_CATEGORIES);
+}
+
+function enumPatch<T extends string>(
+	value: unknown,
+	supported: readonly T[],
+	message: string,
+): OptionalFieldPatch<T> {
+	if (!isRecord(value)) return invalid(message);
+	const keys = Reflect.ownKeys(value);
+	if (value.kind === 'remove' && keys.length === 1 && keys[0] === 'kind') {
+		return Object.freeze({ kind: 'remove' });
+	}
+	if (
+		value.kind === 'set' &&
+		keys.length === 2 &&
+		keys.includes('kind') &&
+		keys.includes('value') &&
+		typeof value.value === 'string' &&
+		supported.includes(value.value as T)
+	) {
+		return Object.freeze({ kind: 'set', value: value.value as T });
 	}
 	return invalid(message);
 }
@@ -296,6 +384,9 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 		'description',
 		'location',
 		'url',
+		'categories',
+		'status',
+		'transparency',
 		...(input.timeMode === 'timed' ? ['start', 'end', 'timeZone'] : ['startDate', 'endDate']),
 	]);
 	if (Reflect.ownKeys(input).some((key) => typeof key !== 'string' || !allowed.has(key))) {
@@ -313,6 +404,23 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 		input.url === undefined
 			? undefined
 			: optionalPatch(input.url, MESSAGES.INVALID_URL, validAbsoluteUri);
+	const categories = input.categories === undefined ? undefined : categoriesPatch(input.categories);
+	const status =
+		input.status === undefined
+			? undefined
+			: enumPatch(
+					input.status,
+					['tentative', 'confirmed', 'cancelled'] as const,
+					MESSAGES.INVALID_STATUS,
+				);
+	const transparency =
+		input.transparency === undefined
+			? undefined
+			: enumPatch(
+					input.transparency,
+					['opaque', 'transparent'] as const,
+					MESSAGES.INVALID_TRANSPARENCY,
+				);
 	if (time.timeMode === 'timed') {
 		if (time.end.getTime() <= time.start.getTime()) return invalid(MESSAGES.INVALID_RANGE);
 		if (time.timeZone.timeZoneMode === 'iana') {
@@ -344,6 +452,9 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 		...(description === undefined ? {} : { description }),
 		...(location === undefined ? {} : { location }),
 		...(url === undefined ? {} : { url }),
+		...(categories === undefined ? {} : { categories }),
+		...(status === undefined ? {} : { status }),
+		...(transparency === undefined ? {} : { transparency }),
 	}) as CalendarEventUpsertInput;
 }
 
@@ -386,6 +497,9 @@ function createInput(
 			: { description: optional(input.description) }),
 		...(optional(input.location) === undefined ? {} : { location: optional(input.location) }),
 		...(optional(input.url) === undefined ? {} : { url: optional(input.url) }),
+		...(input.categories?.kind === 'set' ? { categories: input.categories.value } : {}),
+		...(input.status?.kind === 'set' ? { status: input.status.value } : {}),
+		...(input.transparency?.kind === 'set' ? { transparency: input.transparency.value } : {}),
 	}) as CalendarEventCreateInput;
 }
 
@@ -410,6 +524,9 @@ function updatePatch(input: CalendarEventUpsertInput): CalendarEventPatch {
 		...(input.description === undefined ? {} : { description: input.description }),
 		...(input.location === undefined ? {} : { location: input.location }),
 		...(input.url === undefined ? {} : { url: input.url }),
+		...(input.categories === undefined ? {} : { categories: input.categories }),
+		...(input.status === undefined ? {} : { status: input.status }),
+		...(input.transparency === undefined ? {} : { transparency: input.transparency }),
 	}) as CalendarEventPatch;
 }
 

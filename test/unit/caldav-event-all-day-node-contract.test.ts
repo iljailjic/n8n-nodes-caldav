@@ -235,8 +235,11 @@ describe('issue #41 exact Event node surface', () => {
 			'Start Date',
 			'End Date',
 			'Summary',
+			'Categories',
 			'Description',
 			'Location',
+			'Status',
+			'Transparency',
 			'URL',
 		]);
 		expect(fields?.options?.find((option) => option.name === 'start')).toMatchObject({

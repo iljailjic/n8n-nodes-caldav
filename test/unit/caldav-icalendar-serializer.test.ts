@@ -1,6 +1,10 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 import { mapCalendarEventResource } from '../../nodes/CalDav/icalendar/eventReadModel';
+import type {
+	CalendarEventStatus,
+	CalendarEventTransparency,
+} from '../../nodes/CalDav/icalendar/eventReadModel';
 import {
 	ICALENDAR_MAX_COMPONENTS,
 	ICALENDAR_MAX_DEPTH,
@@ -195,13 +199,29 @@ describe('iCalendar serializer public contract', () => {
 			readonly description?: string;
 			readonly location?: string;
 			readonly url?: string;
+			readonly categories?: readonly string[];
+			readonly status?: CalendarEventStatus;
+			readonly transparency?: CalendarEventTransparency;
 		}>();
 		expectTypeOf<Parameters<typeof serializeICalendarResource>>().toEqualTypeOf<
 			[resource: ICalendarResource]
 		>();
 		expectTypeOf<ReturnType<typeof serializeICalendarResource>>().toEqualTypeOf<string>();
 		expectTypeOf<BasicUtcEventSerializationField>().toEqualTypeOf<
-			'uid' | 'dtstamp' | 'start' | 'end' | 'summary' | 'description' | 'location' | 'url'
+			| 'uid'
+			| 'dtstamp'
+			| 'timeMode'
+			| 'start'
+			| 'end'
+			| 'startDate'
+			| 'endDate'
+			| 'summary'
+			| 'description'
+			| 'location'
+			| 'url'
+			| 'categories'
+			| 'status'
+			| 'transparency'
 		>();
 		expectTypeOf<CalDavICalendarSerializeError['code']>().toEqualTypeOf<SerializeErrorCode>();
 	});

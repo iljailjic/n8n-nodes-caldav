@@ -262,8 +262,17 @@ describe('CalDAV Event Upsert metadata', () => {
 			placeholder: 'Add Field',
 			default: {},
 		});
-		expect(additional.options?.map(({ name }) => name)).toEqual(['description', 'location', 'url']);
-		for (const option of additional.options ?? []) {
+		expect(additional.options?.map(({ name }) => name)).toEqual([
+			'categories',
+			'description',
+			'location',
+			'status',
+			'transparency',
+			'url',
+		]);
+		for (const option of (additional.options ?? []).filter(({ name }) =>
+			['description', 'location', 'url'].includes(name),
+		)) {
 			expect(option).toMatchObject({
 				type: 'fixedCollection',
 				typeOptions: { multipleValues: false },
@@ -290,9 +299,32 @@ describe('CalDAV Event Upsert metadata', () => {
 				displayOptions: { show: { action: ['set'] } },
 			});
 		}
-		expect(additional.options?.[0]?.options?.[0]?.values?.[1]).toMatchObject({
+		expect(
+			additional.options?.find(({ name }) => name === 'description')?.options?.[0]?.values?.[1],
+		).toMatchObject({
 			typeOptions: { rows: 4 },
 		});
+		const categories = additional.options?.find(({ name }) => name === 'categories');
+		expect(categories?.options?.[0]?.values?.[1]).toMatchObject({
+			name: 'value',
+			type: 'fixedCollection',
+			typeOptions: { multipleValues: true },
+			displayOptions: { show: { action: ['set'] } },
+		});
+		for (const [name, values] of [
+			['status', ['tentative', 'confirmed', 'cancelled']],
+			['transparency', ['opaque', 'transparent']],
+		] as const) {
+			const value = additional.options?.find((option) => option.name === name)?.options?.[0]
+				?.values?.[1];
+			expect(value).toMatchObject({
+				name: 'value',
+				type: 'options',
+				default: '',
+				displayOptions: { show: { action: ['set'] } },
+			});
+			expect(value?.options?.map((option) => option.value)).toEqual(values);
+		}
 	});
 });
 
@@ -306,6 +338,14 @@ describe('CalDAV Event Upsert extraction and flat output', () => {
 					description: { change: { action: 'set', value: '' } },
 					location: { change: { action: 'remove', value: 'hidden-private' } },
 					url: { change: { action: 'set', value: 'urn:example:upsert' } },
+					categories: {
+						change: {
+							action: 'set',
+							value: { category: [{ value: 'One' }, { value: 'One' }, { value: 'Two' }] },
+						},
+					},
+					status: { change: { action: 'set', value: 'cancelled' } },
+					transparency: { change: { action: 'remove', value: 'hidden-private' } },
 				},
 			}),
 		]);
@@ -326,6 +366,9 @@ describe('CalDAV Event Upsert extraction and flat output', () => {
 			description: { kind: 'set', value: '' },
 			location: { kind: 'remove' },
 			url: { kind: 'set', value: 'urn:example:upsert' },
+			categories: { kind: 'set', value: ['One', 'Two'] },
+			status: { kind: 'set', value: 'cancelled' },
+			transparency: { kind: 'remove' },
 		});
 		expect(deps.clock).toBeTypeOf('function');
 		expect(deps.uidFactory).toBeTypeOf('function');
@@ -454,6 +497,27 @@ describe('CalDAV Event Upsert local validation and item behavior', () => {
 			'URL empty fragment',
 			{ additionalFields: { url: { change: { action: 'set', value: 'urn:example:#' } } } },
 			'URL must be a valid absolute URI without a fragment.',
+		],
+		[
+			'Categories empty',
+			{
+				additionalFields: {
+					categories: { change: { action: 'set', value: { category: [] } } },
+				},
+			},
+			'Categories must be a non-empty list of valid iCalendar text values.',
+		],
+		[
+			'Status uppercase',
+			{ additionalFields: { status: { change: { action: 'set', value: 'CANCELLED' } } } },
+			'Status must be Tentative, Confirmed, or Cancelled.',
+		],
+		[
+			'Transparency unsupported',
+			{
+				additionalFields: { transparency: { change: { action: 'set', value: 'private' } } },
+			},
+			'Transparency must be Opaque or Transparent.',
 		],
 		['Range', { end: '2040-01-02T10:00:00+01:00' }, 'End must be later than Start.'],
 	] as const)(

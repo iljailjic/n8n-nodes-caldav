@@ -60,6 +60,13 @@ export type CalendarDateString = string & {
 export type CalendarEventEditableTimeMode = 'timed' | 'allDay';
 export type CalendarEventAccessMode = 'editable' | 'readOnly';
 export type CalendarEventReadOnlyReason = 'unsupportedTimeRepresentation';
+export type CalendarEventStatus = 'tentative' | 'confirmed' | 'cancelled';
+export type CalendarEventTransparency = 'opaque' | 'transparent';
+
+export interface UnsupportedCalendarEventMetadataToken {
+	readonly kind: 'unsupported';
+	readonly token: string;
+}
 
 export type CalendarEventExtensionValue =
 	| null
@@ -91,6 +98,9 @@ interface CalendarEventCommon {
 	readonly description?: string;
 	readonly location?: string;
 	readonly url?: string;
+	readonly categories?: readonly string[];
+	readonly status?: CalendarEventStatus | UnsupportedCalendarEventMetadataToken;
+	readonly transparency?: CalendarEventTransparency | UnsupportedCalendarEventMetadataToken;
 	readonly extensions?: CalendarEventExtensions;
 }
 
@@ -139,6 +149,8 @@ const PROJECTED_SINGLETONS = [
 	'DESCRIPTION',
 	'LOCATION',
 	'URL',
+	'STATUS',
+	'TRANSP',
 	'DTSTART',
 	'DTEND',
 	'DURATION',
@@ -392,6 +404,34 @@ function optionalUri(master: ICalendarComponent): string | undefined {
 		fail('INVALID_EVENT_PROPERTY');
 	}
 	return property.value.raw;
+}
+
+function projectedCategories(master: ICalendarComponent): readonly string[] | undefined {
+	const categories: string[] = [];
+	const seen = new Set<string>();
+	for (const property of directProperties(master, 'CATEGORIES')) {
+		if (asciiUpperCase(property.value.valueType) !== 'TEXT' || property.value.textValues === null) {
+			fail('INVALID_EVENT_PROPERTY');
+		}
+		for (const category of property.value.textValues) {
+			if (category.length === 0 || seen.has(category)) continue;
+			seen.add(category);
+			categories.push(category);
+		}
+	}
+	return categories.length === 0 ? undefined : Object.freeze(categories);
+}
+
+function projectedMetadataToken<T extends string>(
+	master: ICalendarComponent,
+	name: 'STATUS' | 'TRANSP',
+	supported: Readonly<Record<string, T>>,
+): T | UnsupportedCalendarEventMetadataToken | undefined {
+	const property = directProperties(master, name)[0];
+	if (property === undefined) return undefined;
+	const token = singleText(property);
+	if (token === undefined || token.length === 0) fail('INVALID_EVENT_PROPERTY');
+	return supported[asciiUpperCase(token)] ?? Object.freeze({ kind: 'unsupported', token });
 }
 
 function requireDateTimeProperty(master: ICalendarComponent, name: string): ICalendarProperty {
@@ -715,6 +755,16 @@ export function mapCalendarEventResource(
 	const description = optionalText(master, 'DESCRIPTION');
 	const location = optionalText(master, 'LOCATION');
 	const url = optionalUri(master);
+	const categories = projectedCategories(master);
+	const status = projectedMetadataToken<CalendarEventStatus>(master, 'STATUS', {
+		TENTATIVE: 'tentative',
+		CONFIRMED: 'confirmed',
+		CANCELLED: 'cancelled',
+	});
+	const transparency = projectedMetadataToken<CalendarEventTransparency>(master, 'TRANSP', {
+		OPAQUE: 'opaque',
+		TRANSPARENT: 'transparent',
+	});
 	const startProperty = requireDateTimeProperty(master, 'DTSTART');
 	const endProperty = directProperties(master, 'DTEND')[0];
 	const durationProperty = directProperties(master, 'DURATION')[0];
@@ -741,6 +791,9 @@ export function mapCalendarEventResource(
 		...(description !== undefined ? { description } : {}),
 		...(location !== undefined ? { location } : {}),
 		...(url !== undefined ? { url } : {}),
+		...(categories !== undefined ? { categories } : {}),
+		...(status !== undefined ? { status } : {}),
+		...(transparency !== undefined ? { transparency } : {}),
 	};
 
 	const startType = asciiUpperCase(startProperty.value.valueType);

@@ -2167,6 +2167,181 @@ describe('Radicale issue #41 all-day event interoperability', () => {
 	});
 });
 
+describe('Radicale extended VEVENT metadata round trip', () => {
+	it('preserves, replaces, removes, and upserts metadata with authoritative URL and ETag values', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'event-metadata', 'Extended Event Metadata'),
+			);
+			const uid = `event-metadata-${run.identity}@example.test`;
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+			const expectedResourceUrl = new URL(
+				`${Buffer.from(uid, 'utf8').toString('base64url')}.ics`,
+				calendarUrl,
+			).href;
+
+			const created = await createCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-08-20T10:00:00Z'),
+					end: new Date('2040-08-20T11:00:00Z'),
+					summary: 'Extended metadata create',
+					categories: [
+						'Planning, review',
+						'semi;colon',
+						'path\\name',
+						'line\nnext',
+						'Planning, review',
+					],
+					status: 'tentative',
+					transparency: 'opaque',
+				},
+				() => new Date('2040-08-01T00:00:00Z'),
+			);
+			expect(created).toMatchObject({
+				resourceUrl: expectedResourceUrl,
+				uid,
+				categories: ['Planning, review', 'semi;colon', 'path\\name', 'line\nnext'],
+				status: 'tentative',
+				transparency: 'opaque',
+				etag: expect.any(String),
+			});
+			expect(request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method)).toEqual(
+				['PUT', 'GET'],
+			);
+
+			const direct = await getCalendarEventByResourceUrl(
+				inspectedTransport,
+				calendarUrl,
+				created.resourceUrl,
+			);
+			expect(direct.event).toMatchObject({
+				categories: ['Planning, review', 'semi;colon', 'path\\name', 'line\nnext'],
+				status: 'tentative',
+				transparency: 'opaque',
+			});
+			const many = await queryCalendarEventsByTimeRange(inspectedTransport, calendarUrl, {
+				start: new Date('2040-08-20T09:59:59Z'),
+				end: new Date('2040-08-20T11:00:01Z'),
+			});
+			expect(many.find(({ event }) => event.uid === uid)?.event).toMatchObject({
+				resourceUrl: expectedResourceUrl,
+				categories: ['Planning, review', 'semi;colon', 'path\\name', 'line\nnext'],
+				status: 'tentative',
+				transparency: 'opaque',
+			});
+
+			const seeded = await authenticatedFetch(run, expectedResourceUrl);
+			const seededBody = (await seeded.text())
+				.replace('STATUS:TENTATIVE', 'STATUS;X-ORIGIN=seed:TENTATIVE')
+				.replace('END:VEVENT', 'X-UNKNOWN;X-SOURCE=metadata:preserved\r\nEND:VEVENT');
+			expect((await authenticatedFetch(run, expectedResourceUrl, 'PUT', seededBody)).status).toBe(
+				204,
+			);
+
+			request.mockClear();
+			const preserved = await updateCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+					patch: { summary: { kind: 'set', value: 'Metadata preserved' } } as CalendarEventPatch,
+				},
+				() => new Date('2040-08-01T00:00:01Z'),
+			);
+			expect(preserved).toMatchObject({
+				resourceUrl: expectedResourceUrl,
+				categories: ['Planning, review', 'semi;colon', 'path\\name', 'line\nnext'],
+				status: 'tentative',
+				transparency: 'opaque',
+				etag: expect.any(String),
+			});
+			let storedBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
+			expect(storedBody).toContain('STATUS;X-ORIGIN=seed:TENTATIVE');
+			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=metadata:preserved');
+			expect(request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method)).toEqual(
+				['GET', 'PUT', 'GET'],
+			);
+
+			request.mockClear();
+			const updated = await updateCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+					etag: preserved.etag,
+					patch: {
+						categories: { kind: 'set', value: ['Updated', 'Case', 'case', 'Updated'] },
+						status: { kind: 'set', value: 'confirmed' },
+						transparency: { kind: 'remove' },
+					} as CalendarEventPatch,
+				},
+				() => new Date('2040-08-01T00:00:02Z'),
+			);
+			expect(updated).toMatchObject({
+				resourceUrl: expectedResourceUrl,
+				categories: ['Updated', 'Case', 'case'],
+				status: 'confirmed',
+				etag: expect.any(String),
+			});
+			expect(updated).not.toHaveProperty('transparency');
+			expect(updated.etag).not.toBe(preserved.etag);
+			storedBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
+			expect(storedBody).toContain('CATEGORIES:Updated,Case,case');
+			expect(storedBody).toContain('STATUS:CONFIRMED');
+			expect(storedBody).not.toContain('TRANSP:');
+			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=metadata:preserved');
+
+			request.mockClear();
+			const upserted = await upsertCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-08-20T10:00:00Z'),
+					end: new Date('2040-08-20T11:00:00Z'),
+					summary: 'Extended metadata upsert',
+					categories: { kind: 'remove' },
+					status: { kind: 'set', value: 'cancelled' },
+					transparency: { kind: 'set', value: 'transparent' },
+				},
+				{
+					clock: () => new Date('2040-08-01T00:00:03Z'),
+					uidFactory: vi.fn(() => '00000000-0000-4000-8000-000000000046'),
+				},
+			);
+			expect(upserted).toMatchObject({
+				action: 'update',
+				event: {
+					resourceUrl: expectedResourceUrl,
+					status: 'cancelled',
+					transparency: 'transparent',
+					etag: expect.any(String),
+				},
+			});
+			expect(upserted.event).not.toHaveProperty('categories');
+			expect(upserted.event.etag).not.toBe(updated.etag);
+			storedBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
+			expect(storedBody).toContain('STATUS:CANCELLED');
+			expect(storedBody).toContain('TRANSP:TRANSPARENT');
+			expect(storedBody).not.toContain('CATEGORIES:');
+			expect(storedBody).toContain('X-UNKNOWN;X-SOURCE=metadata:preserved');
+			const upsertRequests = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
+			expect(upsertRequests.map(({ method }) => method)).toEqual(['REPORT', 'PUT', 'GET']);
+			expect(upsertRequests.filter(({ method }) => method === 'DELETE')).toHaveLength(0);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+});
+
 describe('Radicale deterministic Event Upsert', () => {
 	it('creates then updates one supplied UID with preservation-first conditional requests and no DELETE', async () => {
 		const run = await startRun();
