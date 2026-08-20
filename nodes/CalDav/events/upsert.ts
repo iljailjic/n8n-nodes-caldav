@@ -606,23 +606,48 @@ function createInput(
 	}) as CalendarEventCreateInput;
 }
 
-function updatePatch(input: CalendarEventUpsertInput): CalendarEventPatch {
+function updatePatch(input: CalendarEventUpsertInput, current: CalendarEvent): CalendarEventPatch {
+	const timePatch =
+		input.timeMode === 'timed'
+			? (() => {
+					const timeZone = input.timeZone ?? { timeZoneMode: 'utc' as const };
+					if (current.timeMode !== 'timed') {
+						return {
+							timeMode: 'timed',
+							start: { kind: 'set', value: input.start },
+							end: { kind: 'set', value: input.end },
+							timeZone: { kind: 'set', value: timeZone },
+						};
+					}
+					const sameTimeZone =
+						current.timeZoneMode === timeZone.timeZoneMode &&
+						(timeZone.timeZoneMode === 'utc' || current.timeZone === timeZone.timeZone);
+					return {
+						...(new Date(current.start).getTime() === input.start.getTime()
+							? {}
+							: { start: { kind: 'set' as const, value: input.start } }),
+						...(new Date(current.end).getTime() === input.end.getTime()
+							? {}
+							: { end: { kind: 'set' as const, value: input.end } }),
+						...(sameTimeZone ? {} : { timeZone: { kind: 'set' as const, value: timeZone } }),
+					};
+				})()
+			: current.timeMode === 'allDay'
+				? {
+						...(current.startDate === input.startDate
+							? {}
+							: { startDate: { kind: 'set' as const, value: input.startDate } }),
+						...(current.endDate === input.endDate
+							? {}
+							: { endDate: { kind: 'set' as const, value: input.endDate } }),
+					}
+				: {
+						timeMode: 'allDay',
+						startDate: { kind: 'set', value: input.startDate },
+						endDate: { kind: 'set', value: input.endDate },
+					};
 	return Object.freeze({
-		...(input.timeMode === 'timed'
-			? {
-					timeMode: 'timed' as const,
-					start: { kind: 'set' as const, value: input.start },
-					end: { kind: 'set' as const, value: input.end },
-					timeZone: {
-						kind: 'set' as const,
-						value: input.timeZone ?? { timeZoneMode: 'utc' as const },
-					},
-				}
-			: {
-					timeMode: 'allDay' as const,
-					startDate: { kind: 'set' as const, value: input.startDate },
-					endDate: { kind: 'set' as const, value: input.endDate },
-				}),
+		...timePatch,
 		summary: { kind: 'set' as const, value: input.summary },
 		...(input.description === undefined ? {} : { description: input.description }),
 		...(input.location === undefined ? {} : { location: input.location }),
@@ -774,7 +799,7 @@ export async function upsertCalendarEvent(
 			{
 				calendarUrl: snapshot.calendarUrl,
 				current,
-				patch: updatePatch(snapshot),
+				patch: updatePatch(snapshot, current.event),
 				etag: current.event.etag,
 			},
 			dependencies.clock,
