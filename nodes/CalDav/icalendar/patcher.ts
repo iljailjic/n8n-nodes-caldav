@@ -1,7 +1,12 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The accepted protocol-layer contract requires transport-independent typed errors, outside the n8n UI boundary. */
 
 import { createCalendarEventPreservationContext } from './eventReadModel';
-import type { CalendarDateString, CalendarEventPreservationContext } from './eventReadModel';
+import type {
+	CalendarDateString,
+	CalendarEventPreservationContext,
+	CalendarEventStatus,
+	CalendarEventTransparency,
+} from './eventReadModel';
 import { parseICalendarResource } from './parser';
 import type { CalendarEventInstantProjector } from './serializer';
 import { canonicalizeIanaTimeZone, projectInstantInTimeZone } from './timeZones';
@@ -26,6 +31,9 @@ interface CalendarEventPatchCommon {
 	readonly description?: OptionalFieldPatch<string>;
 	readonly location?: OptionalFieldPatch<string>;
 	readonly url?: OptionalFieldPatch<string>;
+	readonly categories?: OptionalFieldPatch<readonly string[]>;
+	readonly status?: OptionalFieldPatch<CalendarEventStatus>;
+	readonly transparency?: OptionalFieldPatch<CalendarEventTransparency>;
 }
 
 export type CalendarEventPatch = CalendarEventPatchCommon &
@@ -52,7 +60,10 @@ export type CalendarEventPatchField =
 	| 'summary'
 	| 'description'
 	| 'location'
-	| 'url';
+	| 'url'
+	| 'categories'
+	| 'status'
+	| 'transparency';
 
 export const CalendarEventPatchErrorCode = Object.freeze({
 	INVALID_INPUT: 'INVALID_INPUT',
@@ -110,6 +121,7 @@ interface ValidatedOperation {
 	readonly timestamp?: number;
 	readonly calendarDate?: CalendarDateString;
 	readonly timeZone?: CalendarEventTimeZone;
+	readonly categories?: readonly string[];
 }
 
 type ValidatedPatch = Partial<Readonly<Record<CalendarEventPatchField, ValidatedOperation>>> & {
@@ -126,9 +138,19 @@ const PATCH_FIELDS = [
 	'description',
 	'location',
 	'url',
+	'categories',
+	'status',
+	'transparency',
 ] as const satisfies readonly CalendarEventPatchField[];
 const PATCH_FIELD_SET = new Set<string>(['timeMode', ...PATCH_FIELDS]);
-const OPTIONAL_FIELDS = new Set<CalendarEventPatchField>(['description', 'location', 'url']);
+const OPTIONAL_FIELDS = new Set<CalendarEventPatchField>([
+	'description',
+	'location',
+	'url',
+	'categories',
+	'status',
+	'transparency',
+]);
 const PROPERTY_NAMES: Readonly<Record<CalendarEventPatchField, string>> = {
 	start: 'DTSTART',
 	end: 'DTEND',
@@ -139,6 +161,9 @@ const PROPERTY_NAMES: Readonly<Record<CalendarEventPatchField, string>> = {
 	description: 'DESCRIPTION',
 	location: 'LOCATION',
 	url: 'URL',
+	categories: 'CATEGORIES',
+	status: 'STATUS',
+	transparency: 'TRANSP',
 };
 const CANONICAL_ORDER = [
 	'UID',
@@ -150,9 +175,21 @@ const CANONICAL_ORDER = [
 	'DESCRIPTION',
 	'LOCATION',
 	'URL',
+	'CATEGORIES',
+	'STATUS',
+	'TRANSP',
 ] as const;
 const CANONICAL_RANK = new Map<string, number>(CANONICAL_ORDER.map((name, index) => [name, index]));
-const SINGLETON_NAMES = ['DTSTART', 'DTEND', 'SUMMARY', 'DESCRIPTION', 'LOCATION', 'URL'] as const;
+const SINGLETON_NAMES = [
+	'DTSTART',
+	'DTEND',
+	'SUMMARY',
+	'DESCRIPTION',
+	'LOCATION',
+	'URL',
+	'STATUS',
+	'TRANSP',
+] as const;
 const IMMUTABLE_KEY_FORMS = new Set(['UID', 'RECURRENCEID', 'RECURRENCE-ID']);
 const UTC_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
 const CALENDAR_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -475,6 +512,44 @@ function isValidText(value: string): boolean {
 	return true;
 }
 
+function categoryValues(value: unknown): readonly string[] {
+	if (!Array.isArray(value)) fail('INVALID_INPUT', 'categories');
+	if (value.length === 0) fail('INVALID_TEXT', 'categories');
+	let descriptors: Readonly<Record<string, PropertyDescriptor>>;
+	try {
+		if (Object.getOwnPropertySymbols(value).length > 0) fail('INVALID_INPUT', 'categories');
+		descriptors = Object.getOwnPropertyDescriptors(value);
+	} catch {
+		return fail('INVALID_INPUT', 'categories');
+	}
+	const expectedKeys = new Set(['length']);
+	const categories: string[] = [];
+	const seen = new Set<string>();
+	for (let index = 0; index < value.length; index += 1) {
+		const key = String(index);
+		expectedKeys.add(key);
+		const descriptor = descriptors[key];
+		if (
+			descriptor === undefined ||
+			!descriptor.enumerable ||
+			!('value' in descriptor) ||
+			typeof descriptor.value !== 'string'
+		) {
+			fail('INVALID_INPUT', 'categories');
+		}
+		const category = descriptor.value;
+		if (category.length === 0 || !isValidText(category)) fail('INVALID_TEXT', 'categories');
+		if (!seen.has(category)) {
+			seen.add(category);
+			categories.push(category);
+		}
+	}
+	if (Object.keys(descriptors).some((key) => !expectedKeys.has(key))) {
+		fail('INVALID_INPUT', 'categories');
+	}
+	return Object.freeze(categories);
+}
+
 function validatePatchOperations(snapshot: Readonly<Record<string, unknown>>): ValidatedPatch {
 	const validated: Partial<Record<CalendarEventPatchField, ValidatedOperation>> = {};
 	const timeMode = snapshot.timeMode;
@@ -523,12 +598,27 @@ function validatePatchOperations(snapshot: Readonly<Record<string, unknown>>): V
 			} else {
 				fail('INVALID_INPUT', field);
 			}
+		} else if (field === 'categories') {
+			validated[field] = { kind: 'set', categories: categoryValues(operation.value) };
 		} else {
 			if (typeof operation.value !== 'string') fail('INVALID_INPUT', field);
 			if (field === 'url') {
 				if (!isAbsoluteUri(operation.value)) fail('INVALID_URI', field);
+			} else if (
+				field === 'status' &&
+				!['tentative', 'confirmed', 'cancelled'].includes(operation.value)
+			) {
+				fail('INVALID_INPUT', field);
+			} else if (field === 'transparency' && !['opaque', 'transparent'].includes(operation.value)) {
+				fail('INVALID_INPUT', field);
 			} else if (!isValidText(operation.value)) fail('INVALID_TEXT', field);
-			validated[field] = { kind: 'set', text: operation.value };
+			validated[field] = {
+				kind: 'set',
+				text:
+					field === 'status' || field === 'transparency'
+						? operation.value.toUpperCase()
+						: operation.value,
+			};
 		}
 	}
 	return { ...validated, ...(timeMode === undefined ? {} : { timeMode }) };
@@ -739,6 +829,7 @@ function parametersAreCompatible(
 function validateTouchedParameters(master: ICalendarComponent, patch: ValidatedPatch): void {
 	for (const field of PATCH_FIELDS) {
 		if (field === 'timeZone') continue;
+		if (field === 'categories' || field === 'status' || field === 'transparency') continue;
 		if (patch.timeZone?.kind === 'set' && (field === 'start' || field === 'end')) continue;
 		if (patch[field]?.kind !== 'set') continue;
 		if (field === 'start' || field === 'end' || field === 'startDate' || field === 'endDate') {
@@ -1036,8 +1127,23 @@ function operationChanges(
 			return true;
 		}
 	}
-	const property = directProperties(master, PROPERTY_NAMES[field])[0];
-	if (operation.kind === 'remove') return property !== undefined;
+	const properties = directProperties(master, PROPERTY_NAMES[field]);
+	const property = properties[0];
+	if (operation.kind === 'remove') return properties.length > 0;
+	if (field === 'categories' || field === 'status' || field === 'transparency') {
+		const expectedValues =
+			field === 'categories' ? operation.categories! : ([operation.text!] as readonly string[]);
+		return (
+			properties.length !== 1 ||
+			property === undefined ||
+			property.name !== PROPERTY_NAMES[field] ||
+			property.parameters.length !== 0 ||
+			property.value.valueType !== 'TEXT' ||
+			property.value.textValues === null ||
+			property.value.textValues.length !== expectedValues.length ||
+			property.value.textValues.some((value, index) => value !== expectedValues[index])
+		);
+	}
 	if (property === undefined) return true;
 	if (field === 'start' || field === 'end') {
 		return (
@@ -1130,6 +1236,18 @@ function insertCanonical(entries: ICalendarEntry[], property: ICalendarProperty)
 	entries.splice(index, 0, property);
 }
 
+function metadataProperty(
+	name: 'CATEGORIES' | 'STATUS' | 'TRANSP',
+	values: readonly string[],
+): ICalendarProperty {
+	return freezeProperty({
+		kind: 'property',
+		name,
+		parameters: [],
+		value: { kind: 'value', valueType: 'TEXT', raw: '', textValues: [...values] },
+	});
+}
+
 function applyFieldOperation(
 	entries: ICalendarEntry[],
 	field: CalendarEventPatchField,
@@ -1138,6 +1256,26 @@ function applyFieldOperation(
 	clearTimeParameters = false,
 ): void {
 	const name = PROPERTY_NAMES[field];
+	if (field === 'categories' || field === 'status' || field === 'transparency') {
+		const metadataName =
+			field === 'categories' ? 'CATEGORIES' : field === 'status' ? 'STATUS' : 'TRANSP';
+		for (let index = entries.length - 1; index >= 0; index -= 1) {
+			const entry = entries[index]!;
+			if (entry.kind === 'property' && asciiUpperCase(entry.name) === metadataName) {
+				entries.splice(index, 1);
+			}
+		}
+		if (operation.kind === 'set') {
+			insertCanonical(
+				entries,
+				metadataProperty(
+					metadataName,
+					field === 'categories' ? operation.categories! : [operation.text!],
+				),
+			);
+		}
+		return;
+	}
 	const index = entries.findIndex(
 		(entry) => entry.kind === 'property' && asciiUpperCase(entry.name) === name,
 	);

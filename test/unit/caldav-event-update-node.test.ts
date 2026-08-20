@@ -71,6 +71,9 @@ const UPDATED_EVENT = Object.freeze({
 	description: '',
 	location: 'Updated location',
 	url: 'urn:example:updated',
+	categories: ['One', 'Two'],
+	status: 'confirmed',
+	transparency: 'transparent',
 	timeMode: 'timed',
 	accessMode: 'editable',
 	start: '2040-01-02T10:00:00Z',
@@ -270,8 +273,11 @@ describe('CalDAV Event Update metadata', () => {
 			'startDate',
 			'endDate',
 			'summary',
+			'categories',
 			'description',
 			'location',
+			'status',
+			'transparency',
 			'url',
 		]);
 		for (const name of ['description', 'location', 'url'] as const) {
@@ -307,6 +313,39 @@ describe('CalDAV Event Update metadata', () => {
 			});
 			expect(change?.values?.[1].required).toBeUndefined();
 		}
+		const categories = fields.options?.find(({ name }) => name === 'categories');
+		expect(categories).toMatchObject({
+			type: 'fixedCollection',
+			typeOptions: { multipleValues: false },
+			options: [
+				{
+					name: 'change',
+					values: [
+						expect.objectContaining({ name: 'action', default: 'set' }),
+						expect.objectContaining({
+							name: 'value',
+							type: 'fixedCollection',
+							typeOptions: { multipleValues: true },
+							displayOptions: { show: { action: ['set'] } },
+						}),
+					],
+				},
+			],
+		});
+		for (const [name, values] of [
+			['status', ['tentative', 'confirmed', 'cancelled']],
+			['transparency', ['opaque', 'transparent']],
+		] as const) {
+			const nested = fields.options?.find((option) => option.name === name);
+			const change = nested?.options?.[0];
+			expect(change?.values?.[1]).toMatchObject({
+				name: 'value',
+				type: 'options',
+				default: '',
+				displayOptions: { show: { action: ['set'] } },
+			});
+			expect(change?.values?.[1]?.options?.map((option) => option.value)).toEqual(values);
+		}
 	});
 });
 
@@ -322,6 +361,16 @@ describe('CalDAV Event Update extraction and output', () => {
 					description: { change: { action: 'set', value: '' } },
 					location: { change: { action: 'remove' } },
 					url: { change: { action: 'set', value: 'urn:example:updated' } },
+					categories: {
+						change: {
+							action: 'set',
+							value: {
+								category: [{ value: 'One' }, { value: 'Two' }, { value: 'One' }],
+							},
+						},
+					},
+					status: { change: { action: 'set', value: 'confirmed' } },
+					transparency: { change: { action: 'remove', value: 'hidden-private' } },
 				},
 			}),
 		]);
@@ -342,6 +391,9 @@ describe('CalDAV Event Update extraction and output', () => {
 				description: { kind: 'set', value: '' },
 				location: { kind: 'remove' },
 				url: { kind: 'set', value: 'urn:example:updated' },
+				categories: { kind: 'set', value: ['One', 'Two'] },
+				status: { kind: 'set', value: 'confirmed' },
+				transparency: { kind: 'remove' },
 			},
 			etag: ' W/"opaque caller" ',
 		});
@@ -356,6 +408,9 @@ describe('CalDAV Event Update extraction and output', () => {
 			'description',
 			'location',
 			'url',
+			'categories',
+			'status',
+			'transparency',
 			'timeMode',
 			'accessMode',
 			'start',
@@ -436,6 +491,25 @@ describe('CalDAV Event Update local validation', () => {
 			'invalid URL',
 			{ fieldsToUpdate: { url: { change: { action: 'set', value: '' } } } },
 			'URL must be a valid absolute URI without a fragment.',
+		],
+		[
+			'invalid Categories',
+			{
+				fieldsToUpdate: {
+					categories: { change: { action: 'set', value: { category: [{ value: '' }] } } },
+				},
+			},
+			'Categories must be a non-empty list of valid iCalendar text values.',
+		],
+		[
+			'invalid Status',
+			{ fieldsToUpdate: { status: { change: { action: 'set', value: 'CONFIRMED' } } } },
+			'Status must be Tentative, Confirmed, or Cancelled.',
+		],
+		[
+			'invalid Transparency',
+			{ fieldsToUpdate: { transparency: { change: { action: 'set', value: 'private' } } } },
+			'Transparency must be Opaque or Transparent.',
 		],
 	] as const)('rejects %s before transport creation', async (_label, overrides, message) => {
 		const error = await captureError(

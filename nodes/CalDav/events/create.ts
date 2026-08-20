@@ -1,6 +1,11 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The accepted application-service contract exposes sanitized domain failures outside the n8n UI boundary. */
 
-import type { CalendarDateString, CalendarEvent } from '../icalendar/eventReadModel';
+import type {
+	CalendarDateString,
+	CalendarEvent,
+	CalendarEventStatus,
+	CalendarEventTransparency,
+} from '../icalendar/eventReadModel';
 import type { CalendarEventTimeZone } from '../icalendar/timeZones';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import { CalDavTransportError } from '../transport/http';
@@ -20,6 +25,9 @@ interface CalendarEventCreateCommon {
 	readonly description?: string;
 	readonly location?: string;
 	readonly url?: string;
+	readonly categories?: readonly string[];
+	readonly status?: CalendarEventStatus;
+	readonly transparency?: CalendarEventTransparency;
 }
 
 export type CalendarEventCreateInput = CalendarEventCreateCommon &

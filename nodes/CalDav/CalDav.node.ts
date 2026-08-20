@@ -5,6 +5,7 @@ import type {
 	INodeExecutionData,
 	INodeListSearchResult,
 	INodeParameterResourceLocator,
+	INodeProperties,
 	INodeType,
 	INodeTypeDescription,
 	NodeEgressFilter,
@@ -74,7 +75,12 @@ import { bindCalendarEventTimeZoneExecutionContext } from './events/timeZoneExec
 import { CalDavCalendarEventTimeZoneAuthoringError } from './events/timeZoneAuthoring';
 import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
 import { CalDavCalendarEventReadModelError } from './icalendar/eventReadModel';
-import type { CalendarDateString, CalendarEvent } from './icalendar/eventReadModel';
+import type {
+	CalendarDateString,
+	CalendarEvent,
+	CalendarEventStatus,
+	CalendarEventTransparency,
+} from './icalendar/eventReadModel';
 import { CalDavICalendarParseError } from './icalendar/parser';
 import { CalDavCalendarEventPatchError, CalendarEventPatchErrorCode } from './icalendar/patcher';
 import type { CalendarEventPatch, OptionalFieldPatch } from './icalendar/patcher';
@@ -129,6 +135,106 @@ const GENERIC_LIST_SEARCH_ERROR_MESSAGE = 'The calendar list could not be loaded
 const ZONED_ISO_INSTANT_PATTERN =
 	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:([zZ])|([+-])(\d{2}):(\d{2}))$/;
 const CALENDAR_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+function categoriesDescriptor(
+	name: string,
+	displayName: string,
+	displayOptions?: INodeProperties['displayOptions'],
+): INodeProperties {
+	return {
+		displayName,
+		name,
+		type: 'fixedCollection',
+		typeOptions: { multipleValues: true },
+		default: {},
+		placeholder: 'Add Category',
+		...(displayOptions === undefined ? {} : { displayOptions }),
+		options: [
+			{
+				displayName: 'Category',
+				name: 'category',
+				values: [
+					{
+						displayName: 'Value',
+						name: 'value',
+						type: 'string',
+						default: '',
+					},
+				],
+			},
+		],
+	};
+}
+
+function metadataEnumDescriptor(
+	name: 'status' | 'transparency',
+	displayName: string,
+	options: readonly { readonly name: string; readonly value: string }[],
+	displayOptions?: INodeProperties['displayOptions'],
+): INodeProperties {
+	return {
+		displayName,
+		name,
+		type: 'options',
+		options: [...options],
+		default: '',
+		...(displayOptions === undefined ? {} : { displayOptions }),
+	};
+}
+
+const STATUS_OPTIONS = [
+	{ name: 'Tentative', value: 'tentative' },
+	{ name: 'Confirmed', value: 'confirmed' },
+	{ name: 'Cancelled', value: 'cancelled' },
+] as const;
+const TRANSPARENCY_OPTIONS = [
+	{ name: 'Opaque', value: 'opaque' },
+	{ name: 'Transparent', value: 'transparent' },
+] as const;
+
+function optionalMetadataPatchDescriptor(
+	name: 'categories' | 'status' | 'transparency',
+	displayName: 'Categories' | 'Status' | 'Transparency',
+): INodeProperties {
+	const value =
+		name === 'categories'
+			? categoriesDescriptor('value', 'Value', { show: { action: ['set'] } })
+			: metadataEnumDescriptor(
+					name,
+					'Value',
+					name === 'status' ? STATUS_OPTIONS : TRANSPARENCY_OPTIONS,
+					{ show: { action: ['set'] } },
+				);
+	return {
+		displayName,
+		name,
+		type: 'fixedCollection',
+		typeOptions: { multipleValues: false },
+		default: {},
+		required: true,
+		options: [
+			{
+				displayName: 'Change',
+				name: 'change',
+				values: [
+					{
+						displayName: 'Action',
+						name: 'action',
+						type: 'options',
+						required: true,
+						noDataExpression: true,
+						options: [
+							{ name: 'Set', value: 'set' },
+							{ name: 'Remove', value: 'remove' },
+						],
+						default: 'set',
+					},
+					{ ...value, displayName: 'Value', name: 'value' },
+				],
+			},
+		],
+	};
+}
 
 const GET_MESSAGES = {
 	INVALID_CALENDAR_URL:
@@ -236,6 +342,9 @@ const EVENT_CREATE_MESSAGES = {
 	INVALID_DESCRIPTION: 'Description must be a valid iCalendar text value.',
 	INVALID_LOCATION: 'Location must be a valid iCalendar text value.',
 	INVALID_URL: 'URL must be a valid absolute URI without a fragment.',
+	INVALID_CATEGORIES: 'Categories must be a non-empty list of valid iCalendar text values.',
+	INVALID_STATUS: 'Status must be Tentative, Confirmed, or Cancelled.',
+	INVALID_TRANSPARENCY: 'Transparency must be Opaque or Transparent.',
 	INVALID_ADDITIONAL_FIELDS: 'Additional Fields must be an object.',
 	INVALID_TIME_ZONE_MODE: 'Time Zone Mode must be UTC or IANA.',
 	INVALID_TIME_ZONE: 'Time Zone must be a valid IANA time zone identifier.',
@@ -283,6 +392,9 @@ const EVENT_UPDATE_MESSAGES = {
 	INVALID_DESCRIPTION: 'Description must be a valid iCalendar text value.',
 	INVALID_LOCATION: 'Location must be a valid iCalendar text value.',
 	INVALID_URL: 'URL must be a valid absolute URI without a fragment.',
+	INVALID_CATEGORIES: 'Categories must be a non-empty list of valid iCalendar text values.',
+	INVALID_STATUS: 'Status must be Tentative, Confirmed, or Cancelled.',
+	INVALID_TRANSPARENCY: 'Transparency must be Opaque or Transparent.',
 	UNSUPPORTED_TIME: 'The calendar event uses an unsupported time representation for this patch.',
 	INCOMPATIBLE_PARAMETERS:
 		'The calendar event property parameters are incompatible with this patch.',
@@ -438,6 +550,9 @@ function eventJson(event: CalendarEvent): IDataObject {
 		readonly description?: string;
 		readonly location?: string;
 		readonly url?: string;
+		readonly categories?: readonly string[];
+		readonly status?: CalendarEvent['status'];
+		readonly transparency?: CalendarEvent['transparency'];
 		readonly start?: string;
 		readonly end?: string;
 		readonly timeMode?: string;
@@ -453,6 +568,11 @@ function eventJson(event: CalendarEvent): IDataObject {
 			...(legacy.description === undefined ? {} : { description: legacy.description }),
 			...(legacy.location === undefined ? {} : { location: legacy.location }),
 			...(legacy.url === undefined ? {} : { url: legacy.url }),
+			...(legacy.categories === undefined ? {} : { categories: [...legacy.categories] }),
+			...(legacy.status === undefined ? {} : { status: legacy.status as IDataObject[string] }),
+			...(legacy.transparency === undefined
+				? {}
+				: { transparency: legacy.transparency as IDataObject[string] }),
 			...(legacy.start === undefined ? {} : { start: legacy.start }),
 			...(legacy.end === undefined ? {} : { end: legacy.end }),
 		};
@@ -466,6 +586,11 @@ function eventJson(event: CalendarEvent): IDataObject {
 		...(event.description === undefined ? {} : { description: event.description }),
 		...(event.location === undefined ? {} : { location: event.location }),
 		...(event.url === undefined ? {} : { url: event.url }),
+		...(event.categories === undefined ? {} : { categories: [...event.categories] }),
+		...(event.status === undefined ? {} : { status: event.status as IDataObject[string] }),
+		...(event.transparency === undefined
+			? {}
+			: { transparency: event.transparency as IDataObject[string] }),
 		timeMode: event.timeMode,
 		accessMode: event.accessMode,
 		...(event.timeMode === 'timed'
@@ -709,6 +834,15 @@ function eventCreateSerializationFailure(error: CalDavICalendarSerializeError): 
 	if (error.field === 'url') {
 		return { message: EVENT_CREATE_MESSAGES.INVALID_URL, configuration: true };
 	}
+	if (error.field === 'categories') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_CATEGORIES, configuration: true };
+	}
+	if (error.field === 'status') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_STATUS, configuration: true };
+	}
+	if (error.field === 'transparency') {
+		return { message: EVENT_CREATE_MESSAGES.INVALID_TRANSPARENCY, configuration: true };
+	}
 	return { message: EVENT_CREATE_MESSAGES.GENERIC, configuration: false };
 }
 
@@ -820,7 +954,9 @@ function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpd
 						? EVENT_UPDATE_MESSAGES.INVALID_SUMMARY
 						: error.field === 'description'
 							? EVENT_UPDATE_MESSAGES.INVALID_DESCRIPTION
-							: EVENT_UPDATE_MESSAGES.INVALID_LOCATION,
+							: error.field === 'categories'
+								? EVENT_UPDATE_MESSAGES.INVALID_CATEGORIES
+								: EVENT_UPDATE_MESSAGES.INVALID_LOCATION,
 				configuration: true,
 			};
 		case CalendarEventPatchErrorCode.INVALID_URI:
@@ -834,6 +970,16 @@ function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpd
 		case CalendarEventPatchErrorCode.INVALID_METADATA:
 			return { message: EVENT_UPDATE_MESSAGES.INVALID_METADATA, configuration: false };
 		case CalendarEventPatchErrorCode.INVALID_INPUT:
+			if (error.field === 'status') {
+				return { message: EVENT_UPDATE_MESSAGES.INVALID_STATUS, configuration: true };
+			}
+			if (error.field === 'transparency') {
+				return { message: EVENT_UPDATE_MESSAGES.INVALID_TRANSPARENCY, configuration: true };
+			}
+			if (error.field === 'categories') {
+				return { message: EVENT_UPDATE_MESSAGES.INVALID_CATEGORIES, configuration: true };
+			}
+			return { message: EVENT_UPDATE_MESSAGES.GENERIC, configuration: false };
 		case CalendarEventPatchErrorCode.UNKNOWN_PATCH_FIELD:
 		case CalendarEventPatchErrorCode.IMMUTABLE_FIELD:
 		case CalendarEventPatchErrorCode.INVALID_CONTEXT:
@@ -1330,7 +1476,7 @@ function workflowCalendarDate(
 
 function ownAdditionalField(
 	additionalFields: Record<PropertyKey, unknown>,
-	name: 'description' | 'location' | 'url',
+	name: 'description' | 'location' | 'url' | 'categories' | 'status' | 'transparency',
 	present: boolean,
 ): { readonly present: boolean; readonly value?: unknown } {
 	if (!present) return { present: false };
@@ -1338,6 +1484,51 @@ function ownAdditionalField(
 		return { present: true, value: Reflect.get(additionalFields, name) };
 	} catch {
 		return { present: true };
+	}
+}
+
+function workflowCategories(value: unknown): readonly string[] | undefined {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+	try {
+		if (Object.getOwnPropertySymbols(value).length > 0) return undefined;
+		const outer = Object.getOwnPropertyDescriptors(value);
+		if (
+			Object.keys(outer).length !== 1 ||
+			outer.category === undefined ||
+			!outer.category.enumerable ||
+			!('value' in outer.category) ||
+			!Array.isArray(outer.category.value) ||
+			outer.category.value.length === 0
+		) {
+			return undefined;
+		}
+		const rows = outer.category.value as readonly unknown[];
+		const categories: string[] = [];
+		const seen = new Set<string>();
+		for (const row of rows) {
+			if (typeof row !== 'object' || row === null || Array.isArray(row)) return undefined;
+			if (Object.getOwnPropertySymbols(row).length > 0) return undefined;
+			const descriptors = Object.getOwnPropertyDescriptors(row);
+			if (
+				Object.keys(descriptors).length !== 1 ||
+				descriptors.value === undefined ||
+				!descriptors.value.enumerable ||
+				!('value' in descriptors.value) ||
+				typeof descriptors.value.value !== 'string' ||
+				descriptors.value.value.length === 0 ||
+				!isValidICalendarText(descriptors.value.value)
+			) {
+				return undefined;
+			}
+			const category = descriptors.value.value;
+			if (!seen.has(category)) {
+				seen.add(category);
+				categories.push(category);
+			}
+		}
+		return Object.freeze(categories);
+	} catch {
+		return undefined;
 	}
 }
 
@@ -1452,7 +1643,11 @@ function eventCreateInput(
 		return EVENT_CREATE_MESSAGES.INVALID_ADDITIONAL_FIELDS;
 	}
 	if (
-		keys.some((key) => typeof key !== 'string' || !['description', 'location', 'url'].includes(key))
+		keys.some(
+			(key) =>
+				typeof key !== 'string' ||
+				!['description', 'location', 'url', 'categories', 'status', 'transparency'].includes(key),
+		)
 	) {
 		return EVENT_CREATE_MESSAGES.INVALID_ADDITIONAL_FIELDS;
 	}
@@ -1482,6 +1677,38 @@ function eventCreateInput(
 	) {
 		return EVENT_CREATE_MESSAGES.INVALID_URL;
 	}
+	const categoriesField = ownAdditionalField(
+		additionalFields,
+		'categories',
+		keys.includes('categories'),
+	);
+	const categories = categoriesField.present
+		? workflowCategories(categoriesField.value)
+		: undefined;
+	if (categoriesField.present && categories === undefined) {
+		return EVENT_CREATE_MESSAGES.INVALID_CATEGORIES;
+	}
+	const statusField = ownAdditionalField(additionalFields, 'status', keys.includes('status'));
+	if (
+		statusField.present &&
+		statusField.value !== 'tentative' &&
+		statusField.value !== 'confirmed' &&
+		statusField.value !== 'cancelled'
+	) {
+		return EVENT_CREATE_MESSAGES.INVALID_STATUS;
+	}
+	const transparencyField = ownAdditionalField(
+		additionalFields,
+		'transparency',
+		keys.includes('transparency'),
+	);
+	if (
+		transparencyField.present &&
+		transparencyField.value !== 'opaque' &&
+		transparencyField.value !== 'transparent'
+	) {
+		return EVENT_CREATE_MESSAGES.INVALID_TRANSPARENCY;
+	}
 
 	return Object.freeze({
 		calendarUrl,
@@ -1491,17 +1718,22 @@ function eventCreateInput(
 		...(descriptionField.present ? { description: descriptionField.value as string } : {}),
 		...(locationField.present ? { location: locationField.value as string } : {}),
 		...(urlField.present ? { url: urlField.value as string } : {}),
+		...(categoriesField.present ? { categories: categories! } : {}),
+		...(statusField.present ? { status: statusField.value as CalendarEventStatus } : {}),
+		...(transparencyField.present
+			? { transparency: transparencyField.value as CalendarEventTransparency }
+			: {}),
 	});
 }
 
-type OptionalPatchExtraction =
-	{ readonly patch: OptionalFieldPatch<string> } | { readonly error: string };
+type OptionalPatchExtraction<T> =
+	{ readonly patch: OptionalFieldPatch<T> } | { readonly error: string };
 
-function optionalUpdatePatch(
+function optionalUpdatePatchValue<T>(
 	value: unknown,
 	invalidValueMessage: string,
-	validateValue: (value: string) => boolean,
-): OptionalPatchExtraction {
+	validateValue: (value: unknown) => T | undefined,
+): OptionalPatchExtraction<T> {
 	try {
 		if (typeof value !== 'object' || value === null || Array.isArray(value)) {
 			return { error: invalidValueMessage };
@@ -1533,20 +1765,33 @@ function optionalUpdatePatch(
 		const action = descriptors.action.value;
 		if (action === 'remove') return { patch: { kind: 'remove' } };
 		const valueDescriptor = descriptors.value;
+		const validatedValue =
+			valueDescriptor !== undefined && 'value' in valueDescriptor
+				? validateValue(valueDescriptor.value)
+				: undefined;
 		if (
 			action !== 'set' ||
 			valueDescriptor === undefined ||
 			!valueDescriptor.enumerable ||
 			!('value' in valueDescriptor) ||
-			typeof valueDescriptor.value !== 'string' ||
-			!validateValue(valueDescriptor.value)
+			validatedValue === undefined
 		) {
 			return { error: invalidValueMessage };
 		}
-		return { patch: { kind: 'set', value: valueDescriptor.value } };
+		return { patch: { kind: 'set', value: validatedValue } };
 	} catch {
 		return { error: invalidValueMessage };
 	}
+}
+
+function optionalUpdatePatch(
+	value: unknown,
+	invalidValueMessage: string,
+	validateValue: (value: string) => boolean,
+): OptionalPatchExtraction<string> {
+	return optionalUpdatePatchValue(value, invalidValueMessage, (candidate) =>
+		typeof candidate === 'string' && validateValue(candidate) ? candidate : undefined,
+	);
 }
 
 function eventUpsertInput(
@@ -1636,7 +1881,7 @@ function eventUpsertInput(
 	if (
 		Object.keys(descriptors).some(
 			(key) =>
-				!['description', 'location', 'url'].includes(key) ||
+				!['description', 'location', 'url', 'categories', 'status', 'transparency'].includes(key) ||
 				!descriptors[key]!.enumerable ||
 				!('value' in descriptors[key]!),
 		)
@@ -1647,6 +1892,9 @@ function eventUpsertInput(
 		description?: OptionalFieldPatch<string>;
 		location?: OptionalFieldPatch<string>;
 		url?: OptionalFieldPatch<string>;
+		categories?: OptionalFieldPatch<readonly string[]>;
+		status?: OptionalFieldPatch<CalendarEventStatus>;
+		transparency?: OptionalFieldPatch<CalendarEventTransparency>;
 	} = {};
 	for (const [name, message, validator] of [
 		['description', EVENT_UPSERT_MESSAGES.INVALID_DESCRIPTION, isValidICalendarText],
@@ -1657,6 +1905,34 @@ function eventUpsertInput(
 		const extracted = optionalUpdatePatch(descriptors[name].value, message, validator);
 		if ('error' in extracted) return extracted.error;
 		patches[name] = extracted.patch;
+	}
+	if (descriptors.categories !== undefined) {
+		const extracted = optionalUpdatePatchValue(
+			descriptors.categories.value,
+			EVENT_UPSERT_MESSAGES.INVALID_CATEGORIES,
+			workflowCategories,
+		);
+		if ('error' in extracted) return extracted.error;
+		patches.categories = extracted.patch;
+	}
+	if (descriptors.status !== undefined) {
+		const extracted = optionalUpdatePatchValue<CalendarEventStatus>(
+			descriptors.status.value,
+			EVENT_UPSERT_MESSAGES.INVALID_STATUS,
+			(value) =>
+				value === 'tentative' || value === 'confirmed' || value === 'cancelled' ? value : undefined,
+		);
+		if ('error' in extracted) return extracted.error;
+		patches.status = extracted.patch;
+	}
+	if (descriptors.transparency !== undefined) {
+		const extracted = optionalUpdatePatchValue<CalendarEventTransparency>(
+			descriptors.transparency.value,
+			EVENT_UPSERT_MESSAGES.INVALID_TRANSPARENCY,
+			(value) => (value === 'opaque' || value === 'transparent' ? value : undefined),
+		);
+		if ('error' in extracted) return extracted.error;
+		patches.transparency = extracted.patch;
 	}
 	if (timeInput.timeMode === 'timed') {
 		if (timeInput.end.getTime() <= timeInput.start.getTime()) {
@@ -1723,6 +1999,9 @@ function eventUpdatePatch(
 		'description',
 		'location',
 		'url',
+		'categories',
+		'status',
+		'transparency',
 	]);
 	if (
 		keys.some((key) => {
@@ -1754,6 +2033,9 @@ function eventUpdatePatch(
 		description?: OptionalFieldPatch<string>;
 		location?: OptionalFieldPatch<string>;
 		url?: OptionalFieldPatch<string>;
+		categories?: OptionalFieldPatch<readonly string[]>;
+		status?: OptionalFieldPatch<CalendarEventStatus>;
+		transparency?: OptionalFieldPatch<CalendarEventTransparency>;
 	} = { timeMode };
 	if (descriptors.timeZone !== undefined) {
 		const outer = descriptors.timeZone.value;
@@ -1838,6 +2120,34 @@ function eventUpdatePatch(
 		);
 		if ('error' in extracted) return extracted.error;
 		patch.url = extracted.patch;
+	}
+	if (descriptors.categories !== undefined) {
+		const extracted = optionalUpdatePatchValue(
+			descriptors.categories.value,
+			EVENT_UPDATE_MESSAGES.INVALID_CATEGORIES,
+			workflowCategories,
+		);
+		if ('error' in extracted) return extracted.error;
+		patch.categories = extracted.patch;
+	}
+	if (descriptors.status !== undefined) {
+		const extracted = optionalUpdatePatchValue<CalendarEventStatus>(
+			descriptors.status.value,
+			EVENT_UPDATE_MESSAGES.INVALID_STATUS,
+			(value) =>
+				value === 'tentative' || value === 'confirmed' || value === 'cancelled' ? value : undefined,
+		);
+		if ('error' in extracted) return extracted.error;
+		patch.status = extracted.patch;
+	}
+	if (descriptors.transparency !== undefined) {
+		const extracted = optionalUpdatePatchValue<CalendarEventTransparency>(
+			descriptors.transparency.value,
+			EVENT_UPDATE_MESSAGES.INVALID_TRANSPARENCY,
+			(value) => (value === 'opaque' || value === 'transparent' ? value : undefined),
+		);
+		if ('error' in extracted) return extracted.error;
+		patch.transparency = extracted.patch;
 	}
 	return Object.freeze(patch) as CalendarEventPatch;
 }
@@ -2586,6 +2896,7 @@ export class CalDav implements INodeType {
 					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
 				},
 				options: [
+					categoriesDescriptor('categories', 'Categories'),
 					{
 						displayName: 'Description',
 						name: 'description',
@@ -2599,6 +2910,8 @@ export class CalDav implements INodeType {
 						type: 'string',
 						default: '',
 					},
+					metadataEnumDescriptor('status', 'Status', STATUS_OPTIONS),
+					metadataEnumDescriptor('transparency', 'Transparency', TRANSPARENCY_OPTIONS),
 					{
 						displayName: 'URL',
 						name: 'url',
@@ -2748,8 +3061,9 @@ export class CalDav implements INodeType {
 					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
 				},
 				options: [
-					...(['description', 'location', 'url'] as const).map((name) => ({
-						displayName: name === 'url' ? 'URL' : `${name[0]!.toUpperCase()}${name.slice(1)}`,
+					optionalMetadataPatchDescriptor('categories', 'Categories'),
+					...(['description', 'location'] as const).map((name) => ({
+						displayName: `${name[0]!.toUpperCase()}${name.slice(1)}`,
 						name,
 						type: 'fixedCollection' as const,
 						typeOptions: { multipleValues: false },
@@ -2777,6 +3091,43 @@ export class CalDav implements INodeType {
 										name: 'value',
 										type: 'string' as const,
 										...(name === 'description' ? { typeOptions: { rows: 4 } } : {}),
+										default: '',
+										displayOptions: { show: { action: ['set'] } },
+									},
+								],
+							},
+						],
+					})),
+					optionalMetadataPatchDescriptor('status', 'Status'),
+					optionalMetadataPatchDescriptor('transparency', 'Transparency'),
+					...(['url'] as const).map((name) => ({
+						displayName: 'URL',
+						name,
+						type: 'fixedCollection' as const,
+						typeOptions: { multipleValues: false },
+						default: {},
+						required: true,
+						options: [
+							{
+								displayName: 'Change',
+								name: 'change',
+								values: [
+									{
+										displayName: 'Action',
+										name: 'action',
+										type: 'options' as const,
+										required: true,
+										noDataExpression: true,
+										options: [
+											{ name: 'Set', value: 'set' },
+											{ name: 'Remove', value: 'remove' },
+										],
+										default: 'set',
+									},
+									{
+										displayName: 'Value',
+										name: 'value',
+										type: 'string' as const,
 										default: '',
 										displayOptions: { show: { action: ['set'] } },
 									},
@@ -2991,6 +3342,7 @@ export class CalDav implements INodeType {
 						type: 'string',
 						default: '',
 					},
+					optionalMetadataPatchDescriptor('categories', 'Categories'),
 					{
 						displayName: 'Description',
 						name: 'description',
@@ -3062,6 +3414,8 @@ export class CalDav implements INodeType {
 							},
 						],
 					},
+					optionalMetadataPatchDescriptor('status', 'Status'),
+					optionalMetadataPatchDescriptor('transparency', 'Transparency'),
 					{
 						displayName: 'URL',
 						name: 'url',

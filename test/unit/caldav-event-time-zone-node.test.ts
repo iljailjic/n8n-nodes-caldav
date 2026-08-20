@@ -257,8 +257,11 @@ describe('CalDAV timed event timezone UI', () => {
 			'startDate',
 			'endDate',
 			'summary',
+			'categories',
 			'description',
 			'location',
+			'status',
+			'transparency',
 			'url',
 		]);
 		expect(fields?.options?.[0]).toMatchObject({

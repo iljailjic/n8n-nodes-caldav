@@ -128,6 +128,9 @@ export async function prepareCalendarEventCreate(
 		...(input.description === undefined ? {} : { description: input.description }),
 		...(input.location === undefined ? {} : { location: input.location }),
 		...(input.url === undefined ? {} : { url: input.url }),
+		...(input.categories === undefined ? {} : { categories: input.categories }),
+		...(input.status === undefined ? {} : { status: input.status }),
+		...(input.transparency === undefined ? {} : { transparency: input.transparency }),
 	};
 	const calendarData =
 		input.timeMode === 'allDay'

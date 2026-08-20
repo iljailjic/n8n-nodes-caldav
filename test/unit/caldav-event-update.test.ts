@@ -31,7 +31,11 @@ import {
 	updateCalendarEvent,
 } from '../../nodes/CalDav/events/update';
 import type { CalendarEventUpdateInput } from '../../nodes/CalDav/events/update';
-import { mapCalendarEventResource } from '../../nodes/CalDav/icalendar/eventReadModel';
+import {
+	CalDavCalendarEventReadModelError,
+	CalendarEventReadModelErrorCode,
+	mapCalendarEventResource,
+} from '../../nodes/CalDav/icalendar/eventReadModel';
 import type { CalendarEventReadResult } from '../../nodes/CalDav/icalendar/eventReadModel';
 import { parseICalendarResource } from '../../nodes/CalDav/icalendar/parser';
 import type { ICalendarComponent, ICalendarEntry } from '../../nodes/CalDav/icalendar/parser';
@@ -826,6 +830,30 @@ describe('calendar event Update coordinator requests and authoritative result', 
 });
 
 describe('calendar event Update coordinator fail-fast and confirmation behavior', () => {
+	it.each(['STATUS', 'TRANSP'] as const)(
+		'propagates duplicate %s projection failure before clock or PUT',
+		async () => {
+			mocks.getCalendarEventByResourceUrl.mockRejectedValue(
+				new CalDavCalendarEventReadModelError(
+					CalendarEventReadModelErrorCode.AMBIGUOUS_EVENT_PROPERTY,
+				),
+			);
+			const clock = vi.fn().mockReturnValue(CLOCK);
+
+			await expect(
+				updateCalendarEvent(
+					TRANSPORT,
+					resourceInput({ summary: { kind: 'set', value: 'Must not change' } }),
+					clock,
+				),
+			).rejects.toMatchObject({
+				code: CalendarEventReadModelErrorCode.AMBIGUOUS_EVENT_PROPERTY,
+			});
+			expect(clock).not.toHaveBeenCalled();
+			expect(mocks.updateCalendarEventResource).not.toHaveBeenCalled();
+		},
+	);
+
 	it('rejects a mixed-zone recurring event as read-only before clock, ETag, patching, or PUT', async () => {
 		const mixedRecurrence = SUPPORTED_EMBEDDED_IANA_EVENT.replace(
 			'END:VCALENDAR\r\n',

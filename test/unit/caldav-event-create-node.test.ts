@@ -108,7 +108,7 @@ function context(
 	} as unknown as IExecuteFunctions;
 }
 
-function created(uid: string, optional: Record<string, string> = {}) {
+function created(uid: string, optional: Record<string, unknown> = {}) {
 	return {
 		calendarUrl: validateAbsoluteHttpUrl('https://calendar.example.test/calendars/work/'),
 		resourceUrl: validateAbsoluteHttpUrl(
@@ -171,6 +171,9 @@ beforeEach(() => {
 			...(input.description === undefined ? {} : { description: input.description }),
 			...(input.location === undefined ? {} : { location: input.location }),
 			...(input.url === undefined ? {} : { url: input.url }),
+			...(input.categories === undefined ? {} : { categories: input.categories }),
+			...(input.status === undefined ? {} : { status: input.status }),
+			...(input.transparency === undefined ? {} : { transparency: input.transparency }),
 		}),
 	);
 	TRANSPORT.request.mockReset();
@@ -274,13 +277,38 @@ describe('CalDAV Event Create metadata', () => {
 			type: 'collection',
 			placeholder: 'Add Field',
 			default: {},
+		});
+		expect(additional?.options?.map(({ name }) => name)).toEqual([
+			'categories',
+			'description',
+			'location',
+			'status',
+			'transparency',
+			'url',
+		]);
+		const categories = additional?.options?.find(({ name }) => name === 'categories');
+		expect(categories).toMatchObject({
+			type: 'fixedCollection',
+			typeOptions: { multipleValues: true },
+			default: {},
 			options: [
-				{ displayName: 'Description', name: 'description', type: 'string', default: '' },
-				{ displayName: 'Location', name: 'location', type: 'string', default: '' },
-				{ displayName: 'URL', name: 'url', type: 'string', default: '' },
+				{
+					name: 'category',
+					values: [{ name: 'value', type: 'string', default: '' }],
+				},
 			],
 		});
-		expect(additional?.options?.[0]).toMatchObject({ typeOptions: { rows: 4 } });
+		for (const [name, values] of [
+			['status', ['tentative', 'confirmed', 'cancelled']],
+			['transparency', ['opaque', 'transparent']],
+		] as const) {
+			const field = additional?.options?.find((option) => option.name === name);
+			expect(field).toMatchObject({ type: 'options', default: '' });
+			expect(field?.options?.map((option) => option.value)).toEqual(values);
+		}
+		expect(additional?.options?.find(({ name }) => name === 'description')).toMatchObject({
+			typeOptions: { rows: 4 },
+		});
 	});
 });
 
@@ -296,7 +324,20 @@ describe('CalDAV Event Create input and output mapping', () => {
 		const execution = context([
 			parameters({
 				uid: 'first',
-				additionalFields: { description: '', location: ' Office ', url: 'urn:test:first' },
+				additionalFields: {
+					description: '',
+					location: ' Office ',
+					url: 'urn:test:first',
+					categories: {
+						category: [
+							{ value: 'Planning, review' },
+							{ value: '  ' },
+							{ value: 'Planning, review' },
+						],
+					},
+					status: 'cancelled',
+					transparency: 'transparent',
+				},
 			}),
 			parameters({ uid: 'second', start: startDate, end: luxonEnd }),
 		]);
@@ -304,7 +345,14 @@ describe('CalDAV Event Create input and output mapping', () => {
 		const [output] = await new CalDav().execute.call(execution);
 		expect(output).toEqual([
 			{
-				json: created('first', { description: '', location: ' Office ', url: 'urn:test:first' }),
+				json: created('first', {
+					description: '',
+					location: ' Office ',
+					url: 'urn:test:first',
+					categories: ['Planning, review', '  '],
+					status: 'cancelled',
+					transparency: 'transparent',
+				}),
 				pairedItem: { item: 0 },
 			},
 			{
@@ -323,6 +371,9 @@ describe('CalDAV Event Create input and output mapping', () => {
 			description: '',
 			location: ' Office ',
 			url: 'urn:test:first',
+			categories: ['Planning, review', '  '],
+			status: 'cancelled',
+			transparency: 'transparent',
 		});
 		const secondInput = mocks.createCalendarEvent.mock.calls[1]?.[1];
 		expect(secondInput.start).toEqual(startDate);
@@ -441,6 +492,26 @@ describe('CalDAV Event Create deterministic validation', () => {
 			'URL fragment',
 			{ additionalFields: { url: 'https://example.test/private#fragment' } },
 			'URL must be a valid absolute URI without a fragment.',
+		],
+		[
+			'Categories empty list',
+			{ additionalFields: { categories: { category: [] } } },
+			'Categories must be a non-empty list of valid iCalendar text values.',
+		],
+		[
+			'Categories empty value',
+			{ additionalFields: { categories: { category: [{ value: 'private' }, { value: '' }] } } },
+			'Categories must be a non-empty list of valid iCalendar text values.',
+		],
+		[
+			'Status uppercase',
+			{ additionalFields: { status: 'CONFIRMED' } },
+			'Status must be Tentative, Confirmed, or Cancelled.',
+		],
+		[
+			'Transparency unsupported',
+			{ additionalFields: { transparency: 'private' } },
+			'Transparency must be Opaque or Transparent.',
 		],
 		['range', { end: '2040-01-02T10:00:00+01:00' }, 'End must be later than Start.'],
 	] as const)('rejects %s before transport/coordinator I/O', async (_label, overrides, message) => {
