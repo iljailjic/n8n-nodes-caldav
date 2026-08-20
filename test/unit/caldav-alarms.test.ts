@@ -554,6 +554,7 @@ describe('structured VALARM authoring', () => {
 		'mailto:first@example.test#fragment',
 		'mailto:first@example.test,second@example.test',
 		'mailto:first@example.test%0d%0aBcc:private@example.test',
+		'mailto:alice%0d%0aBcc@example.test',
 		'mailto:first%ZZ@example.test',
 		'http://first@example.test',
 	] as const)('rejects unsafe or non-single mailto recipient %s', (recipient) => {

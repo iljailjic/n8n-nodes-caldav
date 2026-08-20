@@ -169,4 +169,34 @@ describe('VALARM patch integration', () => {
 			applyCalendarEventPatch(context, { timeMode: 'timed', alarms: [] }, MODIFIED_AT),
 		).toThrow(CalDavCalendarAlarmError);
 	});
+
+	it('defaults an added DISPLAY description from the authoritative final event summary', () => {
+		const resource = parse(timedMaster());
+		const context = createCalendarEventPreservationContext(resource);
+		const output = applyCalendarEventPatch(
+			context,
+			{
+				timeMode: 'timed',
+				summary: { kind: 'set', value: 'Final authoritative summary' },
+				alarms: [
+					{
+						kind: 'add',
+						alarm: {
+							action: 'display',
+							trigger: { reference: 'start', direction: 'at' },
+						},
+					},
+				],
+			},
+			MODIFIED_AT,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			() => '44444444-4444-4444-8444-444444444444',
+		);
+		const serialized = serializeICalendarResource(output);
+		expect(serialized).toContain('DESCRIPTION:Final authoritative summary');
+		expect(serialized).not.toContain('DESCRIPTION:Alarm validation');
+	});
 });

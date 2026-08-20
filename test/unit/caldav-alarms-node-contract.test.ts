@@ -152,6 +152,42 @@ describe('CalDAV alarm n8n contract', () => {
 		]);
 	});
 
+	it('defers an omitted Update DISPLAY description and rejects encoded control injection', () => {
+		expect(
+			normalizeAlarmMutationParameter({
+				change: [
+					{
+						kind: 'add',
+						action: 'display',
+						reference: 'start',
+						direction: 'at',
+					},
+				],
+			}),
+		).toEqual([
+			{
+				kind: 'add',
+				alarm: { action: 'display', trigger: { reference: 'start', direction: 'at' } },
+			},
+		]);
+
+		expect(() =>
+			normalizeAlarmMutationParameter({
+				change: [
+					{
+						kind: 'add',
+						action: 'email',
+						reference: 'start',
+						direction: 'at',
+						subject: 'Subject',
+						body: 'Body',
+						recipients: { recipient: [{ value: 'mailto:alice%0d%0aBcc@example.test' }] },
+					},
+				],
+			}),
+		).toThrow(CalDavCalendarAlarmError);
+	});
+
 	it('rejects malformed wrappers, unknown fields and missing selectors with fixed errors', () => {
 		for (const invoke of [
 			() => normalizeAlarmCreateParameter({ alarm: [], extra: true }, 'Summary'),

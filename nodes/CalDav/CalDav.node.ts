@@ -2459,7 +2459,9 @@ export function normalizeAlarmMutationParameter(value: unknown): readonly Calend
 			throw new CalDavCalendarAlarmError('INVALID_INPUT', 'alarms');
 		}
 	}
-	return normalizeCalendarAlarmMutations(alarmValidationMaster('Alarm validation'), mutations);
+	return normalizeCalendarAlarmMutations(alarmValidationMaster('Alarm validation'), mutations, {
+		deferDisplayDescription: true,
+	});
 }
 /* eslint-enable n8n-nodes-base/node-execute-block-wrong-error-thrown */
 

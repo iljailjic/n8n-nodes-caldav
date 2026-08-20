@@ -348,7 +348,10 @@ function recipientIsValid(value: string): boolean {
 	if (address.length === 0 || /[?#,\r\n]/.test(address)) return false;
 	for (let index = 0; index < address.length; index += 1) {
 		if (address[index] === '%') {
-			if (!HEX_PAIR_PATTERN.test(address.slice(index + 1, index + 3))) return false;
+			const encoded = address.slice(index + 1, index + 3);
+			if (!HEX_PAIR_PATTERN.test(encoded)) return false;
+			const decoded = Number.parseInt(encoded, 16);
+			if (decoded < 0x20 || decoded === 0x7f) return false;
 			index += 2;
 		}
 	}
@@ -678,7 +681,11 @@ function finalSummary(master: ICalendarComponent): string | undefined {
 	return summaries.length === 1 ? scalarText(summaries[0]!) : undefined;
 }
 
-function validateAlarmInput(value: unknown, master: ICalendarComponent): CalendarAlarmInput {
+function validateAlarmInput(
+	value: unknown,
+	master: ICalendarComponent,
+	deferDisplayDescription = false,
+): CalendarAlarmInput {
 	const input = record(value, [
 		'action',
 		'trigger',
@@ -697,10 +704,19 @@ function validateAlarmInput(value: unknown, master: ICalendarComponent): Calenda
 		for (const key of ['subject', 'body', 'recipients']) {
 			if (hasOwn(input, key)) fail('UNKNOWN_FIELD', 'action');
 		}
-		const description = hasOwn(input, 'description')
-			? validateText(input.description, 'description')
-			: validateText(finalSummary(master), 'description');
-		return Object.freeze({ action, trigger, description });
+		if (hasOwn(input, 'description')) {
+			return Object.freeze({
+				action,
+				trigger,
+				description: validateText(input.description, 'description'),
+			});
+		}
+		if (deferDisplayDescription) return Object.freeze({ action, trigger });
+		return Object.freeze({
+			action,
+			trigger,
+			description: validateText(finalSummary(master), 'description'),
+		});
 	}
 	if (action === 'audio') {
 		for (const key of ['description', 'subject', 'body', 'recipients']) {
@@ -801,6 +817,7 @@ function validateSelector(value: unknown): CalendarAlarmSelector {
 function validateMutationList(
 	value: unknown,
 	master: ICalendarComponent,
+	deferDisplayDescription = false,
 ): readonly CalendarAlarmMutation[] {
 	const snapshot = snapshotData(value);
 	if (!Array.isArray(snapshot) || snapshot.length === 0) fail('INVALID_INPUT', 'alarms');
@@ -811,7 +828,10 @@ function validateMutationList(
 				if (Object.keys(mutation).length !== 2 || !hasOwn(mutation, 'alarm')) {
 					fail('INVALID_INPUT', 'alarms');
 				}
-				return Object.freeze({ kind: 'add', alarm: validateAlarmInput(mutation.alarm, master) });
+				return Object.freeze({
+					kind: 'add',
+					alarm: validateAlarmInput(mutation.alarm, master, deferDisplayDescription),
+				});
 			}
 			if (mutation.kind === 'edit') {
 				if (
@@ -1201,8 +1221,9 @@ export function normalizeCalendarAlarmInputs(
 export function normalizeCalendarAlarmMutations(
 	master: ICalendarComponent,
 	value: unknown,
+	options: { readonly deferDisplayDescription?: boolean } = {},
 ): readonly CalendarAlarmMutation[] {
-	return validateMutationList(value, master);
+	return validateMutationList(value, master, options.deferDisplayDescription === true);
 }
 
 export function isCalendarAlarmErrorField(value: string): value is CalendarAlarmField {
