@@ -661,6 +661,7 @@ describe('remote RRULE projection and semantic equality', () => {
 
 	it.each([
 		['FREQ=HOURLY', ['FREQ']],
+		['BYSETPOS=1;FREQ=HOURLY', ['BYSETPOS', 'FREQ']],
 		['FREQ=DAILY;BYSETPOS=1;X-PRIVATE=opaque', ['BYSETPOS', 'X-PRIVATE']],
 	] as const)('classifies unapproved parts without exposing their values', (wire, ruleParts) => {
 		const projected = projectRecurrenceRule(rruleProperty(wire), UTC_START);
