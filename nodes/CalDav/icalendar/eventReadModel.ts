@@ -2,6 +2,8 @@
 
 import { parseICalendarResource } from './parser';
 import type { ICalendarComponent, ICalendarProperty, ICalendarResource } from './parser';
+import { projectCalendarAlarms } from './alarms';
+import type { CalendarAlarm } from './alarms';
 import {
 	CalDavIanaTimeZoneError,
 	canonicalizeIanaTimeZone,
@@ -101,6 +103,7 @@ interface CalendarEventCommon {
 	readonly categories?: readonly string[];
 	readonly status?: CalendarEventStatus | UnsupportedCalendarEventMetadataToken;
 	readonly transparency?: CalendarEventTransparency | UnsupportedCalendarEventMetadataToken;
+	readonly alarms?: readonly CalendarAlarm[];
 	readonly extensions?: CalendarEventExtensions;
 }
 
@@ -782,6 +785,7 @@ export function mapCalendarEventResource(
 	}
 
 	const extensions = snapshotExtensions(input.extensions);
+	const alarms = projectCalendarAlarms(master);
 	const common = {
 		calendarUrl: input.calendarUrl,
 		resourceUrl: input.resourceUrl,
@@ -794,6 +798,7 @@ export function mapCalendarEventResource(
 		...(categories !== undefined ? { categories } : {}),
 		...(status !== undefined ? { status } : {}),
 		...(transparency !== undefined ? { transparency } : {}),
+		...(alarms.length > 0 ? { alarms } : {}),
 	};
 
 	const startType = asciiUpperCase(startProperty.value.valueType);

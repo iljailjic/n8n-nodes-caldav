@@ -263,6 +263,7 @@ describe('CalDAV Event Upsert metadata', () => {
 			default: {},
 		});
 		expect(additional.options?.map(({ name }) => name)).toEqual([
+			'alarms',
 			'categories',
 			'description',
 			'location',

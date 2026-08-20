@@ -1,15 +1,13 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
+import { CalDavCalendarAlarmError } from '../../nodes/CalDav/icalendar/alarms';
 import type { CalendarAlarm, CalendarAlarmMutation } from '../../nodes/CalDav/icalendar/alarms';
 import {
 	createCalendarEventPreservationContext,
 	mapCalendarEventResource,
 } from '../../nodes/CalDav/icalendar/eventReadModel';
 import type { CalendarEvent } from '../../nodes/CalDav/icalendar/eventReadModel';
-import {
-	applyCalendarEventPatch,
-	CalDavCalendarEventPatchError,
-} from '../../nodes/CalDav/icalendar/patcher';
+import { applyCalendarEventPatch } from '../../nodes/CalDav/icalendar/patcher';
 import type {
 	CalendarEventPatch,
 	CalendarEventPatchField,
@@ -169,6 +167,6 @@ describe('VALARM patch integration', () => {
 		const context = createCalendarEventPreservationContext(resource);
 		expect(() =>
 			applyCalendarEventPatch(context, { timeMode: 'timed', alarms: [] }, MODIFIED_AT),
-		).toThrow(CalDavCalendarEventPatchError);
+		).toThrow(CalDavCalendarAlarmError);
 	});
 });

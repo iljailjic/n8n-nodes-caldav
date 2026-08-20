@@ -82,6 +82,18 @@ import type {
 	CalendarEventTransparency,
 } from './icalendar/eventReadModel';
 import { CalDavICalendarParseError } from './icalendar/parser';
+import type { ICalendarComponent, ICalendarProperty } from './icalendar/parser';
+import {
+	CalDavCalendarAlarmError,
+	normalizeCalendarAlarmInputs,
+	normalizeCalendarAlarmMutations,
+} from './icalendar/alarms';
+import type {
+	CalendarAlarmInput,
+	CalendarAlarmMutation,
+	CalendarAlarmSelector,
+	CalendarAlarmTrigger,
+} from './icalendar/alarms';
 import { CalDavCalendarEventPatchError, CalendarEventPatchErrorCode } from './icalendar/patcher';
 import type { CalendarEventPatch, OptionalFieldPatch } from './icalendar/patcher';
 import {
@@ -236,6 +248,266 @@ function optionalMetadataPatchDescriptor(
 	};
 }
 
+const ALARM_ACTION_OPTIONS = [
+	{ name: 'Display', value: 'display' },
+	{ name: 'Audio', value: 'audio' },
+	{ name: 'Email', value: 'email' },
+] as const;
+
+function alarmTriggerValues(displayOptions?: INodeProperties['displayOptions']): INodeProperties[] {
+	return [
+		{
+			displayName: 'Reference',
+			name: 'reference',
+			type: 'options',
+			options: [
+				{ name: 'Start', value: 'start' },
+				{ name: 'End', value: 'end' },
+			],
+			default: 'start',
+			...(displayOptions === undefined ? {} : { displayOptions }),
+		},
+		{
+			displayName: 'Direction',
+			name: 'direction',
+			type: 'options',
+			options: [
+				{ name: 'Before', value: 'before' },
+				{ name: 'After', value: 'after' },
+				{ name: 'At', value: 'at' },
+			],
+			default: 'before',
+			...(displayOptions === undefined ? {} : { displayOptions }),
+		},
+		{
+			displayName: 'Value',
+			name: 'value',
+			type: 'number',
+			typeOptions: { minValue: 1, maxValue: 2_147_483_647, numberPrecision: 0 },
+			default: 1,
+			displayOptions: { show: { direction: ['before', 'after'] } },
+		},
+		{
+			displayName: 'Unit',
+			name: 'unit',
+			type: 'options',
+			options: [
+				{ name: 'Minute', value: 'minute' },
+				{ name: 'Hour', value: 'hour' },
+				{ name: 'Day', value: 'day' },
+				{ name: 'Week', value: 'week' },
+			],
+			default: 'minute',
+			displayOptions: { show: { direction: ['before', 'after'] } },
+		},
+	];
+}
+
+function alarmRecipientsDescriptor(
+	displayOptions?: INodeProperties['displayOptions'],
+): INodeProperties {
+	return {
+		displayName: 'Recipients',
+		name: 'recipients',
+		type: 'fixedCollection',
+		typeOptions: { multipleValues: true },
+		default: {},
+		placeholder: 'Add Recipient',
+		...(displayOptions === undefined ? {} : { displayOptions }),
+		options: [
+			{
+				displayName: 'Recipient',
+				name: 'recipient',
+				values: [
+					{
+						displayName: 'Mailto URI',
+						name: 'value',
+						type: 'string',
+						required: true,
+						default: '',
+					},
+				],
+			},
+		],
+	};
+}
+
+function alarmAddValues(): INodeProperties[] {
+	return [
+		{
+			displayName: 'Action',
+			name: 'action',
+			type: 'options',
+			options: [...ALARM_ACTION_OPTIONS],
+			default: 'display',
+			required: true,
+		},
+		...alarmTriggerValues(),
+		{
+			displayName: 'Description',
+			name: 'description',
+			type: 'string',
+			typeOptions: { rows: 3 },
+			default: '',
+			description: 'Leave empty to use the event summary',
+			displayOptions: { show: { action: ['display'] } },
+		},
+		{
+			displayName: 'Subject',
+			name: 'subject',
+			type: 'string',
+			required: true,
+			default: '',
+			displayOptions: { show: { action: ['email'] } },
+		},
+		{
+			displayName: 'Body',
+			name: 'body',
+			type: 'string',
+			typeOptions: { rows: 3 },
+			required: true,
+			default: '',
+			displayOptions: { show: { action: ['email'] } },
+		},
+		alarmRecipientsDescriptor({ show: { action: ['email'] } }),
+	];
+}
+
+export function alarmCreateDescriptor(): INodeProperties {
+	return {
+		displayName: 'Alarms',
+		name: 'alarms',
+		type: 'fixedCollection',
+		typeOptions: { multipleValues: true },
+		default: {},
+		placeholder: 'Add Alarm',
+		options: [{ displayName: 'Alarm', name: 'alarm', values: alarmAddValues() }],
+	};
+}
+
+export function alarmMutationDescriptor(): INodeProperties {
+	return {
+		displayName: 'Alarms',
+		name: 'alarms',
+		type: 'fixedCollection',
+		typeOptions: { multipleValues: true },
+		default: {},
+		placeholder: 'Add Alarm Change',
+		options: [
+			{
+				displayName: 'Change',
+				name: 'change',
+				// eslint-disable-next-line n8n-nodes-base/node-param-fixed-collection-type-unsorted-items -- Accepted alarm workflow orders the operation before its dependent selector and fields.
+				values: [
+					{
+						displayName: 'Operation',
+						name: 'kind',
+						type: 'options',
+						options: [
+							{ name: 'Add', value: 'add' },
+							{ name: 'Edit', value: 'edit' },
+							{ name: 'Remove', value: 'remove' },
+						],
+						default: 'add',
+						required: true,
+					},
+					{
+						displayName: 'Selector Type',
+						name: 'selectorKind',
+						type: 'options',
+						options: [
+							{ name: 'Alarm UID', value: 'uid' },
+							{ name: 'Legacy Position and Fingerprint', value: 'legacy' },
+						],
+						default: 'uid',
+						displayOptions: { show: { kind: ['edit', 'remove'] } },
+					},
+					{
+						displayName: 'Alarm UID',
+						name: 'alarmUid',
+						type: 'string',
+						default: '',
+						displayOptions: { show: { selectorKind: ['uid'] } },
+					},
+					{
+						displayName: 'Position',
+						name: 'position',
+						type: 'number',
+						typeOptions: { minValue: 1, numberPrecision: 0 },
+						default: 1,
+						displayOptions: { show: { selectorKind: ['legacy'] } },
+					},
+					{
+						displayName: 'Fingerprint',
+						name: 'fingerprint',
+						type: 'string',
+						default: '',
+						displayOptions: { show: { selectorKind: ['legacy'] } },
+					},
+					...alarmAddValues().map((property) => ({
+						...property,
+						displayOptions: {
+							...(property.displayOptions ?? {}),
+							show: {
+								...(property.displayOptions?.show ?? {}),
+								kind: property.name === 'action' ? ['add', 'edit'] : ['add'],
+							},
+						},
+					})),
+					{
+						displayName: 'Fields',
+						name: 'fields',
+						type: 'collection',
+						default: {},
+						placeholder: 'Add Field',
+						displayOptions: { show: { kind: ['edit'] } },
+						options: [
+							{
+								displayName: 'Trigger',
+								name: 'trigger',
+								type: 'fixedCollection',
+								typeOptions: { multipleValues: false },
+								default: {},
+								options: [
+									{
+										displayName: 'Change',
+										name: 'change',
+										values: alarmTriggerValues(),
+									},
+								],
+							},
+							{
+								displayName: 'Description',
+								name: 'description',
+								type: 'string',
+								typeOptions: { rows: 3 },
+								default: '',
+								displayOptions: { show: { action: ['display'] } },
+							},
+							{
+								displayName: 'Subject',
+								name: 'subject',
+								type: 'string',
+								default: '',
+								displayOptions: { show: { action: ['email'] } },
+							},
+							{
+								displayName: 'Body',
+								name: 'body',
+								type: 'string',
+								typeOptions: { rows: 3 },
+								default: '',
+								displayOptions: { show: { action: ['email'] } },
+							},
+							alarmRecipientsDescriptor({ show: { action: ['email'] } }),
+						],
+					},
+				],
+			},
+		],
+	};
+}
+
 const GET_MESSAGES = {
 	INVALID_CALENDAR_URL:
 		'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
@@ -345,6 +617,7 @@ const EVENT_CREATE_MESSAGES = {
 	INVALID_CATEGORIES: 'Categories must be a non-empty list of valid iCalendar text values.',
 	INVALID_STATUS: 'Status must be Tentative, Confirmed, or Cancelled.',
 	INVALID_TRANSPARENCY: 'Transparency must be Opaque or Transparent.',
+	INVALID_ALARMS: 'Alarms must contain valid structured calendar alarm values.',
 	INVALID_ADDITIONAL_FIELDS: 'Additional Fields must be an object.',
 	INVALID_TIME_ZONE_MODE: 'Time Zone Mode must be UTC or IANA.',
 	INVALID_TIME_ZONE: 'Time Zone must be a valid IANA time zone identifier.',
@@ -395,6 +668,7 @@ const EVENT_UPDATE_MESSAGES = {
 	INVALID_CATEGORIES: 'Categories must be a non-empty list of valid iCalendar text values.',
 	INVALID_STATUS: 'Status must be Tentative, Confirmed, or Cancelled.',
 	INVALID_TRANSPARENCY: 'Transparency must be Opaque or Transparent.',
+	INVALID_ALARMS: 'Alarms must contain valid structured calendar alarm changes.',
 	UNSUPPORTED_TIME: 'The calendar event uses an unsupported time representation for this patch.',
 	INCOMPATIBLE_PARAMETERS:
 		'The calendar event property parameters are incompatible with this patch.',
@@ -553,6 +827,7 @@ function eventJson(event: CalendarEvent): IDataObject {
 		readonly categories?: readonly string[];
 		readonly status?: CalendarEvent['status'];
 		readonly transparency?: CalendarEvent['transparency'];
+		readonly alarms?: CalendarEvent['alarms'];
 		readonly start?: string;
 		readonly end?: string;
 		readonly timeMode?: string;
@@ -573,6 +848,7 @@ function eventJson(event: CalendarEvent): IDataObject {
 			...(legacy.transparency === undefined
 				? {}
 				: { transparency: legacy.transparency as IDataObject[string] }),
+			...(legacy.alarms === undefined ? {} : { alarms: legacy.alarms as unknown as IDataObject[] }),
 			...(legacy.start === undefined ? {} : { start: legacy.start }),
 			...(legacy.end === undefined ? {} : { end: legacy.end }),
 		};
@@ -591,6 +867,7 @@ function eventJson(event: CalendarEvent): IDataObject {
 		...(event.transparency === undefined
 			? {}
 			: { transparency: event.transparency as IDataObject[string] }),
+		...(event.alarms === undefined ? {} : { alarms: event.alarms as unknown as IDataObject[] }),
 		timeMode: event.timeMode,
 		accessMode: event.accessMode,
 		...(event.timeMode === 'timed'
@@ -847,6 +1124,9 @@ function eventCreateSerializationFailure(error: CalDavICalendarSerializeError): 
 }
 
 function eventCreateFailure(error: unknown): EventCreateFailure {
+	if (error instanceof CalDavCalendarAlarmError) {
+		return { message: error.message, configuration: true };
+	}
 	if (error instanceof CalDavCalendarEventTimeZoneAuthoringError) {
 		return { message: error.message, configuration: true };
 	}
@@ -988,6 +1268,9 @@ function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpd
 }
 
 function eventUpdateFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof CalDavCalendarAlarmError) {
+		return { message: error.message, configuration: true };
+	}
 	if (error instanceof Error && error.message === READ_ONLY_EVENT_UPDATE_MESSAGE) {
 		return { message: READ_ONLY_EVENT_UPDATE_MESSAGE, configuration: true };
 	}
@@ -1095,6 +1378,9 @@ function eventUpsertTransportFailure(error: CalDavTransportError): SafeNodeFailu
 }
 
 function eventUpsertFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof CalDavCalendarAlarmError) {
+		return { message: error.message, configuration: true };
+	}
 	if (
 		error instanceof CalDavCalendarEventUpsertError &&
 		error.code === CalendarEventUpsertFailureCode.CONCURRENCY_CONFLICT
@@ -1476,7 +1762,7 @@ function workflowCalendarDate(
 
 function ownAdditionalField(
 	additionalFields: Record<PropertyKey, unknown>,
-	name: 'description' | 'location' | 'url' | 'categories' | 'status' | 'transparency',
+	name: 'description' | 'location' | 'url' | 'categories' | 'status' | 'transparency' | 'alarms',
 	present: boolean,
 ): { readonly present: boolean; readonly value?: unknown } {
 	if (!present) return { present: false };
@@ -1531,6 +1817,290 @@ function workflowCategories(value: unknown): readonly string[] | undefined {
 		return undefined;
 	}
 }
+
+function exactWorkflowRecord(
+	value: unknown,
+	allowed: readonly string[],
+): Record<string, unknown> | undefined {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+	try {
+		const prototype = Object.getPrototypeOf(value);
+		if (
+			(prototype !== Object.prototype && prototype !== null) ||
+			Object.getOwnPropertySymbols(value).length > 0
+		) {
+			return undefined;
+		}
+		const descriptors = Object.getOwnPropertyDescriptors(value);
+		if (
+			Object.keys(descriptors).some(
+				(key) =>
+					!allowed.includes(key) ||
+					!descriptors[key]!.enumerable ||
+					!('value' in descriptors[key]!) ||
+					descriptors[key]!.value === undefined,
+			)
+		) {
+			return undefined;
+		}
+		return Object.fromEntries(
+			Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]),
+		);
+	} catch {
+		return undefined;
+	}
+}
+
+function workflowRows(value: unknown, wrapper: string): readonly unknown[] | undefined {
+	const outer = exactWorkflowRecord(value, [wrapper]);
+	const rows = outer?.[wrapper];
+	if (!Array.isArray(rows) || rows.length === 0 || Object.keys(rows).length !== rows.length) {
+		return undefined;
+	}
+	return rows;
+}
+
+function workflowAlarmRecipients(value: unknown): readonly string[] | undefined {
+	const rows = workflowRows(value, 'recipient');
+	if (rows === undefined) return undefined;
+	const recipients: string[] = [];
+	for (const candidate of rows) {
+		const row = exactWorkflowRecord(candidate, ['value']);
+		if (row === undefined || typeof row.value !== 'string') return undefined;
+		recipients.push(row.value);
+	}
+	return recipients;
+}
+
+function workflowAlarmTrigger(row: Record<string, unknown>): CalendarAlarmTrigger | undefined {
+	if (row.reference !== 'start' && row.reference !== 'end') return undefined;
+	if (row.direction === 'at') return { reference: row.reference, direction: 'at' };
+	if (row.direction !== 'before' && row.direction !== 'after') return undefined;
+	if (
+		typeof row.value !== 'number' ||
+		(row.unit !== 'minute' && row.unit !== 'hour' && row.unit !== 'day' && row.unit !== 'week')
+	) {
+		return undefined;
+	}
+	return {
+		reference: row.reference,
+		direction: row.direction,
+		value: row.value,
+		unit: row.unit,
+	};
+}
+
+function workflowAlarmInput(rowValue: unknown): CalendarAlarmInput | undefined {
+	const row = exactWorkflowRecord(rowValue, [
+		'action',
+		'reference',
+		'direction',
+		'value',
+		'unit',
+		'description',
+		'subject',
+		'body',
+		'recipients',
+	]);
+	if (row === undefined) return undefined;
+	const trigger = workflowAlarmTrigger(row);
+	if (trigger === undefined) return undefined;
+	if (row.action === 'display') {
+		if (row.description !== undefined && typeof row.description !== 'string') return undefined;
+		return {
+			action: 'display',
+			trigger,
+			...(typeof row.description === 'string' && row.description.length > 0
+				? { description: row.description }
+				: {}),
+		};
+	}
+	if (row.action === 'audio') return { action: 'audio', trigger };
+	if (row.action !== 'email' || typeof row.subject !== 'string' || typeof row.body !== 'string') {
+		return undefined;
+	}
+	const recipients = workflowAlarmRecipients(row.recipients);
+	return recipients === undefined
+		? undefined
+		: { action: 'email', trigger, subject: row.subject, body: row.body, recipients };
+}
+
+function alarmValidationProperty(name: string, text: string): ICalendarProperty {
+	return {
+		kind: 'property',
+		name,
+		parameters: [],
+		value: { kind: 'value', valueType: 'TEXT', raw: text, textValues: [text] },
+	};
+}
+
+function alarmValidationMaster(summary: string): ICalendarComponent {
+	return {
+		kind: 'component',
+		name: 'VEVENT',
+		entries: [
+			alarmValidationProperty('DTSTART', '20400101T000000Z'),
+			alarmValidationProperty('DTEND', '20400101T010000Z'),
+			alarmValidationProperty('SUMMARY', summary),
+		],
+	};
+}
+
+/* eslint-disable n8n-nodes-base/node-execute-block-wrong-error-thrown -- Exported workflow normalizers expose the accepted transport-independent alarm error family; execute maps it to NodeOperationError. */
+export function normalizeAlarmCreateParameter(
+	value: unknown,
+	summary: string,
+): readonly CalendarAlarmInput[] {
+	const rows = workflowRows(value, 'alarm');
+	if (rows === undefined) throw new CalDavCalendarAlarmError('INVALID_INPUT', 'alarms');
+	const alarms = rows.map(workflowAlarmInput);
+	if (alarms.some((alarm) => alarm === undefined)) {
+		throw new CalDavCalendarAlarmError('INVALID_INPUT', 'alarms');
+	}
+	return normalizeCalendarAlarmInputs(
+		alarmValidationMaster(summary),
+		alarms as readonly CalendarAlarmInput[],
+	);
+}
+
+function workflowAlarmSelector(row: Record<string, unknown>): CalendarAlarmSelector | undefined {
+	if (row.selectorKind === 'uid' && typeof row.alarmUid === 'string') {
+		return { kind: 'uid', uid: row.alarmUid };
+	}
+	if (
+		row.selectorKind === 'legacy' &&
+		typeof row.position === 'number' &&
+		typeof row.fingerprint === 'string'
+	) {
+		return { kind: 'legacy', position: row.position, fingerprint: row.fingerprint };
+	}
+	return undefined;
+}
+
+function workflowAlarmEdit(row: Record<string, unknown>): CalendarAlarmMutation | undefined {
+	const selector = workflowAlarmSelector(row);
+	if (
+		selector === undefined ||
+		(row.action !== 'display' && row.action !== 'audio' && row.action !== 'email')
+	) {
+		return undefined;
+	}
+	const fields = exactWorkflowRecord(row.fields, [
+		'trigger',
+		'description',
+		'subject',
+		'body',
+		'recipients',
+	]);
+	if (fields === undefined) return undefined;
+	let trigger: CalendarAlarmTrigger | undefined;
+	if (fields.trigger !== undefined) {
+		const triggerRows = workflowRows(fields.trigger, 'change');
+		const triggerRow =
+			triggerRows?.length === 1
+				? exactWorkflowRecord(triggerRows[0], ['reference', 'direction', 'value', 'unit'])
+				: undefined;
+		if (triggerRow === undefined) return undefined;
+		trigger = workflowAlarmTrigger(triggerRow);
+		if (trigger === undefined) return undefined;
+	}
+	const common = { action: row.action, ...(trigger === undefined ? {} : { trigger }) };
+	if (row.action === 'display') {
+		if (fields.description !== undefined && typeof fields.description !== 'string')
+			return undefined;
+		return {
+			kind: 'edit',
+			selector,
+			alarm: {
+				...common,
+				action: 'display',
+				...(fields.description === undefined ? {} : { description: fields.description }),
+			},
+		};
+	}
+	if (row.action === 'audio')
+		return { kind: 'edit', selector, alarm: { ...common, action: 'audio' } };
+	if (
+		(fields.subject !== undefined && typeof fields.subject !== 'string') ||
+		(fields.body !== undefined && typeof fields.body !== 'string')
+	) {
+		return undefined;
+	}
+	const recipients =
+		fields.recipients === undefined ? undefined : workflowAlarmRecipients(fields.recipients);
+	if (fields.recipients !== undefined && recipients === undefined) return undefined;
+	return {
+		kind: 'edit',
+		selector,
+		alarm: {
+			...common,
+			action: 'email',
+			...(fields.subject === undefined ? {} : { subject: fields.subject as string }),
+			...(fields.body === undefined ? {} : { body: fields.body as string }),
+			...(recipients === undefined ? {} : { recipients }),
+		},
+	};
+}
+
+export function normalizeAlarmMutationParameter(value: unknown): readonly CalendarAlarmMutation[] {
+	const rows = workflowRows(value, 'change');
+	if (rows === undefined) throw new CalDavCalendarAlarmError('INVALID_INPUT', 'alarms');
+	const mutations: CalendarAlarmMutation[] = [];
+	for (const candidate of rows) {
+		const row = exactWorkflowRecord(candidate, [
+			'kind',
+			'selectorKind',
+			'alarmUid',
+			'position',
+			'fingerprint',
+			'action',
+			'reference',
+			'direction',
+			'value',
+			'unit',
+			'description',
+			'subject',
+			'body',
+			'recipients',
+			'fields',
+		]);
+		if (row === undefined) throw new CalDavCalendarAlarmError('INVALID_INPUT', 'alarms');
+		if (row.kind === 'add') {
+			const alarm = workflowAlarmInput(
+				Object.fromEntries(
+					Object.entries(row).filter(([key]) =>
+						[
+							'action',
+							'reference',
+							'direction',
+							'value',
+							'unit',
+							'description',
+							'subject',
+							'body',
+							'recipients',
+						].includes(key),
+					),
+				),
+			);
+			if (alarm === undefined) throw new CalDavCalendarAlarmError('INVALID_INPUT', 'alarms');
+			mutations.push({ kind: 'add', alarm });
+		} else if (row.kind === 'remove') {
+			const selector = workflowAlarmSelector(row);
+			if (selector === undefined)
+				throw new CalDavCalendarAlarmError('INVALID_SELECTOR', 'selector');
+			mutations.push({ kind: 'remove', selector });
+		} else if (row.kind === 'edit') {
+			const edit = workflowAlarmEdit(row);
+			if (edit === undefined) throw new CalDavCalendarAlarmError('INVALID_INPUT', 'alarms');
+			mutations.push(edit);
+		} else {
+			throw new CalDavCalendarAlarmError('INVALID_INPUT', 'alarms');
+		}
+	}
+	return normalizeCalendarAlarmMutations(alarmValidationMaster('Alarm validation'), mutations);
+}
+/* eslint-enable n8n-nodes-base/node-execute-block-wrong-error-thrown */
 
 function eventCreateInput(
 	execution: IExecuteFunctions,
@@ -1646,7 +2216,15 @@ function eventCreateInput(
 		keys.some(
 			(key) =>
 				typeof key !== 'string' ||
-				!['description', 'location', 'url', 'categories', 'status', 'transparency'].includes(key),
+				![
+					'description',
+					'location',
+					'url',
+					'categories',
+					'status',
+					'transparency',
+					'alarms',
+				].includes(key),
 		)
 	) {
 		return EVENT_CREATE_MESSAGES.INVALID_ADDITIONAL_FIELDS;
@@ -1709,6 +2287,15 @@ function eventCreateInput(
 	) {
 		return EVENT_CREATE_MESSAGES.INVALID_TRANSPARENCY;
 	}
+	const alarmsField = ownAdditionalField(additionalFields, 'alarms', keys.includes('alarms'));
+	let alarms: readonly CalendarAlarmInput[] | undefined;
+	if (alarmsField.present) {
+		try {
+			alarms = normalizeAlarmCreateParameter(alarmsField.value, summary);
+		} catch {
+			return EVENT_CREATE_MESSAGES.INVALID_ALARMS;
+		}
+	}
 
 	return Object.freeze({
 		calendarUrl,
@@ -1723,6 +2310,7 @@ function eventCreateInput(
 		...(transparencyField.present
 			? { transparency: transparencyField.value as CalendarEventTransparency }
 			: {}),
+		...(alarms === undefined ? {} : { alarms }),
 	});
 }
 
@@ -1881,7 +2469,15 @@ function eventUpsertInput(
 	if (
 		Object.keys(descriptors).some(
 			(key) =>
-				!['description', 'location', 'url', 'categories', 'status', 'transparency'].includes(key) ||
+				![
+					'description',
+					'location',
+					'url',
+					'categories',
+					'status',
+					'transparency',
+					'alarms',
+				].includes(key) ||
 				!descriptors[key]!.enumerable ||
 				!('value' in descriptors[key]!),
 		)
@@ -1895,6 +2491,7 @@ function eventUpsertInput(
 		categories?: OptionalFieldPatch<readonly string[]>;
 		status?: OptionalFieldPatch<CalendarEventStatus>;
 		transparency?: OptionalFieldPatch<CalendarEventTransparency>;
+		alarms?: readonly CalendarAlarmMutation[];
 	} = {};
 	for (const [name, message, validator] of [
 		['description', EVENT_UPSERT_MESSAGES.INVALID_DESCRIPTION, isValidICalendarText],
@@ -1933,6 +2530,13 @@ function eventUpsertInput(
 		);
 		if ('error' in extracted) return extracted.error;
 		patches.transparency = extracted.patch;
+	}
+	if (descriptors.alarms !== undefined) {
+		try {
+			patches.alarms = normalizeAlarmMutationParameter(descriptors.alarms.value);
+		} catch {
+			return EVENT_UPSERT_MESSAGES.INVALID_ALARMS;
+		}
 	}
 	if (timeInput.timeMode === 'timed') {
 		if (timeInput.end.getTime() <= timeInput.start.getTime()) {
@@ -2002,6 +2606,7 @@ function eventUpdatePatch(
 		'categories',
 		'status',
 		'transparency',
+		'alarms',
 	]);
 	if (
 		keys.some((key) => {
@@ -2036,6 +2641,7 @@ function eventUpdatePatch(
 		categories?: OptionalFieldPatch<readonly string[]>;
 		status?: OptionalFieldPatch<CalendarEventStatus>;
 		transparency?: OptionalFieldPatch<CalendarEventTransparency>;
+		alarms?: readonly CalendarAlarmMutation[];
 	} = { timeMode };
 	if (descriptors.timeZone !== undefined) {
 		const outer = descriptors.timeZone.value;
@@ -2148,6 +2754,13 @@ function eventUpdatePatch(
 		);
 		if ('error' in extracted) return extracted.error;
 		patch.transparency = extracted.patch;
+	}
+	if (descriptors.alarms !== undefined) {
+		try {
+			patch.alarms = normalizeAlarmMutationParameter(descriptors.alarms.value);
+		} catch {
+			return EVENT_UPDATE_MESSAGES.INVALID_ALARMS;
+		}
 	}
 	return Object.freeze(patch) as CalendarEventPatch;
 }
@@ -2896,6 +3509,7 @@ export class CalDav implements INodeType {
 					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
 				},
 				options: [
+					alarmCreateDescriptor(),
 					categoriesDescriptor('categories', 'Categories'),
 					{
 						displayName: 'Description',
@@ -3061,6 +3675,7 @@ export class CalDav implements INodeType {
 					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
 				},
 				options: [
+					alarmMutationDescriptor(),
 					optionalMetadataPatchDescriptor('categories', 'Categories'),
 					...(['description', 'location'] as const).map((name) => ({
 						displayName: `${name[0]!.toUpperCase()}${name.slice(1)}`,
@@ -3342,6 +3957,7 @@ export class CalDav implements INodeType {
 						type: 'string',
 						default: '',
 					},
+					alarmMutationDescriptor(),
 					optionalMetadataPatchDescriptor('categories', 'Categories'),
 					{
 						displayName: 'Description',

@@ -279,6 +279,7 @@ describe('CalDAV Event Create metadata', () => {
 			default: {},
 		});
 		expect(additional?.options?.map(({ name }) => name)).toEqual([
+			'alarms',
 			'categories',
 			'description',
 			'location',

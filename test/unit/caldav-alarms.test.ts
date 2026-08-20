@@ -309,7 +309,7 @@ describe('structured VALARM projection', () => {
 		['TRIGGER:PT0S', { reference: 'start', direction: 'at' }],
 		['TRIGGER:-PT0M', { reference: 'start', direction: 'at' }],
 		['TRIGGER:+P0D', { reference: 'start', direction: 'at' }],
-		['TRIGGER;RELATED=END:PT0W', { reference: 'end', direction: 'at' }],
+		['TRIGGER;RELATED=END:P0W', { reference: 'end', direction: 'at' }],
 		['TRIGGER:-PT1M', { reference: 'start', direction: 'before', value: 1, unit: 'minute' }],
 		['TRIGGER:PT2H', { reference: 'start', direction: 'after', value: 2, unit: 'hour' }],
 		['TRIGGER;RELATED=END:-P3D', { reference: 'end', direction: 'before', value: 3, unit: 'day' }],
@@ -353,7 +353,7 @@ describe('structured VALARM projection', () => {
 				parse(
 					timedMaster([
 						'begin:valarm',
-						'action:display',
+						'action:DISPLAY',
 						'trigger:-PT5M',
 						'DESCRIPTION:Legacy\\, alarm',
 						'end:valarm',
