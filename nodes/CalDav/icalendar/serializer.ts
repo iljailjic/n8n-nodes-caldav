@@ -13,7 +13,14 @@ import type {
 	ICalendarProperty,
 	ICalendarResource,
 } from './parser';
-import type { CalendarEventStatus, CalendarEventTransparency } from './eventReadModel';
+import type {
+	CalendarDateString,
+	CalendarEventStatus,
+	CalendarEventTransparency,
+	UtcDateTimeString,
+} from './eventReadModel';
+import { serializeRecurrenceRule } from './recurrence';
+import type { RecurrenceRule, RecurrenceStartContext } from './recurrence';
 import { projectInstantInTimeZone } from './timeZones';
 import type { CalendarEventTimeZone, IanaTimeZoneId, LocalDateTimeString } from './timeZones';
 import { isAbsoluteICalendarUri } from './uri';
@@ -30,6 +37,7 @@ interface BasicEventSerializationCommon {
 	readonly categories?: readonly string[];
 	readonly status?: CalendarEventStatus;
 	readonly transparency?: CalendarEventTransparency;
+	readonly recurrence?: RecurrenceRule;
 }
 
 export type BasicUtcEventSerializationInput = BasicEventSerializationCommon &
@@ -72,7 +80,8 @@ export type BasicUtcEventSerializationField =
 	| 'url'
 	| 'categories'
 	| 'status'
-	| 'transparency';
+	| 'transparency'
+	| 'recurrence';
 
 export const CalDavICalendarSerializeErrorCode = Object.freeze({
 	INVALID_INPUT: 'INVALID_INPUT',
@@ -119,6 +128,7 @@ interface BasicInputSnapshotCommon {
 	readonly categories?: readonly string[];
 	readonly status?: CalendarEventStatus;
 	readonly transparency?: CalendarEventTransparency;
+	readonly recurrence?: RecurrenceRule;
 }
 
 type BasicInputSnapshot = BasicInputSnapshotCommon &
@@ -433,6 +443,7 @@ function snapshotBasicInput(
 	const categories = authoredCategories(input.categories);
 	const status = authoredStatus(input.status);
 	const transparency = authoredTransparency(input.transparency);
+	const recurrence = input.recurrence;
 	if (
 		(time.timeMode === 'timed' && time.end <= time.start) ||
 		(time.timeMode === 'allDay' && time.endDate <= time.startDate)
@@ -450,6 +461,7 @@ function snapshotBasicInput(
 		categories,
 		status,
 		transparency,
+		recurrence,
 	};
 }
 
@@ -530,33 +542,53 @@ function basicResource(
 	) {
 		fail('INVALID_INPUT');
 	}
-	const timeProperties =
-		input.timeMode === 'allDay'
-			? [
-					dateProperty('DTSTART', input.startDate.split('-').join('')),
-					dateProperty('DTEND', input.endDate.split('-').join('')),
-				]
-			: input.timeZone.timeZoneMode === 'utc'
-				? [
-						rawProperty('DTSTART', 'DATE-TIME', formatUtcDateTime(input.start)),
-						rawProperty('DTEND', 'DATE-TIME', formatUtcDateTime(input.end)),
-					]
-				: [
-						ianaDateTimeProperty(
-							'DTSTART',
-							projectInstant(new Date(input.start), input.timeZone.timeZone).replace(/[-:]/g, ''),
-							input.timeZone.timeZone,
-						),
-						ianaDateTimeProperty(
-							'DTEND',
-							projectInstant(new Date(input.end), input.timeZone.timeZone).replace(/[-:]/g, ''),
-							input.timeZone.timeZone,
-						),
-					];
+	let recurrenceStart: RecurrenceStartContext;
+	let timeProperties: ICalendarProperty[];
+	if (input.timeMode === 'allDay') {
+		recurrenceStart = {
+			timeMode: 'allDay',
+			startDate: input.startDate as CalendarDateString,
+		};
+		timeProperties = [
+			dateProperty('DTSTART', input.startDate.split('-').join('')),
+			dateProperty('DTEND', input.endDate.split('-').join('')),
+		];
+	} else if (input.timeZone.timeZoneMode === 'utc') {
+		recurrenceStart = {
+			timeMode: 'timed',
+			timeZoneMode: 'utc',
+			start: new Date(input.start).toISOString().replace('.000Z', 'Z') as UtcDateTimeString,
+		};
+		timeProperties = [
+			rawProperty('DTSTART', 'DATE-TIME', formatUtcDateTime(input.start)),
+			rawProperty('DTEND', 'DATE-TIME', formatUtcDateTime(input.end)),
+		];
+	} else {
+		const startLocal = projectInstant(new Date(input.start), input.timeZone.timeZone);
+		recurrenceStart = {
+			timeMode: 'timed',
+			timeZoneMode: 'iana',
+			start: new Date(input.start).toISOString().replace('.000Z', 'Z') as UtcDateTimeString,
+			startLocal,
+		};
+		timeProperties = [
+			ianaDateTimeProperty('DTSTART', startLocal.replace(/[-:]/g, ''), input.timeZone.timeZone),
+			ianaDateTimeProperty(
+				'DTEND',
+				projectInstant(new Date(input.end), input.timeZone.timeZone).replace(/[-:]/g, ''),
+				input.timeZone.timeZone,
+			),
+		];
+	}
+	const recurrenceProperty =
+		input.recurrence === undefined
+			? undefined
+			: rawProperty('RRULE', 'RECUR', serializeRecurrenceRule(input.recurrence, recurrenceStart));
 	const eventEntries: ICalendarEntry[] = [
 		textProperty('UID', input.uid),
 		rawProperty('DTSTAMP', 'DATE-TIME', formatUtcDateTime(input.dtstamp)),
 		...timeProperties,
+		...(recurrenceProperty === undefined ? [] : [recurrenceProperty]),
 		textProperty('SUMMARY', input.summary),
 	];
 	if (input.description !== undefined) {

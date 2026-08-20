@@ -174,6 +174,7 @@ beforeEach(() => {
 			...(input.categories === undefined ? {} : { categories: input.categories }),
 			...(input.status === undefined ? {} : { status: input.status }),
 			...(input.transparency === undefined ? {} : { transparency: input.transparency }),
+			...(input.recurrence === undefined ? {} : { recurrence: input.recurrence }),
 		}),
 	);
 	TRANSPORT.request.mockReset();
@@ -283,6 +284,8 @@ describe('CalDAV Event Create metadata', () => {
 			'categories',
 			'description',
 			'location',
+			'recurrence',
+			'recurrence',
 			'status',
 			'transparency',
 			'url',
@@ -338,6 +341,14 @@ describe('CalDAV Event Create input and output mapping', () => {
 					},
 					status: 'cancelled',
 					transparency: 'transparent',
+					recurrence: {
+						rule: {
+							frequency: 'weekly',
+							interval: 2,
+							endMode: 'count',
+							count: 4,
+						},
+					},
 				},
 			}),
 			parameters({ uid: 'second', start: startDate, end: luxonEnd }),
@@ -353,6 +364,11 @@ describe('CalDAV Event Create input and output mapping', () => {
 					categories: ['Planning, review', '  '],
 					status: 'cancelled',
 					transparency: 'transparent',
+					recurrence: {
+						frequency: 'weekly',
+						interval: 2,
+						end: { kind: 'count', count: 4 },
+					},
 				}),
 				pairedItem: { item: 0 },
 			},
@@ -375,6 +391,11 @@ describe('CalDAV Event Create input and output mapping', () => {
 			categories: ['Planning, review', '  '],
 			status: 'cancelled',
 			transparency: 'transparent',
+			recurrence: {
+				frequency: 'weekly',
+				interval: 2,
+				end: { kind: 'count', count: 4 },
+			},
 		});
 		const secondInput = mocks.createCalendarEvent.mock.calls[1]?.[1];
 		expect(secondInput.start).toEqual(startDate);

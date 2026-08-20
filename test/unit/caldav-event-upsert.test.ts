@@ -58,6 +58,7 @@ function eventIcs(
 		readonly floating?: boolean;
 		readonly modified?: boolean;
 		readonly unknown?: boolean;
+		readonly recurrence?: string;
 	} = {},
 ): string {
 	return [
@@ -70,6 +71,7 @@ function eventIcs(
 		...(options.modified === true ? ['LAST-MODIFIED:20400103T000000Z'] : []),
 		`DTSTART:20400102T100000${options.floating === true ? '' : 'Z'}`,
 		`DTEND:20400102T110000${options.floating === true ? '' : 'Z'}`,
+		...(options.recurrence === undefined ? [] : [`RRULE:${options.recurrence}`]),
 		`SUMMARY:${options.summary ?? 'Desired summary'}`,
 		...(options.description === undefined ? [] : [`DESCRIPTION:${options.description}`]),
 		...(options.location === undefined ? [] : [`LOCATION:${options.location}`]),
@@ -359,6 +361,110 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 			},
 		});
 		expect(Object.isFrozen(result)).toBe(true);
+	});
+
+	it('treats a lexical-only recurrence difference as a REPORT-only semantic no-op', async () => {
+		const requests = transport(async () =>
+			response(207, CALENDAR_URL, {
+				body: multistatus(
+					eventResponse('recurring.ics', SUPPLIED_UID, {
+						etag: '"recurrence-etag"',
+						ics: eventIcs(SUPPLIED_UID, {
+							recurrence: 'INTERVAL=2;FREQ=WEEKLY',
+						}),
+					}),
+				),
+			}),
+		);
+		const deps = dependencies();
+
+		await expect(
+			upsertCalendarEvent(
+				requests,
+				timedInput({
+					recurrence: { kind: 'set', value: { frequency: 'weekly', interval: 2 } },
+				}),
+				deps,
+			),
+		).resolves.toMatchObject({
+			action: 'update',
+			event: { recurrence: { frequency: 'weekly', interval: 2 } },
+		});
+		expect(methods(requests)).toEqual(['REPORT']);
+		expect(deps.clock).not.toHaveBeenCalled();
+		expect(deps.uidFactory).not.toHaveBeenCalled();
+	});
+
+	it('updates only the summary for an equivalent Prague recurrence with EXDATE', async () => {
+		const current = SUPPORTED_BARE_IANA_EVENT.replace(
+			'UID:synthetic-time-zone-event',
+			`UID:${SUPPLIED_UID}`,
+		)
+			.replace('SUMMARY:Synthetic event', 'SUMMARY:Before update')
+			.replace(
+				'DTEND;TZID=Europe/Prague:20400115T110000',
+				[
+					'DTEND;TZID=Europe/Prague:20400115T110000',
+					'RRULE:FREQ=WEEKLY;COUNT=3',
+					'EXDATE;TZID=Europe/Prague:20400122T100000',
+				].join('\r\n'),
+			);
+		const resourceUrl = new URL('prague-recurrence.ics', CALENDAR_URL).href;
+		let submitted = '';
+		const requests = transport(async (request) => {
+			if (request.method === CalDavMethod.REPORT) {
+				return response(207, CALENDAR_URL, {
+					body: multistatus(
+						eventResponse('prague-recurrence.ics', SUPPLIED_UID, {
+							etag: '"recurrence-etag"',
+							ics: current,
+						}),
+					),
+				});
+			}
+			if (request.method === CalDavMethod.PUT) {
+				submitted = request.body!;
+				return response(204, resourceUrl, { etag: '"put-etag"' });
+			}
+			return response(200, resourceUrl, { etag: '"confirmed-etag"', body: submitted });
+		});
+		const timeZone = canonicalizeIanaTimeZone('Europe/Prague');
+		bindCalendarEventTimeZoneExecutionContext(requests, {
+			resolveReference: vi.fn().mockResolvedValue({
+				timeZone,
+				etag: '"reference"',
+				calendarData: TZDIST_ZONE_RESPONSE,
+				ruleSource: 'vtimezone' as const,
+			}),
+		});
+		const deps = dependencies();
+
+		await expect(
+			upsertCalendarEvent(
+				requests,
+				timedInput({
+					start: new Date('2040-01-15T08:00:00Z'),
+					end: new Date('2040-01-15T09:00:00Z'),
+					timeZone: { timeZoneMode: 'iana', timeZone },
+					summary: 'After update',
+				}),
+				deps,
+			),
+		).resolves.toMatchObject({
+			action: 'update',
+			event: {
+				summary: 'After update',
+				recurrence: { frequency: 'weekly', end: { kind: 'count', count: 3 } },
+			},
+		});
+		expect(methods(requests)).toEqual(['REPORT', 'PUT', 'GET']);
+		expect(submitted).toContain('SUMMARY:After update');
+		expect(submitted).toContain('RRULE:FREQ=WEEKLY;COUNT=3');
+		expect(submitted).toContain('EXDATE;TZID=Europe/Prague:20400122T100000');
+		expect(submitted).toContain('DTSTART;TZID=Europe/Prague:20400115T100000');
+		expect(submitted).toContain('DTEND;TZID=Europe/Prague:20400115T110000');
+		expect(deps.clock).toHaveBeenCalledOnce();
+		expect(deps.uidFactory).not.toHaveBeenCalled();
 	});
 
 	it('updates one unique match with the exact lookup ETag and authoritative GET', async () => {

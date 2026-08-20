@@ -267,6 +267,8 @@ describe('CalDAV Event Upsert metadata', () => {
 			'categories',
 			'description',
 			'location',
+			'recurrence',
+			'recurrence',
 			'status',
 			'transparency',
 			'url',

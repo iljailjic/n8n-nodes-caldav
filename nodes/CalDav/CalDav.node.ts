@@ -80,6 +80,7 @@ import type {
 	CalendarEvent,
 	CalendarEventStatus,
 	CalendarEventTransparency,
+	UtcDateTimeString,
 } from './icalendar/eventReadModel';
 import { CalDavICalendarParseError } from './icalendar/parser';
 import type { ICalendarComponent, ICalendarProperty } from './icalendar/parser';
@@ -328,7 +329,10 @@ export function recurrenceRuleDescriptor(
 	};
 }
 
-export function recurrencePatchDescriptor(timeMode: 'timed' | 'allDay'): INodeProperties {
+export function recurrencePatchDescriptor(
+	timeMode: 'timed' | 'allDay',
+	displayOptions?: INodeProperties['displayOptions'],
+): INodeProperties {
 	const value = recurrenceRuleDescriptor(timeMode, { show: { action: ['set'] } });
 	return {
 		displayName: 'Recurrence',
@@ -337,6 +341,7 @@ export function recurrencePatchDescriptor(timeMode: 'timed' | 'allDay'): INodePr
 		typeOptions: { multipleValues: false },
 		default: {},
 		required: true,
+		...(displayOptions === undefined ? {} : { displayOptions }),
 		options: [
 			{
 				displayName: 'Change',
@@ -439,6 +444,10 @@ export function normalizeRecurrenceParameter(
 	value: unknown,
 	start: RecurrenceStartContext,
 ): RecurrenceRule {
+	return normalizeRecurrenceRule(recurrenceParameterValue(value, start.timeMode), start);
+}
+
+function recurrenceParameterValue(value: unknown, timeMode: 'timed' | 'allDay'): RecurrenceRule {
 	const outer = recurrenceUiRecord(value, ['rule']);
 	if (outer.rule === undefined) return recurrenceUiError('INVALID_INPUT');
 	const rule = recurrenceUiRecord(outer.rule.value, [
@@ -467,7 +476,7 @@ export function normalizeRecurrenceParameter(
 		if (rule.until === undefined || rule.count !== undefined)
 			return recurrenceUiError('INVALID_END', 'end');
 		normalized.end =
-			start.timeMode === 'allDay'
+			timeMode === 'allDay'
 				? { kind: 'until', value: { kind: 'date', date: rule.until.value } }
 				: { kind: 'until', value: { kind: 'dateTime', dateTime: rule.until.value } };
 	} else {
@@ -499,7 +508,30 @@ export function normalizeRecurrenceParameter(
 	) {
 		normalized.weekStart = rule.weekStart.value;
 	}
-	return normalizeRecurrenceRule(normalized, start);
+	return normalized as unknown as RecurrenceRule;
+}
+
+function recurrenceStartForInput(
+	timeInput:
+		| {
+				readonly timeMode: 'timed';
+				readonly start: Date;
+				readonly timeZone: CalendarEventTimeZone;
+		  }
+		| { readonly timeMode: 'allDay'; readonly startDate: CalendarDateString },
+): RecurrenceStartContext {
+	if (timeInput.timeMode === 'allDay') {
+		return { timeMode: 'allDay', startDate: timeInput.startDate };
+	}
+	const start = timeInput.start.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
+	return timeInput.timeZone.timeZoneMode === 'utc'
+		? { timeMode: 'timed', timeZoneMode: 'utc', start }
+		: {
+				timeMode: 'timed',
+				timeZoneMode: 'iana',
+				start,
+				startLocal: projectInstantInTimeZone(timeInput.start, timeInput.timeZone.timeZone),
+			};
 }
 
 function categoriesDescriptor(
@@ -1485,6 +1517,9 @@ function eventCreateSerializationFailure(error: CalDavICalendarSerializeError): 
 }
 
 function eventCreateFailure(error: unknown): EventCreateFailure {
+	if (error instanceof CalDavRecurrenceRuleError) {
+		return { message: error.message, configuration: true };
+	}
 	if (error instanceof CalDavCalendarAlarmError) {
 		return { message: error.message, configuration: true };
 	}
@@ -1604,6 +1639,8 @@ function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpd
 			return { message: EVENT_UPDATE_MESSAGES.INVALID_URL, configuration: true };
 		case CalendarEventPatchErrorCode.UNSUPPORTED_TIME:
 			return { message: EVENT_UPDATE_MESSAGES.UNSUPPORTED_TIME, configuration: false };
+		case CalendarEventPatchErrorCode.UNSAFE_RECURRENCE_MUTATION:
+			return { message: error.message, configuration: true };
 		case CalendarEventPatchErrorCode.INCOMPATIBLE_PARAMETERS:
 			return { message: EVENT_UPDATE_MESSAGES.INCOMPATIBLE_PARAMETERS, configuration: false };
 		case CalendarEventPatchErrorCode.AMBIGUOUS_PROPERTY:
@@ -1629,6 +1666,9 @@ function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpd
 }
 
 function eventUpdateFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof CalDavRecurrenceRuleError) {
+		return { message: error.message, configuration: true };
+	}
 	if (error instanceof CalDavCalendarAlarmError) {
 		return { message: error.message, configuration: true };
 	}
@@ -1739,6 +1779,9 @@ function eventUpsertTransportFailure(error: CalDavTransportError): SafeNodeFailu
 }
 
 function eventUpsertFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof CalDavRecurrenceRuleError) {
+		return { message: error.message, configuration: true };
+	}
 	if (error instanceof CalDavCalendarAlarmError) {
 		return { message: error.message, configuration: true };
 	}
@@ -2123,7 +2166,15 @@ function workflowCalendarDate(
 
 function ownAdditionalField(
 	additionalFields: Record<PropertyKey, unknown>,
-	name: 'description' | 'location' | 'url' | 'categories' | 'status' | 'transparency' | 'alarms',
+	name:
+		| 'description'
+		| 'location'
+		| 'url'
+		| 'categories'
+		| 'status'
+		| 'transparency'
+		| 'alarms'
+		| 'recurrence',
 	present: boolean,
 ): { readonly present: boolean; readonly value?: unknown } {
 	if (!present) return { present: false };
@@ -2587,6 +2638,7 @@ function eventCreateInput(
 					'status',
 					'transparency',
 					'alarms',
+					'recurrence',
 				].includes(key),
 		)
 	) {
@@ -2659,6 +2711,24 @@ function eventCreateInput(
 			return EVENT_CREATE_MESSAGES.INVALID_ALARMS;
 		}
 	}
+	const recurrenceField = ownAdditionalField(
+		additionalFields,
+		'recurrence',
+		keys.includes('recurrence'),
+	);
+	let recurrence: RecurrenceRule | undefined;
+	if (recurrenceField.present) {
+		try {
+			recurrence = normalizeRecurrenceParameter(
+				recurrenceField.value,
+				recurrenceStartForInput(timeInput),
+			);
+		} catch (error) {
+			return error instanceof CalDavRecurrenceRuleError
+				? error.message
+				: EVENT_CREATE_MESSAGES.GENERIC;
+		}
+	}
 
 	return Object.freeze({
 		calendarUrl,
@@ -2674,6 +2744,7 @@ function eventCreateInput(
 			? { transparency: transparencyField.value as CalendarEventTransparency }
 			: {}),
 		...(alarms === undefined ? {} : { alarms }),
+		...(recurrence === undefined ? {} : { recurrence }),
 	});
 }
 
@@ -2730,7 +2801,9 @@ function optionalUpdatePatchValue<T>(
 			return { error: invalidValueMessage };
 		}
 		return { patch: { kind: 'set', value: validatedValue } };
-	} catch {
+	} catch (error) {
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- This pure extractor preserves the typed recurrence failure for the operation boundary to map to an item-indexed NodeOperationError.
+		if (error instanceof CalDavRecurrenceRuleError) throw error;
 		return { error: invalidValueMessage };
 	}
 }
@@ -2840,6 +2913,7 @@ function eventUpsertInput(
 					'status',
 					'transparency',
 					'alarms',
+					'recurrence',
 				].includes(key) ||
 				!descriptors[key]!.enumerable ||
 				!('value' in descriptors[key]!),
@@ -2855,6 +2929,7 @@ function eventUpsertInput(
 		status?: OptionalFieldPatch<CalendarEventStatus>;
 		transparency?: OptionalFieldPatch<CalendarEventTransparency>;
 		alarms?: readonly CalendarAlarmMutation[];
+		recurrence?: OptionalFieldPatch<RecurrenceRule>;
 	} = {};
 	for (const [name, message, validator] of [
 		['description', EVENT_UPSERT_MESSAGES.INVALID_DESCRIPTION, isValidICalendarText],
@@ -2899,6 +2974,21 @@ function eventUpsertInput(
 			patches.alarms = normalizeAlarmMutationParameter(descriptors.alarms.value);
 		} catch {
 			return EVENT_UPSERT_MESSAGES.INVALID_ALARMS;
+		}
+	}
+	if (descriptors.recurrence !== undefined) {
+		try {
+			const extracted = optionalUpdatePatchValue(
+				descriptors.recurrence.value,
+				EVENT_UPSERT_MESSAGES.INVALID_ADDITIONAL_FIELDS,
+				(value) => normalizeRecurrenceParameter(value, recurrenceStartForInput(timeInput)),
+			);
+			if ('error' in extracted) return extracted.error;
+			patches.recurrence = extracted.patch;
+		} catch (error) {
+			return error instanceof CalDavRecurrenceRuleError
+				? error.message
+				: EVENT_UPSERT_MESSAGES.INVALID_ADDITIONAL_FIELDS;
 		}
 	}
 	if (timeInput.timeMode === 'timed') {
@@ -2970,6 +3060,7 @@ function eventUpdatePatch(
 		'status',
 		'transparency',
 		'alarms',
+		'recurrence',
 	]);
 	if (
 		keys.some((key) => {
@@ -3005,6 +3096,7 @@ function eventUpdatePatch(
 		status?: OptionalFieldPatch<CalendarEventStatus>;
 		transparency?: OptionalFieldPatch<CalendarEventTransparency>;
 		alarms?: readonly CalendarAlarmMutation[];
+		recurrence?: OptionalFieldPatch<RecurrenceRule>;
 	} = { timeMode };
 	if (descriptors.timeZone !== undefined) {
 		const outer = descriptors.timeZone.value;
@@ -3123,6 +3215,21 @@ function eventUpdatePatch(
 			patch.alarms = normalizeAlarmMutationParameter(descriptors.alarms.value);
 		} catch {
 			return EVENT_UPDATE_MESSAGES.INVALID_ALARMS;
+		}
+	}
+	if (descriptors.recurrence !== undefined) {
+		try {
+			const extracted = optionalUpdatePatchValue(
+				descriptors.recurrence.value,
+				EVENT_UPDATE_MESSAGES.INVALID_FIELDS,
+				(value) => recurrenceParameterValue(value, timeMode),
+			);
+			if ('error' in extracted) return extracted.error;
+			patch.recurrence = extracted.patch;
+		} catch (error) {
+			return error instanceof CalDavRecurrenceRuleError
+				? error.message
+				: EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
 		}
 	}
 	return Object.freeze(patch) as CalendarEventPatch;
@@ -3887,6 +3994,8 @@ export class CalDav implements INodeType {
 						type: 'string',
 						default: '',
 					},
+					recurrenceRuleDescriptor('timed', { show: { timeMode: ['timed'] } }),
+					recurrenceRuleDescriptor('allDay', { show: { timeMode: ['allDay'] } }),
 					metadataEnumDescriptor('status', 'Status', STATUS_OPTIONS),
 					metadataEnumDescriptor('transparency', 'Transparency', TRANSPARENCY_OPTIONS),
 					{
@@ -4076,6 +4185,8 @@ export class CalDav implements INodeType {
 							},
 						],
 					})),
+					recurrencePatchDescriptor('timed', { show: { timeMode: ['timed'] } }),
+					recurrencePatchDescriptor('allDay', { show: { timeMode: ['allDay'] } }),
 					optionalMetadataPatchDescriptor('status', 'Status'),
 					optionalMetadataPatchDescriptor('transparency', 'Transparency'),
 					...(['url'] as const).map((name) => ({
@@ -4393,6 +4504,8 @@ export class CalDav implements INodeType {
 							},
 						],
 					},
+					recurrencePatchDescriptor('timed', { show: { timeMode: ['timed'] } }),
+					recurrencePatchDescriptor('allDay', { show: { timeMode: ['allDay'] } }),
 					optionalMetadataPatchDescriptor('status', 'Status'),
 					optionalMetadataPatchDescriptor('transparency', 'Transparency'),
 					{

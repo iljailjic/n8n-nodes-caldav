@@ -9,6 +9,7 @@ import type {
 import type { CalendarEventTimeZone } from '../icalendar/timeZones';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type { CalendarAlarmInput } from '../icalendar/alarms';
+import type { RecurrenceRule } from '../icalendar/recurrence';
 import { CalDavTransportError } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import type { AbsoluteHttpUrl } from '../transport/url';
@@ -29,6 +30,7 @@ interface CalendarEventCreateCommon {
 	readonly categories?: readonly string[];
 	readonly status?: CalendarEventStatus;
 	readonly transparency?: CalendarEventTransparency;
+	readonly recurrence?: RecurrenceRule;
 	readonly alarms?: readonly CalendarAlarmInput[];
 }
 
