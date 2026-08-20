@@ -1128,6 +1128,122 @@ describe('Radicale calendar-event UID resolution', () => {
 });
 
 describe('Radicale collision-safe Event Create', () => {
+	it('round-trips multiple alarms through targeted edit, remove, and add', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'multiple-alarms', 'Multiple Alarms'),
+			);
+			const uid = `multiple-alarms-${run.identity}@example.test`;
+			const created = await createCalendarEvent(
+				transport(run),
+				{
+					calendarUrl,
+					uid,
+					start: new Date('2040-02-03T10:00:00Z'),
+					end: new Date('2040-02-03T11:00:00Z'),
+					summary: 'Alarm lifecycle',
+					alarms: [
+						{
+							action: 'display',
+							trigger: {
+								reference: 'start',
+								direction: 'before',
+								value: 15,
+								unit: 'minute',
+							},
+						},
+						{ action: 'audio', trigger: { reference: 'end', direction: 'at' } },
+						{
+							action: 'email',
+							trigger: {
+								reference: 'start',
+								direction: 'after',
+								value: 1,
+								unit: 'hour',
+							},
+							subject: 'Alarm subject',
+							body: 'Alarm body',
+							recipients: ['mailto:One@Example.test'],
+						},
+					],
+				},
+				() => new Date('2040-02-01T00:00:00Z'),
+			);
+			const display = created.alarms?.find((alarm) =>
+				'kind' in alarm ? false : alarm.action === 'display',
+			);
+			const audio = created.alarms?.find((alarm) =>
+				'kind' in alarm ? false : alarm.action === 'audio',
+			);
+			if (
+				display === undefined ||
+				audio === undefined ||
+				display.uid === undefined ||
+				audio.uid === undefined
+			) {
+				throw new Error('Created alarm selectors are missing.');
+			}
+
+			const updated = await updateCalendarEvent(
+				transport(run),
+				{
+					calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+					patch: {
+						alarms: [
+							{
+								kind: 'edit',
+								selector: { kind: 'uid', uid: display.uid },
+								alarm: {
+									action: 'display',
+									trigger: {
+										reference: 'start',
+										direction: 'before',
+										value: 30,
+										unit: 'minute',
+									},
+								},
+							},
+							{ kind: 'remove', selector: { kind: 'uid', uid: audio.uid } },
+							{
+								kind: 'add',
+								alarm: {
+									action: 'display',
+									trigger: { reference: 'end', direction: 'at' },
+									description: 'Added reminder',
+								},
+							},
+						],
+					} as CalendarEventPatch,
+				},
+				() => new Date('2040-02-01T00:00:01Z'),
+			);
+			expect(updated.alarms).toHaveLength(3);
+			expect(updated.alarms).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						uid: display.uid,
+						action: 'display',
+						trigger: expect.objectContaining({ direction: 'before', value: 30 }),
+					}),
+					expect.objectContaining({
+						action: 'display',
+						description: 'Added reminder',
+					}),
+				]),
+			);
+			expect(updated.alarms).not.toEqual(
+				expect.arrayContaining([expect.objectContaining({ uid: audio.uid })]),
+			);
+
+			const retainedBody = await (await authenticatedFetch(run, created.resourceUrl)).text();
+			expect(retainedBody).not.toContain(`UID:${audio.uid}`);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+
 	it('generates a canonical UUID for blank node UID and reads back one matching VEVENT identity', async () => {
 		const run = await startRun();
 		try {

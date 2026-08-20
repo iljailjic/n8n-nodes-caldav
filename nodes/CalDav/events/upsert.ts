@@ -1,6 +1,15 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The application service exposes sanitized domain failures outside the n8n UI boundary. */
 
+import { randomUUID } from 'node:crypto';
+
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
+import { normalizeCalendarAlarmMutations } from '../icalendar/alarms';
+import type {
+	CalendarAlarmInput,
+	CalendarAlarmMutation,
+	CalendarAlarmUidGenerator,
+} from '../icalendar/alarms';
+import type { ICalendarComponent, ICalendarProperty } from '../icalendar/parser';
 import type {
 	CalendarDateString,
 	CalendarEvent,
@@ -58,6 +67,7 @@ interface CalendarEventUpsertCommon {
 	readonly categories?: OptionalFieldPatch<readonly string[]>;
 	readonly status?: OptionalFieldPatch<CalendarEventStatus>;
 	readonly transparency?: OptionalFieldPatch<CalendarEventTransparency>;
+	readonly alarms?: readonly CalendarAlarmMutation[];
 }
 
 export type CalendarEventUpsertInput = CalendarEventUpsertCommon &
@@ -78,6 +88,7 @@ export type CalendarEventUpsertInput = CalendarEventUpsertCommon &
 export interface CalendarEventUpsertDependencies {
 	readonly clock: CalendarEventCreateClock;
 	readonly uidFactory: CalendarEventUidGenerator;
+	readonly alarmUidFactory?: CalendarAlarmUidGenerator;
 }
 
 export type UpsertedCalendarEvent = CalendarEvent & { readonly etag: string };
@@ -292,6 +303,27 @@ function enumPatch<T extends string>(
 	return invalid(message);
 }
 
+function alarmValidationProperty(name: string, text: string): ICalendarProperty {
+	return {
+		kind: 'property',
+		name,
+		parameters: [],
+		value: { kind: 'value', valueType: 'TEXT', raw: text, textValues: [text] },
+	};
+}
+
+function alarmValidationMaster(summary: string): ICalendarComponent {
+	return {
+		kind: 'component',
+		name: 'VEVENT',
+		entries: [
+			alarmValidationProperty('DTSTART', '20400101T000000Z'),
+			alarmValidationProperty('DTEND', '20400101T010000Z'),
+			alarmValidationProperty('SUMMARY', summary),
+		],
+	};
+}
+
 function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInput {
 	if (!isRecord(input)) return invalid(MESSAGES.INVALID_CALENDAR_URL);
 	let calendarUrl: AbsoluteHttpUrl;
@@ -387,6 +419,7 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 		'categories',
 		'status',
 		'transparency',
+		'alarms',
 		...(input.timeMode === 'timed' ? ['start', 'end', 'timeZone'] : ['startDate', 'endDate']),
 	]);
 	if (Reflect.ownKeys(input).some((key) => typeof key !== 'string' || !allowed.has(key))) {
@@ -421,6 +454,13 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 					['opaque', 'transparent'] as const,
 					MESSAGES.INVALID_TRANSPARENCY,
 				);
+	const alarms =
+		input.alarms === undefined
+			? undefined
+			: normalizeCalendarAlarmMutations(alarmValidationMaster(input.summary), input.alarms);
+	if (uid === undefined && alarms?.some((mutation) => mutation.kind !== 'add')) {
+		return invalid(MESSAGES.INVALID_ADDITIONAL_FIELDS);
+	}
 	if (time.timeMode === 'timed') {
 		if (time.end.getTime() <= time.start.getTime()) return invalid(MESSAGES.INVALID_RANGE);
 		if (time.timeZone.timeZoneMode === 'iana') {
@@ -455,6 +495,7 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 		...(categories === undefined ? {} : { categories }),
 		...(status === undefined ? {} : { status }),
 		...(transparency === undefined ? {} : { transparency }),
+		...(alarms === undefined ? {} : { alarms }),
 	}) as CalendarEventUpsertInput;
 }
 
@@ -474,6 +515,9 @@ function createInput(
 	input: CalendarEventUpsertInput,
 	uid: string | undefined,
 ): CalendarEventCreateInput {
+	if (input.alarms?.some((mutation) => mutation.kind !== 'add')) {
+		return invalid(MESSAGES.INVALID_ADDITIONAL_FIELDS);
+	}
 	const optional = (patch: OptionalFieldPatch<string> | undefined): string | undefined =>
 		patch?.kind === 'set' ? patch.value : undefined;
 	return Object.freeze({
@@ -500,6 +544,13 @@ function createInput(
 		...(input.categories?.kind === 'set' ? { categories: input.categories.value } : {}),
 		...(input.status?.kind === 'set' ? { status: input.status.value } : {}),
 		...(input.transparency?.kind === 'set' ? { transparency: input.transparency.value } : {}),
+		...(input.alarms === undefined
+			? {}
+			: {
+					alarms: input.alarms.flatMap((mutation): readonly CalendarAlarmInput[] =>
+						mutation.kind === 'add' ? [mutation.alarm] : [],
+					),
+				}),
 	}) as CalendarEventCreateInput;
 }
 
@@ -527,6 +578,7 @@ function updatePatch(input: CalendarEventUpsertInput): CalendarEventPatch {
 		...(input.categories === undefined ? {} : { categories: input.categories }),
 		...(input.status === undefined ? {} : { status: input.status }),
 		...(input.transparency === undefined ? {} : { transparency: input.transparency }),
+		...(input.alarms === undefined ? {} : { alarms: input.alarms }),
 	}) as CalendarEventPatch;
 }
 
@@ -568,6 +620,7 @@ async function createBranch(
 	uid: string | undefined,
 	clock: CalendarEventCreateClock,
 	uidFactory: CalendarEventUidGenerator,
+	alarmUidFactory: CalendarAlarmUidGenerator,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 ): Promise<CalendarEventUpsertResult> {
 	const prepared = await prepareCalendarEventCreate(
@@ -575,6 +628,7 @@ async function createBranch(
 		clock,
 		timeZoneContext,
 		() => generatedUid(uidFactory),
+		alarmUidFactory,
 	);
 	let mutation;
 	try {
@@ -625,6 +679,7 @@ export async function upsertCalendarEvent(
 			undefined,
 			dependencies.clock,
 			dependencies.uidFactory,
+			dependencies.alarmUidFactory ?? randomUUID,
 			timeZoneContext,
 		);
 	}
@@ -646,6 +701,7 @@ export async function upsertCalendarEvent(
 				suppliedUid,
 				dependencies.clock,
 				dependencies.uidFactory,
+				dependencies.alarmUidFactory ?? randomUUID,
 				timeZoneContext,
 			);
 		}
@@ -670,6 +726,7 @@ export async function upsertCalendarEvent(
 			},
 			dependencies.clock,
 			timeZoneContext,
+			dependencies.alarmUidFactory ?? randomUUID,
 		);
 		return Object.freeze({ action: 'update', event: result.event });
 	} catch (error) {

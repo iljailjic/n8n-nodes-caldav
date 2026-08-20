@@ -727,6 +727,23 @@ describe('calendar event Update coordinator requests and authoritative result', 
 			etag: ' "current server etag" ',
 			uid: 'update@example.test',
 			summary: 'After update',
+			alarms: [
+				{
+					selector: {
+						kind: 'legacy',
+						position: 1,
+						fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+					},
+					action: 'display',
+					trigger: {
+						reference: 'start',
+						direction: 'before',
+						value: 10,
+						unit: 'minute',
+					},
+					description: 'Private alarm',
+				},
+			],
 			timeMode: 'timed',
 			accessMode: 'editable',
 			start: '2040-01-02T10:00:00Z',

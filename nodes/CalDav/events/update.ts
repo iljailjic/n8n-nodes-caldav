@@ -1,5 +1,7 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- The accepted application-service contract exposes sanitized domain failures outside the n8n UI boundary. */
 
+import { randomUUID } from 'node:crypto';
+
 import {
 	CalDavCalendarEventResourceGetError,
 	CalendarEventResourceGetFailureCode,
@@ -33,6 +35,8 @@ import {
 import type { CalendarEventPatch } from '../icalendar/patcher';
 import { serializeICalendarResource } from '../icalendar/serializer';
 import type { CalendarEventInstantProjector } from '../icalendar/serializer';
+import { CalDavCalendarAlarmError, CalendarAlarmErrorCode } from '../icalendar/alarms';
+import type { CalendarAlarmUidGenerator } from '../icalendar/alarms';
 import {
 	assertVTimeZoneCovers,
 	canonicalizeIanaTimeZone,
@@ -276,8 +280,8 @@ function sameEntry(left: ICalendarEntry, right: ICalendarEntry): boolean {
 		: sameComponent(left, right as ICalendarComponent);
 }
 
-function timeZoneEntryOrderIsInsignificant(component: ICalendarComponent): boolean {
-	return ['VTIMEZONE', 'STANDARD', 'DAYLIGHT'].includes(component.name.toUpperCase());
+function componentEntryOrderIsInsignificant(component: ICalendarComponent): boolean {
+	return ['VTIMEZONE', 'STANDARD', 'DAYLIGHT', 'VALARM'].includes(component.name.toUpperCase());
 }
 
 function semanticKey(parts: readonly string[]): string {
@@ -304,7 +308,7 @@ function semanticEntryKey(entry: ICalendarEntry): string {
 		]);
 	}
 	const entryKeys = entry.entries.map(semanticEntryKey);
-	if (timeZoneEntryOrderIsInsignificant(entry)) entryKeys.sort();
+	if (componentEntryOrderIsInsignificant(entry)) entryKeys.sort();
 	return semanticKey([entry.kind, entry.name, ...entryKeys]);
 }
 
@@ -323,7 +327,7 @@ function sameComponent(left: ICalendarComponent, right: ICalendarComponent): boo
 		left.kind === right.kind &&
 		left.name === right.name &&
 		left.entries.length === right.entries.length &&
-		(timeZoneEntryOrderIsInsignificant(left)
+		(componentEntryOrderIsInsignificant(left)
 			? sameUnorderedEntries(left.entries, right.entries)
 			: left.entries.every((entry, index) => sameEntry(entry, right.entries[index]!)))
 	);
@@ -340,7 +344,7 @@ function sameComponentAllowingMetadataPlacement(
 	right: ICalendarComponent,
 ): boolean {
 	if (left.kind !== right.kind || left.name !== right.name) return false;
-	if (timeZoneEntryOrderIsInsignificant(left)) return sameComponent(left, right);
+	if (componentEntryOrderIsInsignificant(left)) return sameComponent(left, right);
 	if (left.name.toUpperCase() !== 'VEVENT') {
 		return (
 			left.entries.length === right.entries.length &&
@@ -402,7 +406,7 @@ function sameComponentIgnoringRevisionMetadata(
 	right: ICalendarComponent,
 ): boolean {
 	if (left.kind !== right.kind || left.name !== right.name) return false;
-	if (timeZoneEntryOrderIsInsignificant(left)) return sameComponent(left, right);
+	if (componentEntryOrderIsInsignificant(left)) return sameComponent(left, right);
 	const withoutRevision = (component: ICalendarComponent): readonly ICalendarEntry[] =>
 		component.entries.filter(
 			(entry) =>
@@ -571,6 +575,7 @@ async function updateCalendarEventInternal(
 	clock: CalendarEventUpdateClock,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 	resolvedCurrent?: CalendarEventReadResult,
+	alarmUidFactory: CalendarAlarmUidGenerator = randomUUID,
 ): Promise<UpdatedCalendarEvent> {
 	const snapshot = snapshotInput(input);
 	const current =
@@ -765,6 +770,7 @@ async function updateCalendarEventInternal(
 			implicitCurrentTimeZone === undefined ? renderedAuthoredTimeZone : originalTimeZoneId,
 			authoredTimeZoneDefinition,
 			removedTimeZoneDefinition,
+			alarmUidFactory,
 		);
 	let patchedResource: ICalendarResource;
 	try {
@@ -859,6 +865,7 @@ export async function updateResolvedCalendarEvent(
 	input: CalendarEventResolvedUpdateInput,
 	clock: CalendarEventUpdateClock,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
+	alarmUidFactory: CalendarAlarmUidGenerator = randomUUID,
 ): Promise<CalendarEventResolvedUpdateResult> {
 	try {
 		const event = await updateCalendarEventInternal(
@@ -872,12 +879,15 @@ export async function updateResolvedCalendarEvent(
 			clock,
 			timeZoneContext,
 			input.current,
+			alarmUidFactory,
 		);
 		return Object.freeze({ kind: 'updated', event });
 	} catch (error) {
 		if (
-			error instanceof CalDavCalendarEventPatchError &&
-			error.code === CalendarEventPatchErrorCode.NO_CHANGES
+			(error instanceof CalDavCalendarEventPatchError &&
+				error.code === CalendarEventPatchErrorCode.NO_CHANGES) ||
+			(error instanceof CalDavCalendarAlarmError &&
+				error.code === CalendarAlarmErrorCode.NO_CHANGES)
 		) {
 			return Object.freeze({
 				kind: 'noChange',

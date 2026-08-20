@@ -2,6 +2,8 @@
 
 import { parseICalendarResource } from './parser';
 import type { ICalendarComponent, ICalendarProperty, ICalendarResource } from './parser';
+import { projectCalendarAlarms } from './alarms';
+import type { CalendarAlarm } from './alarms';
 import {
 	CalDavIanaTimeZoneError,
 	canonicalizeIanaTimeZone,
@@ -104,6 +106,7 @@ interface CalendarEventCommon {
 	readonly status?: CalendarEventStatus | UnsupportedCalendarEventMetadataToken;
 	readonly transparency?: CalendarEventTransparency | UnsupportedCalendarEventMetadataToken;
 	readonly recurrence?: RecurrenceProjection;
+	readonly alarms?: readonly CalendarAlarm[];
 	readonly extensions?: CalendarEventExtensions;
 }
 
@@ -789,6 +792,7 @@ export function mapCalendarEventResource(
 	}
 
 	const extensions = snapshotExtensions(input.extensions);
+	const alarms = projectCalendarAlarms(master);
 	const common = {
 		calendarUrl: input.calendarUrl,
 		resourceUrl: input.resourceUrl,
@@ -827,6 +831,7 @@ export function mapCalendarEventResource(
 				startDate: start.formatted,
 				endDate: end.formatted,
 				...(projectedRecurrence === undefined ? {} : { recurrence: projectedRecurrence }),
+				...(alarms.length > 0 ? { alarms } : {}),
 				...(extensions !== undefined ? { extensions } : {}),
 			});
 		} else {
@@ -837,6 +842,7 @@ export function mapCalendarEventResource(
 				accessMode: 'readOnly',
 				readOnlyReason: 'unsupportedTimeRepresentation',
 				...(projectedRecurrence === undefined ? {} : { recurrence: projectedRecurrence }),
+				...(alarms.length > 0 ? { alarms } : {}),
 				...(extensions !== undefined ? { extensions } : {}),
 			});
 		}
@@ -984,6 +990,7 @@ export function mapCalendarEventResource(
 					accessMode: 'readOnly',
 					readOnlyReason: 'unsupportedTimeRepresentation',
 					...(projectedRecurrence === undefined ? {} : { recurrence: projectedRecurrence }),
+					...(alarms.length > 0 ? { alarms } : {}),
 					...(extensions !== undefined ? { extensions } : {}),
 				}
 			: {
@@ -997,6 +1004,7 @@ export function mapCalendarEventResource(
 					startLocal: timed.startLocal,
 					endLocal: timed.endLocal,
 					...(projectedRecurrence === undefined ? {} : { recurrence: projectedRecurrence }),
+					...(alarms.length > 0 ? { alarms } : {}),
 					...(extensions !== undefined ? { extensions } : {}),
 				},
 	) satisfies CalendarEvent;

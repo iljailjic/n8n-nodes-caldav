@@ -273,6 +273,7 @@ describe('CalDAV Event Update metadata', () => {
 			'startDate',
 			'endDate',
 			'summary',
+			'alarms',
 			'categories',
 			'description',
 			'location',

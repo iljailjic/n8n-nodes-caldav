@@ -1,11 +1,22 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- Internal application preparation uses domain failures mapped at the node boundary. */
 
+import { randomUUID } from 'node:crypto';
+
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
-import { mapCalendarEventResource } from '../icalendar/eventReadModel';
+import {
+	createCalendarEventPreservationContext,
+	mapCalendarEventResource,
+} from '../icalendar/eventReadModel';
 import type { CalendarEvent } from '../icalendar/eventReadModel';
+import { authorCalendarAlarms } from '../icalendar/alarms';
+import type { CalendarAlarmUidGenerator } from '../icalendar/alarms';
 import { parseICalendarResource } from '../icalendar/parser';
 import type { ICalendarComponent } from '../icalendar/parser';
-import { serializeBasicTimedEvent, serializeBasicUtcEvent } from '../icalendar/serializer';
+import {
+	serializeBasicTimedEvent,
+	serializeBasicUtcEvent,
+	serializeICalendarResource,
+} from '../icalendar/serializer';
 import type { CalendarEventInstantProjector } from '../icalendar/serializer';
 import { projectInstantInTimeZone } from '../icalendar/timeZones';
 import { joinCalendarCollectionUrl } from '../transport/url';
@@ -94,6 +105,7 @@ export async function prepareCalendarEventCreate(
 	clock: CalendarEventCreateClock,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 	uidGenerator?: CalendarEventUidGenerator,
+	alarmUidGenerator: CalendarAlarmUidGenerator = randomUUID,
 ): Promise<PreparedCalendarEventCreate> {
 	const timeZone =
 		input.timeMode === 'timed'
@@ -132,7 +144,7 @@ export async function prepareCalendarEventCreate(
 		...(input.status === undefined ? {} : { status: input.status }),
 		...(input.transparency === undefined ? {} : { transparency: input.transparency }),
 	};
-	const calendarData =
+	let calendarData =
 		input.timeMode === 'allDay'
 			? serializeBasicUtcEvent({
 					...common,
@@ -151,6 +163,22 @@ export async function prepareCalendarEventCreate(
 					projectInstant,
 					embeddedTimeZoneDefinition,
 				);
+	if (input.alarms !== undefined) {
+		const resource = parseICalendarResource(Buffer.from(calendarData, 'utf8'));
+		const context = createCalendarEventPreservationContext(resource);
+		const alarmMaster = authorCalendarAlarms(context.master, input.alarms, alarmUidGenerator);
+		calendarData = serializeICalendarResource({
+			kind: 'resource',
+			originalIcs: '',
+			calendar: {
+				kind: 'component',
+				name: resource.calendar.name,
+				entries: resource.calendar.entries.map((entry) =>
+					entry === context.master ? alarmMaster : entry,
+				),
+			},
+		});
+	}
 	const event = normalizeCreatedEvent(input, resourceUrl, calendarData, timeZoneDefinition);
 	if (
 		(input.timeMode === 'timed' &&

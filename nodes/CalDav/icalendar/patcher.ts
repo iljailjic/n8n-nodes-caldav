@@ -18,6 +18,12 @@ import type {
 	ICalendarProperty,
 	ICalendarResource,
 } from './parser';
+import {
+	applyCalendarAlarmMutations,
+	CalDavCalendarAlarmError,
+	CalendarAlarmErrorCode,
+} from './alarms';
+import type { CalendarAlarmMutation, CalendarAlarmUidGenerator } from './alarms';
 
 export type SetPatch<T> = {
 	readonly kind: 'set';
@@ -34,6 +40,7 @@ interface CalendarEventPatchCommon {
 	readonly categories?: OptionalFieldPatch<readonly string[]>;
 	readonly status?: OptionalFieldPatch<CalendarEventStatus>;
 	readonly transparency?: OptionalFieldPatch<CalendarEventTransparency>;
+	readonly alarms?: readonly CalendarAlarmMutation[];
 }
 
 export type CalendarEventPatch = CalendarEventPatchCommon &
@@ -63,7 +70,8 @@ export type CalendarEventPatchField =
 	| 'url'
 	| 'categories'
 	| 'status'
-	| 'transparency';
+	| 'transparency'
+	| 'alarms';
 
 export const CalendarEventPatchErrorCode = Object.freeze({
 	INVALID_INPUT: 'INVALID_INPUT',
@@ -124,8 +132,13 @@ interface ValidatedOperation {
 	readonly categories?: readonly string[];
 }
 
-type ValidatedPatch = Partial<Readonly<Record<CalendarEventPatchField, ValidatedOperation>>> & {
+type CalendarEventPropertyPatchField = Exclude<CalendarEventPatchField, 'alarms'>;
+
+type ValidatedPatch = Partial<
+	Readonly<Record<CalendarEventPropertyPatchField, ValidatedOperation>>
+> & {
 	readonly timeMode?: 'timed' | 'allDay';
+	readonly alarms?: unknown;
 };
 
 const PATCH_FIELDS = [
@@ -141,9 +154,9 @@ const PATCH_FIELDS = [
 	'categories',
 	'status',
 	'transparency',
-] as const satisfies readonly CalendarEventPatchField[];
-const PATCH_FIELD_SET = new Set<string>(['timeMode', ...PATCH_FIELDS]);
-const OPTIONAL_FIELDS = new Set<CalendarEventPatchField>([
+] as const satisfies readonly CalendarEventPropertyPatchField[];
+const PATCH_FIELD_SET = new Set<string>(['timeMode', ...PATCH_FIELDS, 'alarms']);
+const OPTIONAL_FIELDS = new Set<CalendarEventPropertyPatchField>([
 	'description',
 	'location',
 	'url',
@@ -151,7 +164,7 @@ const OPTIONAL_FIELDS = new Set<CalendarEventPatchField>([
 	'status',
 	'transparency',
 ]);
-const PROPERTY_NAMES: Readonly<Record<CalendarEventPatchField, string>> = {
+const PROPERTY_NAMES: Readonly<Record<CalendarEventPropertyPatchField, string>> = {
 	start: 'DTSTART',
 	end: 'DTEND',
 	startDate: 'DTSTART',
@@ -551,7 +564,7 @@ function categoryValues(value: unknown): readonly string[] {
 }
 
 function validatePatchOperations(snapshot: Readonly<Record<string, unknown>>): ValidatedPatch {
-	const validated: Partial<Record<CalendarEventPatchField, ValidatedOperation>> = {};
+	const validated: Partial<Record<CalendarEventPropertyPatchField, ValidatedOperation>> = {};
 	const timeMode = snapshot.timeMode;
 	if (timeMode !== undefined && timeMode !== 'timed' && timeMode !== 'allDay') {
 		fail('INVALID_INPUT');
@@ -621,7 +634,13 @@ function validatePatchOperations(snapshot: Readonly<Record<string, unknown>>): V
 			};
 		}
 	}
-	return { ...validated, ...(timeMode === undefined ? {} : { timeMode }) };
+	return {
+		...validated,
+		...(timeMode === undefined ? {} : { timeMode }),
+		...(Object.prototype.hasOwnProperty.call(snapshot, 'alarms')
+			? { alarms: snapshot.alarms }
+			: {}),
+	};
 }
 
 function isUnreserved(character: string): boolean {
@@ -792,7 +811,7 @@ function effectiveValueParameter(property: ICalendarProperty): string | undefine
 
 function parametersAreCompatible(
 	property: ICalendarProperty,
-	field: CalendarEventPatchField,
+	field: CalendarEventPropertyPatchField,
 ): boolean {
 	const valueParameters = matchingParameters(property, 'VALUE');
 	if (
@@ -1097,7 +1116,7 @@ function planTimePatch(
 
 function operationChanges(
 	master: ICalendarComponent,
-	field: CalendarEventPatchField,
+	field: CalendarEventPropertyPatchField,
 	operation: ValidatedOperation,
 ): boolean {
 	if (field === 'timeZone') {
@@ -1172,7 +1191,7 @@ function freezeProperty(property: ICalendarProperty): ICalendarProperty {
 function replacementProperty(
 	existing: ICalendarProperty | undefined,
 	name: string,
-	field: CalendarEventPatchField | 'metadata',
+	field: CalendarEventPropertyPatchField | 'metadata',
 	value: string,
 	timePlan?: TimePatchPlan,
 ): ICalendarProperty {
@@ -1250,7 +1269,7 @@ function metadataProperty(
 
 function applyFieldOperation(
 	entries: ICalendarEntry[],
-	field: CalendarEventPatchField,
+	field: CalendarEventPropertyPatchField,
 	operation: ValidatedOperation,
 	timePlan: TimePatchPlan,
 	clearTimeParameters = false,
@@ -1460,6 +1479,8 @@ function constructResource(
 	renderedTimeZone?: string,
 	timeZoneDefinition?: ICalendarComponent,
 	removedTimeZoneDefinition?: ICalendarComponent,
+	alarmUidFactory?: CalendarAlarmUidGenerator,
+	eventFieldsChanged = false,
 ): ICalendarResource {
 	const masterEntries = [...context.master.entries];
 	for (const field of PATCH_FIELDS) {
@@ -1483,13 +1504,33 @@ function constructResource(
 	) {
 		applyTimeZoneOperation(masterEntries, patch.timeZone, projectInstant, renderedTimeZone);
 	}
-	applyMetadata(masterEntries, metadata, modifiedAt);
 	Object.freeze(masterEntries);
-	const master = Object.freeze({
+	let master: ICalendarComponent = Object.freeze({
 		kind: 'component' as const,
 		name: context.master.name,
 		entries: masterEntries,
 	});
+	if (patch.alarms !== undefined) {
+		try {
+			master = applyCalendarAlarmMutations(
+				master,
+				patch.alarms,
+				alarmUidFactory ?? (() => fail('INVALID_INPUT', 'alarms')),
+			);
+		} catch (error) {
+			if (
+				!eventFieldsChanged ||
+				!(error instanceof CalDavCalendarAlarmError) ||
+				error.code !== CalendarAlarmErrorCode.NO_CHANGES
+			) {
+				throw error;
+			}
+		}
+	}
+	const finalEntries = [...master.entries];
+	applyMetadata(finalEntries, metadata, modifiedAt);
+	Object.freeze(finalEntries);
+	master = Object.freeze({ kind: 'component', name: master.name, entries: finalEntries });
 	const calendarEntries = reconcileTimeZoneDefinitions(
 		context,
 		master,
@@ -1513,6 +1554,7 @@ export function applyCalendarEventPatch(
 	renderedTimeZone?: string,
 	timeZoneDefinition?: ICalendarComponent,
 	removedTimeZoneDefinition?: ICalendarComponent,
+	alarmUidFactory?: CalendarAlarmUidGenerator,
 ): ICalendarResource {
 	const canonicalContext = validateStage(
 		() => snapshotCanonicalContext(context),
@@ -1524,12 +1566,11 @@ export function applyCalendarEventPatch(
 	const validatedPatch = validateStage(() => validatePatchOperations(snapshot), 'INVALID_INPUT');
 	validateTouchedParameters(canonicalContext.master, validatedPatch);
 	const timePlan = planTimePatch(canonicalContext, validatedPatch);
-	if (
-		!PATCH_FIELDS.some((field) => {
-			const operation = validatedPatch[field];
-			return operation !== undefined && operationChanges(canonicalContext.master, field, operation);
-		})
-	) {
+	const eventFieldsChanged = PATCH_FIELDS.some((field) => {
+		const operation = validatedPatch[field];
+		return operation !== undefined && operationChanges(canonicalContext.master, field, operation);
+	});
+	if (!eventFieldsChanged && validatedPatch.alarms === undefined) {
 		fail('NO_CHANGES');
 	}
 	const modifiedTimestamp = validateStage(() => dateTimestamp(modifiedAt), 'INVALID_DATE');
@@ -1543,5 +1584,7 @@ export function applyCalendarEventPatch(
 		renderedTimeZone,
 		timeZoneDefinition,
 		removedTimeZoneDefinition,
+		alarmUidFactory,
+		eventFieldsChanged,
 	);
 }

@@ -20,6 +20,37 @@ import type { CalDavTransport } from '../../nodes/CalDav/transport/http';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 
 describe('calendar-event Upsert IANA preparation ordering', () => {
+	it('rejects an alarm Remove without an event UID before generators, clocks, or transport', async () => {
+		const calendarUrl = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/private/');
+		const request = vi.fn();
+		const transport: CalDavTransport = {
+			serverUrl: 'https://calendar.example.test/',
+			request,
+		};
+		const uidFactory = vi.fn(() => '00000000-0000-4000-8000-000000000045');
+		const alarmUidFactory = vi.fn(() => '00000000-0000-4000-8000-000000000046');
+		const clock = vi.fn(() => new Date('2040-01-01T00:00:00Z'));
+
+		await expect(
+			upsertCalendarEvent(
+				transport,
+				{
+					calendarUrl,
+					timeMode: 'timed',
+					start: new Date('2040-01-02T10:00:00Z'),
+					end: new Date('2040-01-02T11:00:00Z'),
+					summary: 'No lookup',
+					alarms: [{ kind: 'remove', selector: { kind: 'uid', uid: 'remote-alarm' } }],
+				},
+				{ clock, uidFactory, alarmUidFactory },
+			),
+		).rejects.toThrow('Additional Fields');
+		expect(uidFactory).not.toHaveBeenCalled();
+		expect(alarmUidFactory).not.toHaveBeenCalled();
+		expect(clock).not.toHaveBeenCalled();
+		expect(request).not.toHaveBeenCalled();
+	});
+
 	it('does not generate an omitted UID when finite IANA authoring selection fails', async () => {
 		const calendarUrl = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/private/');
 		const request = vi.fn();
