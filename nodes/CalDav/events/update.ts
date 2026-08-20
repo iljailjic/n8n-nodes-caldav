@@ -17,7 +17,11 @@ import {
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
 } from './resolveByUid';
-import type { CalendarEvent, CalendarEventReadResult } from '../icalendar/eventReadModel';
+import type {
+	CalendarEvent,
+	CalendarEventReadResult,
+	UtcDateTimeString,
+} from '../icalendar/eventReadModel';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type {
 	ICalendarComponent,
@@ -32,7 +36,13 @@ import {
 	CalDavCalendarEventPatchError,
 	CalendarEventPatchErrorCode,
 } from '../icalendar/patcher';
-import type { CalendarEventPatch } from '../icalendar/patcher';
+import type { CalendarEventPatch, CalendarEventRecurrencePatchContext } from '../icalendar/patcher';
+import {
+	classifyIanaRecurrenceCoverage,
+	normalizeRecurrenceRule,
+	recurrenceRulesAreSemanticallyEqual,
+} from '../icalendar/recurrence';
+import type { RecurrenceRule, RecurrenceStartContext } from '../icalendar/recurrence';
 import { serializeICalendarResource } from '../icalendar/serializer';
 import type { CalendarEventInstantProjector } from '../icalendar/serializer';
 import { CalDavCalendarAlarmError, CalendarAlarmErrorCode } from '../icalendar/alarms';
@@ -50,6 +60,7 @@ import {
 	CalDavCalendarEventTimeZoneAuthoringError,
 	resolveCalendarEventTimeZoneAuthoring,
 } from './timeZoneAuthoring';
+import type { CalendarEventTimeZoneAuthoringCoverage } from './timeZoneAuthoring';
 
 export type CalendarEventUpdateIdentifier =
 	| { readonly kind: 'resourceUrl'; readonly resourceUrl: AbsoluteHttpUrl }
@@ -231,6 +242,155 @@ function updateClockValue(clock: CalendarEventUpdateClock): Date {
 	} catch {
 		return new Date(Number.NaN);
 	}
+}
+
+function supportedRecurrence(value: CalendarEvent['recurrence']): RecurrenceRule | undefined {
+	return value !== undefined && !('kind' in value) ? value : undefined;
+}
+
+function currentRecurrenceStart(event: CalendarEvent): RecurrenceStartContext | undefined {
+	if (event.timeMode === 'allDay') {
+		return { timeMode: 'allDay', startDate: event.startDate };
+	}
+	if (event.timeMode !== 'timed') return undefined;
+	return event.timeZoneMode === 'iana' && event.timeZone !== undefined
+		? {
+				timeMode: 'timed',
+				timeZoneMode: 'iana',
+				start: event.start,
+				startLocal: event.startLocal,
+			}
+		: { timeMode: 'timed', timeZoneMode: 'utc', start: event.start };
+}
+
+function finalRecurrenceStart(
+	event: CalendarEvent,
+	patch: CalendarEventPatch,
+): RecurrenceStartContext | undefined {
+	const mode = patch.timeMode ?? event.timeMode;
+	if (mode === 'allDay') {
+		const startDate =
+			('startDate' in patch ? patch.startDate?.value : undefined) ??
+			(event.timeMode === 'allDay' ? event.startDate : undefined);
+		return startDate === undefined ? undefined : { timeMode: 'allDay', startDate };
+	}
+	if (mode !== 'timed') return undefined;
+	const start =
+		('start' in patch ? patch.start?.value : undefined) ??
+		(event.timeMode === 'timed' ? new Date(event.start) : undefined);
+	if (start === undefined) return undefined;
+	const startUtc = start.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
+	const requestedZone = 'timeZone' in patch ? patch.timeZone?.value : undefined;
+	const zone =
+		requestedZone ??
+		(event.timeMode === 'timed' && event.timeZoneMode === 'iana' && event.timeZone !== undefined
+			? ({ timeZoneMode: 'iana', timeZone: event.timeZone } as const)
+			: ({ timeZoneMode: 'utc' } as const));
+	return zone.timeZoneMode === 'iana'
+		? {
+				timeMode: 'timed',
+				timeZoneMode: 'iana',
+				start: startUtc,
+				startLocal: projectInstantInTimeZone(start, zone.timeZone),
+			}
+		: { timeMode: 'timed', timeZoneMode: 'utc', start: startUtc };
+}
+
+function finalRecurrenceRule(
+	event: CalendarEvent,
+	patch: CalendarEventPatch,
+	start: RecurrenceStartContext | undefined,
+): RecurrenceRule | undefined {
+	if (patch.recurrence?.kind === 'remove') return undefined;
+	if (patch.recurrence?.kind === 'set') {
+		return start === undefined ? undefined : normalizeRecurrenceRule(patch.recurrence.value, start);
+	}
+	return supportedRecurrence(event.recurrence);
+}
+
+function recurrenceChanges(
+	event: CalendarEvent,
+	patch: CalendarEventPatch,
+	finalRule: RecurrenceRule | undefined,
+): boolean {
+	if (patch.recurrence === undefined) return false;
+	const current = supportedRecurrence(event.recurrence);
+	if (patch.recurrence.kind === 'remove') return event.recurrence !== undefined;
+	return current === undefined || finalRule === undefined
+		? true
+		: !recurrenceRulesAreSemanticallyEqual(current, finalRule);
+}
+
+function recurrenceDependsOnPreservedContent(current: CalendarEventReadResult): boolean {
+	if (current.context.exceptions.length > 0) return true;
+	if (current.event.recurrence !== undefined && 'kind' in current.event.recurrence) return true;
+	return ['RDATE', 'EXDATE', 'EXRULE'].some(
+		(name) => directProperties(current.context.master, name).length > 0,
+	);
+}
+
+function timeRepresentationChanges(event: CalendarEvent, patch: CalendarEventPatch): boolean {
+	const mode = patch.timeMode ?? event.timeMode;
+	if (mode !== event.timeMode) return true;
+	if (mode === 'allDay' && event.timeMode === 'allDay') {
+		return (
+			('startDate' in patch &&
+				patch.startDate !== undefined &&
+				patch.startDate.value !== event.startDate) ||
+			('endDate' in patch && patch.endDate !== undefined && patch.endDate.value !== event.endDate)
+		);
+	}
+	if (mode !== 'timed' || event.timeMode !== 'timed') return false;
+	if (
+		'start' in patch &&
+		patch.start !== undefined &&
+		patch.start.value.getTime() !== new Date(event.start).getTime()
+	) {
+		return true;
+	}
+	if (
+		'end' in patch &&
+		patch.end !== undefined &&
+		patch.end.value.getTime() !== new Date(event.end).getTime()
+	) {
+		return true;
+	}
+	if ('timeZone' in patch && patch.timeZone !== undefined) {
+		const zone = patch.timeZone.value;
+		return (
+			zone.timeZoneMode !== event.timeZoneMode ||
+			(zone.timeZoneMode === 'iana' && zone.timeZone !== event.timeZone)
+		);
+	}
+	return false;
+}
+
+function recurrenceCoverage(
+	event: CalendarEvent,
+	patch: CalendarEventPatch,
+	start: Extract<RecurrenceStartContext, { readonly timeZoneMode: 'iana' }>,
+	rule: RecurrenceRule | undefined,
+): CalendarEventTimeZoneAuthoringCoverage {
+	const startInstant = new Date(start.start);
+	const endInstant =
+		('end' in patch ? patch.end?.value : undefined) ??
+		(event.timeMode === 'timed' ? new Date(event.end) : undefined);
+	if (endInstant === undefined) {
+		throw new CalDavCalendarEventPatchError(CalendarEventPatchErrorCode.INVALID_INPUT, 'end');
+	}
+	if (rule === undefined) {
+		return { kind: 'finite', interval: { start: startInstant, end: endInstant } };
+	}
+	const classification = classifyIanaRecurrenceCoverage(rule, start);
+	if (classification.kind === 'requiresReference') return { kind: classification.bound };
+	const duration = endInstant.getTime() - startInstant.getTime();
+	return {
+		kind: 'finite',
+		interval: {
+			start: startInstant,
+			end: new Date(new Date(classification.interval.end).getTime() + duration),
+		},
+	};
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
@@ -616,6 +776,31 @@ async function updateCalendarEventInternal(
 			: undefined;
 	const requestedStart = 'start' in snapshot.patch ? snapshot.patch.start : undefined;
 	const requestedEnd = 'end' in snapshot.patch ? snapshot.patch.end : undefined;
+	const currentRecurrenceStartValue = currentRecurrenceStart(current.event);
+	const finalRecurrenceStartValue = finalRecurrenceStart(current.event, snapshot.patch);
+	const recurrenceContext: CalendarEventRecurrencePatchContext = {
+		...(currentRecurrenceStartValue === undefined ? {} : { current: currentRecurrenceStartValue }),
+		...(finalRecurrenceStartValue === undefined ? {} : { final: finalRecurrenceStartValue }),
+	};
+	const finalRule = finalRecurrenceRule(current.event, snapshot.patch, recurrenceContext.final);
+	const changesRecurrence = recurrenceChanges(current.event, snapshot.patch, finalRule);
+	const sourceIanaTimeZoneId =
+		current.event.timeMode === 'timed' && current.event.timeZoneMode === 'iana'
+			? sourceTimeZoneId(current.context.master)
+			: undefined;
+	const changesTimeRepresentation =
+		timeRepresentationChanges(current.event, snapshot.patch) ||
+		(requestedTimeZone?.timeZoneMode === 'iana' &&
+			sourceIanaTimeZoneId !== requestedTimeZone.timeZone);
+	if (
+		recurrenceDependsOnPreservedContent(current) &&
+		(changesRecurrence || changesTimeRepresentation)
+	) {
+		throw new CalDavCalendarEventPatchError(
+			CalendarEventPatchErrorCode.UNSAFE_RECURRENCE_MUTATION,
+			'recurrence',
+		);
+	}
 	const hasTimePatch =
 		patchTimeMode === 'timed' && (requestedStart !== undefined || requestedEnd !== undefined);
 	const currentIanaTimeZone =
@@ -626,9 +811,20 @@ async function updateCalendarEventInternal(
 		requestedTimeZone === undefined && hasTimePatch && currentIanaTimeZone !== undefined
 			? ({ timeZoneMode: 'iana', timeZone: currentIanaTimeZone } as const)
 			: undefined;
-	const effectiveTimeZone = requestedTimeZone ?? implicitCurrentTimeZone;
-	const originalTimeZoneId =
-		currentIanaTimeZone !== undefined ? sourceTimeZoneId(current.context.master) : undefined;
+	const recurrenceTimeZone =
+		changesRecurrence &&
+		recurrenceContext.final?.timeMode === 'timed' &&
+		recurrenceContext.final.timeZoneMode === 'iana' &&
+		currentIanaTimeZone !== undefined
+			? ({
+					timeZoneMode: 'iana',
+					timeZone: currentIanaTimeZone,
+				} as const)
+			: undefined;
+	const effectiveTimeZone = changesTimeRepresentation
+		? (requestedTimeZone ?? implicitCurrentTimeZone)
+		: recurrenceTimeZone;
+	const originalTimeZoneId = sourceIanaTimeZoneId;
 	const embeddedDefinition =
 		currentIanaTimeZone !== undefined && originalTimeZoneId !== undefined
 			? embeddedTimeZoneDefinition(current.context.resource, originalTimeZoneId)
@@ -644,11 +840,23 @@ async function updateCalendarEventInternal(
 				'timeZone',
 			);
 		}
-		const interval = {
-			start: requestedStart?.value ?? new Date(timedCurrent.start),
-			end: requestedEnd?.value ?? new Date(timedCurrent.end),
-		};
+		if (
+			recurrenceContext.final?.timeMode !== 'timed' ||
+			recurrenceContext.final.timeZoneMode !== 'iana'
+		) {
+			throw new CalDavCalendarEventPatchError(
+				CalendarEventPatchErrorCode.UNSUPPORTED_TIME,
+				'recurrence',
+			);
+		}
+		const coverage = recurrenceCoverage(
+			current.event,
+			snapshot.patch,
+			recurrenceContext.final,
+			finalRule,
+		);
 		const canUseEmbedded =
+			coverage.kind === 'finite' &&
 			embeddedDefinition !== undefined &&
 			currentIanaTimeZone !== undefined &&
 			effectiveTimeZone.timeZone === currentIanaTimeZone &&
@@ -656,7 +864,7 @@ async function updateCalendarEventInternal(
 		if (canUseEmbedded) {
 			const definition = embeddedDefinition;
 			try {
-				assertVTimeZoneCovers(definition, effectiveTimeZone.timeZone, interval);
+				assertVTimeZoneCovers(definition, effectiveTimeZone.timeZone, coverage.interval);
 			} catch {
 				throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
 			}
@@ -685,9 +893,13 @@ async function updateCalendarEventInternal(
 			if (reusableDefinitions.length > 1) {
 				throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
 			}
-			if (reusableDefinitions[0] !== undefined) {
+			if (reusableDefinitions[0] !== undefined && coverage.kind === 'finite') {
 				try {
-					assertVTimeZoneCovers(reusableDefinitions[0], effectiveTimeZone.timeZone, interval);
+					assertVTimeZoneCovers(
+						reusableDefinitions[0],
+						effectiveTimeZone.timeZone,
+						coverage.interval,
+					);
 				} catch {
 					throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
 				}
@@ -695,7 +907,7 @@ async function updateCalendarEventInternal(
 			const authoringInput = {
 				calendarUrl: snapshot.calendarUrl,
 				timeZone: effectiveTimeZone.timeZone,
-				coverage: { kind: 'finite' as const, interval },
+				coverage,
 				...(timeZoneContext === undefined ? {} : { referenceContext: timeZoneContext }),
 				...(reusableDefinitions[0] === undefined
 					? {}
@@ -771,6 +983,7 @@ async function updateCalendarEventInternal(
 			authoredTimeZoneDefinition,
 			removedTimeZoneDefinition,
 			alarmUidFactory,
+			recurrenceContext,
 		);
 	let patchedResource: ICalendarResource;
 	try {

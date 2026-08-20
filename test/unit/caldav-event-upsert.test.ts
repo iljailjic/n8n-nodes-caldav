@@ -58,6 +58,7 @@ function eventIcs(
 		readonly floating?: boolean;
 		readonly modified?: boolean;
 		readonly unknown?: boolean;
+		readonly recurrence?: string;
 	} = {},
 ): string {
 	return [
@@ -70,6 +71,7 @@ function eventIcs(
 		...(options.modified === true ? ['LAST-MODIFIED:20400103T000000Z'] : []),
 		`DTSTART:20400102T100000${options.floating === true ? '' : 'Z'}`,
 		`DTEND:20400102T110000${options.floating === true ? '' : 'Z'}`,
+		...(options.recurrence === undefined ? [] : [`RRULE:${options.recurrence}`]),
 		`SUMMARY:${options.summary ?? 'Desired summary'}`,
 		...(options.description === undefined ? [] : [`DESCRIPTION:${options.description}`]),
 		...(options.location === undefined ? [] : [`LOCATION:${options.location}`]),
@@ -359,6 +361,38 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 			},
 		});
 		expect(Object.isFrozen(result)).toBe(true);
+	});
+
+	it('treats a lexical-only recurrence difference as a REPORT-only semantic no-op', async () => {
+		const requests = transport(async () =>
+			response(207, CALENDAR_URL, {
+				body: multistatus(
+					eventResponse('recurring.ics', SUPPLIED_UID, {
+						etag: '"recurrence-etag"',
+						ics: eventIcs(SUPPLIED_UID, {
+							recurrence: 'INTERVAL=2;FREQ=WEEKLY',
+						}),
+					}),
+				),
+			}),
+		);
+		const deps = dependencies();
+
+		await expect(
+			upsertCalendarEvent(
+				requests,
+				timedInput({
+					recurrence: { kind: 'set', value: { frequency: 'weekly', interval: 2 } },
+				}),
+				deps,
+			),
+		).resolves.toMatchObject({
+			action: 'update',
+			event: { recurrence: { frequency: 'weekly', interval: 2 } },
+		});
+		expect(methods(requests)).toEqual(['REPORT']);
+		expect(deps.clock).not.toHaveBeenCalled();
+		expect(deps.uidFactory).not.toHaveBeenCalled();
 	});
 
 	it('updates one unique match with the exact lookup ETag and authoritative GET', async () => {

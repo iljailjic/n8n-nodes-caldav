@@ -179,6 +179,7 @@ describe('recurrence controls activate atomically in the n8n node', () => {
 		const upsert = collection('upsert', 'additionalFields');
 
 		expect(semanticOptionOrder(collectionOptions(create))).toEqual([
+			'alarms',
 			'categories',
 			'description',
 			'location',
@@ -194,6 +195,7 @@ describe('recurrence controls activate atomically in the n8n node', () => {
 			'startDate',
 			'endDate',
 			'summary',
+			'alarms',
 			'categories',
 			'description',
 			'location',
@@ -203,6 +205,7 @@ describe('recurrence controls activate atomically in the n8n node', () => {
 			'url',
 		]);
 		expect(semanticOptionOrder(collectionOptions(upsert))).toEqual([
+			'alarms',
 			'categories',
 			'description',
 			'location',

@@ -56,7 +56,7 @@ function options(property: INodeProperties): readonly unknown[] {
 }
 
 describe('reusable recurrence node descriptors', () => {
-	it('defines the exact single-rule controls without registering them in the live node', () => {
+	it('defines the exact single-rule controls and registers them in the live node', () => {
 		const descriptor = recurrenceRuleDescriptor('timed');
 		const values = nestedValues(descriptor);
 
@@ -114,9 +114,7 @@ describe('reusable recurrence node descriptors', () => {
 			default: 'monday',
 			displayOptions: { show: { frequency: ['weekly'] } },
 		});
-		expect(JSON.stringify(new CalDav().description.properties)).not.toContain(
-			'"name":"recurrence"',
-		);
+		expect(JSON.stringify(new CalDav().description.properties)).toContain('"name":"recurrence"');
 	});
 
 	it('defines repeatable BY rows, a month multi-select, and mode-specific Until', () => {

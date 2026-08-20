@@ -239,6 +239,8 @@ describe('issue #41 exact Event node surface', () => {
 			'Categories',
 			'Description',
 			'Location',
+			'Recurrence',
+			'Recurrence',
 			'Status',
 			'Transparency',
 			'URL',

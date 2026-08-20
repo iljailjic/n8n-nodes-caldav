@@ -412,7 +412,7 @@ describe('atomic timezone updates and preservation', () => {
 		(field) => {
 			const source = SUPPORTED_UTC_EVENT.replace(
 				'SUMMARY:Synthetic event',
-				'SUMMARY:Synthetic event\r\nRRULE:FREQ=DAILY;COUNT=2',
+				'SUMMARY:Synthetic event\r\nRRULE:FREQ=DAILY;COUNT=2\r\nEXDATE:20400116T100000Z',
 			);
 			const context = createCalendarEventPreservationContext(parse(source));
 			const patch =

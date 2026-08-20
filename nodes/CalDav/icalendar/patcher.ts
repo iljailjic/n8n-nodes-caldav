@@ -11,6 +11,13 @@ import { parseICalendarResource } from './parser';
 import type { CalendarEventInstantProjector } from './serializer';
 import { canonicalizeIanaTimeZone, projectInstantInTimeZone } from './timeZones';
 import type { CalendarEventTimeZone } from './timeZones';
+import {
+	normalizeRecurrenceRule,
+	projectRecurrenceRule,
+	recurrenceRulesAreSemanticallyEqual,
+	serializeRecurrenceRule,
+} from './recurrence';
+import type { RecurrenceRule, RecurrenceStartContext } from './recurrence';
 import type {
 	ICalendarComponent,
 	ICalendarEntry,
@@ -40,6 +47,7 @@ interface CalendarEventPatchCommon {
 	readonly categories?: OptionalFieldPatch<readonly string[]>;
 	readonly status?: OptionalFieldPatch<CalendarEventStatus>;
 	readonly transparency?: OptionalFieldPatch<CalendarEventTransparency>;
+	readonly recurrence?: OptionalFieldPatch<RecurrenceRule>;
 	readonly alarms?: readonly CalendarAlarmMutation[];
 }
 
@@ -71,6 +79,7 @@ export type CalendarEventPatchField =
 	| 'categories'
 	| 'status'
 	| 'transparency'
+	| 'recurrence'
 	| 'alarms';
 
 export const CalendarEventPatchErrorCode = Object.freeze({
@@ -85,6 +94,7 @@ export const CalendarEventPatchErrorCode = Object.freeze({
 	INVALID_TEXT: 'INVALID_TEXT',
 	INVALID_URI: 'INVALID_URI',
 	UNSUPPORTED_TIME: 'UNSUPPORTED_TIME',
+	UNSAFE_RECURRENCE_MUTATION: 'UNSAFE_RECURRENCE_MUTATION',
 	INCOMPATIBLE_PARAMETERS: 'INCOMPATIBLE_PARAMETERS',
 	INVALID_METADATA: 'INVALID_METADATA',
 } as const);
@@ -104,6 +114,8 @@ const ERROR_MESSAGES: Readonly<Record<CalendarEventPatchErrorCode, string>> = {
 	INVALID_TEXT: 'The calendar event patch TEXT value is invalid.',
 	INVALID_URI: 'The calendar event patch URI value is invalid.',
 	UNSUPPORTED_TIME: 'The calendar event uses an unsupported time representation for this patch.',
+	UNSAFE_RECURRENCE_MUTATION:
+		'This recurrence change cannot be applied safely. Use Raw ICS to change the complete recurrence set.',
 	INCOMPATIBLE_PARAMETERS:
 		'The calendar event property parameters are incompatible with this patch.',
 	INVALID_METADATA: 'The calendar event revision metadata is invalid.',
@@ -130,6 +142,8 @@ interface ValidatedOperation {
 	readonly calendarDate?: CalendarDateString;
 	readonly timeZone?: CalendarEventTimeZone;
 	readonly categories?: readonly string[];
+	readonly recurrence?: RecurrenceRule;
+	readonly changes?: boolean;
 }
 
 type CalendarEventPropertyPatchField = Exclude<CalendarEventPatchField, 'alarms'>;
@@ -154,6 +168,7 @@ const PATCH_FIELDS = [
 	'categories',
 	'status',
 	'transparency',
+	'recurrence',
 ] as const satisfies readonly CalendarEventPropertyPatchField[];
 const PATCH_FIELD_SET = new Set<string>(['timeMode', ...PATCH_FIELDS, 'alarms']);
 const OPTIONAL_FIELDS = new Set<CalendarEventPropertyPatchField>([
@@ -163,6 +178,7 @@ const OPTIONAL_FIELDS = new Set<CalendarEventPropertyPatchField>([
 	'categories',
 	'status',
 	'transparency',
+	'recurrence',
 ]);
 const PROPERTY_NAMES: Readonly<Record<CalendarEventPropertyPatchField, string>> = {
 	start: 'DTSTART',
@@ -177,6 +193,7 @@ const PROPERTY_NAMES: Readonly<Record<CalendarEventPropertyPatchField, string>> 
 	categories: 'CATEGORIES',
 	status: 'STATUS',
 	transparency: 'TRANSP',
+	recurrence: 'RRULE',
 };
 const CANONICAL_ORDER = [
 	'UID',
@@ -184,6 +201,7 @@ const CANONICAL_ORDER = [
 	'LAST-MODIFIED',
 	'DTSTART',
 	'DTEND',
+	'RRULE',
 	'SUMMARY',
 	'DESCRIPTION',
 	'LOCATION',
@@ -202,6 +220,7 @@ const SINGLETON_NAMES = [
 	'URL',
 	'STATUS',
 	'TRANSP',
+	'RRULE',
 ] as const;
 const IMMUTABLE_KEY_FORMS = new Set(['UID', 'RECURRENCEID', 'RECURRENCE-ID']);
 const UTC_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
@@ -611,6 +630,8 @@ function validatePatchOperations(snapshot: Readonly<Record<string, unknown>>): V
 			} else {
 				fail('INVALID_INPUT', field);
 			}
+		} else if (field === 'recurrence') {
+			validated[field] = { kind: 'set', recurrence: operation.value as RecurrenceRule };
 		} else if (field === 'categories') {
 			validated[field] = { kind: 'set', categories: categoryValues(operation.value) };
 		} else {
@@ -848,7 +869,13 @@ function parametersAreCompatible(
 function validateTouchedParameters(master: ICalendarComponent, patch: ValidatedPatch): void {
 	for (const field of PATCH_FIELDS) {
 		if (field === 'timeZone') continue;
-		if (field === 'categories' || field === 'status' || field === 'transparency') continue;
+		if (
+			field === 'categories' ||
+			field === 'status' ||
+			field === 'transparency' ||
+			field === 'recurrence'
+		)
+			continue;
 		if (patch.timeZone?.kind === 'set' && (field === 'start' || field === 'end')) continue;
 		if (patch[field]?.kind !== 'set') continue;
 		if (field === 'start' || field === 'end' || field === 'startDate' || field === 'endDate') {
@@ -962,6 +989,11 @@ interface TimePatchPlan {
 	readonly touchesTime: boolean;
 }
 
+export interface CalendarEventRecurrencePatchContext {
+	readonly current?: RecurrenceStartContext;
+	readonly final?: RecurrenceStartContext;
+}
+
 function timePropertyMode(property: ICalendarProperty): EditableTimeMode | undefined {
 	if (property.value.textValues !== null) return undefined;
 	const type = asciiUpperCase(property.value.valueType);
@@ -1033,12 +1065,8 @@ function planTimePatch(
 	}
 	if (hasTimeZone) {
 		if (
-			directProperties(master, 'RRULE').length !== 0 ||
-			directProperties(master, 'RDATE').length !== 0 ||
-			directProperties(master, 'EXDATE').length !== 0 ||
-			context.exceptions.length !== 0 ||
-			((!hasTimedStart || !hasTimedEnd) &&
-				(!safeUtcTimeProperty(starts[0]!) || !safeUtcTimeProperty(ends[0]!)))
+			(!hasTimedStart || !hasTimedEnd) &&
+			(!safeUtcTimeProperty(starts[0]!) || !safeUtcTimeProperty(ends[0]!))
 		) {
 			fail('UNSUPPORTED_TIME', failureField);
 		}
@@ -1073,16 +1101,6 @@ function planTimePatch(
 			fail('INCOMPATIBLE_PARAMETERS', targetMode === 'timed' ? 'start' : 'startDate');
 		}
 	}
-	if (
-		touchesTime &&
-		(directProperties(master, 'RRULE').length !== 0 ||
-			directProperties(master, 'RDATE').length !== 0 ||
-			directProperties(master, 'EXDATE').length !== 0 ||
-			context.exceptions.length !== 0)
-	) {
-		fail('UNSUPPORTED_TIME', failureField);
-	}
-
 	if (targetMode === 'timed') {
 		const startKey = hasTimedStart
 			? utcDateTimeKey(formatUtcDateTime(patch.start!.timestamp!))
@@ -1112,6 +1130,189 @@ function planTimePatch(
 	}
 
 	return { remoteMode, targetMode, conversion, touchesTime };
+}
+
+function utcStartContext(timestamp: number): RecurrenceStartContext {
+	return {
+		timeMode: 'timed',
+		timeZoneMode: 'utc',
+		start: new Date(timestamp)
+			.toISOString()
+			.replace('.000Z', 'Z') as import('./eventReadModel').UtcDateTimeString,
+	};
+}
+
+function utcMatchTimestamp(match: RegExpExecArray): number {
+	const date = new Date(0);
+	date.setUTCFullYear(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+	date.setUTCHours(Number(match[4]), Number(match[5]), Number(match[6]), 0);
+	return date.getTime();
+}
+
+function currentRecurrenceStart(master: ICalendarComponent): RecurrenceStartContext | undefined {
+	const starts = directProperties(master, 'DTSTART');
+	if (starts.length !== 1) return undefined;
+	const start = starts[0]!;
+	if (timePropertyMode(start) === 'allDay') {
+		const raw = calendarDateKey(start.value.raw);
+		return raw === undefined
+			? undefined
+			: {
+					timeMode: 'allDay',
+					startDate:
+						`${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}` as import('./eventReadModel').CalendarDateString,
+				};
+	}
+	const match = UTC_DATE_TIME_PATTERN.exec(start.value.raw);
+	if (match === null) return undefined;
+	return utcStartContext(utcMatchTimestamp(match));
+}
+
+function finalRecurrenceStart(
+	context: CalendarEventPreservationContext,
+	patch: ValidatedPatch,
+	timePlan: TimePatchPlan,
+	projectInstant: CalendarEventInstantProjector,
+): RecurrenceStartContext | undefined {
+	const starts = directProperties(context.master, 'DTSTART');
+	if (starts.length !== 1) return undefined;
+	if (timePlan.targetMode === 'allDay') {
+		const date =
+			patch.startDate?.calendarDate ??
+			(timePlan.remoteMode === 'allDay'
+				? (() => {
+						const raw = calendarDateKey(starts[0]!.value.raw);
+						return raw === undefined
+							? undefined
+							: (`${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}` as import('./eventReadModel').CalendarDateString);
+					})()
+				: undefined);
+		return date === undefined ? undefined : { timeMode: 'allDay', startDate: date };
+	}
+	const timestamp =
+		patch.start?.timestamp ??
+		(() => {
+			const match = UTC_DATE_TIME_PATTERN.exec(starts[0]!.value.raw);
+			return match === null ? undefined : utcMatchTimestamp(match);
+		})();
+	if (timestamp === undefined) return undefined;
+	const selected = patch.timeZone?.timeZone;
+	if (selected?.timeZoneMode === 'iana') {
+		return {
+			timeMode: 'timed',
+			timeZoneMode: 'iana',
+			start: new Date(timestamp)
+				.toISOString()
+				.replace('.000Z', 'Z') as import('./eventReadModel').UtcDateTimeString,
+			startLocal: projectInstant(new Date(timestamp), selected.timeZone),
+		};
+	}
+	if (selected?.timeZoneMode === 'utc' || starts[0]!.value.raw.endsWith('Z')) {
+		return utcStartContext(timestamp);
+	}
+	return undefined;
+}
+
+function supportedRule(
+	property: ICalendarProperty,
+	start: RecurrenceStartContext | undefined,
+): RecurrenceRule | undefined {
+	const projected = projectRecurrenceRule(property, start);
+	return 'frequency' in projected ? projected : undefined;
+}
+
+function resolveRecurrencePatch(
+	context: CalendarEventPreservationContext,
+	patch: ValidatedPatch,
+	timePlan: TimePatchPlan,
+	projectInstant: CalendarEventInstantProjector,
+	recurrenceContext?: CalendarEventRecurrencePatchContext,
+): ValidatedPatch {
+	const rules = directProperties(context.master, 'RRULE');
+	const currentStart = recurrenceContext?.current ?? currentRecurrenceStart(context.master);
+	const finalStart =
+		recurrenceContext?.final ?? finalRecurrenceStart(context, patch, timePlan, projectInstant);
+	const currentRule = rules[0] === undefined ? undefined : supportedRule(rules[0], currentStart);
+	const dependentContent =
+		context.exceptions.length > 0 ||
+		directProperties(context.master, 'EXDATE').length > 0 ||
+		directProperties(context.master, 'RDATE').length > 0 ||
+		directProperties(context.master, 'EXRULE').length > 0;
+	const state =
+		rules.length === 0 && !dependentContent
+			? 'absent-clean'
+			: rules.length === 1 &&
+				  currentRule !== undefined &&
+				  rules[0]!.parameters.length === 0 &&
+				  !dependentContent
+				? 'supported-clean'
+				: 'dependent-or-unsupported';
+	const requested = patch.recurrence;
+	let recurrence = requested;
+	let recurrenceChanges = false;
+	if (requested?.kind === 'set') {
+		if (finalStart === undefined) fail('UNSUPPORTED_TIME', 'recurrence');
+		const normalized = normalizeRecurrenceRule(requested.recurrence, finalStart);
+		const equal =
+			currentRule !== undefined && recurrenceRulesAreSemanticallyEqual(currentRule, normalized);
+		recurrenceChanges = !equal;
+		recurrence = {
+			kind: 'set',
+			recurrence: normalized,
+			text: serializeRecurrenceRule(normalized, finalStart),
+			changes: recurrenceChanges,
+		};
+	} else if (requested?.kind === 'remove') {
+		recurrenceChanges = rules.length > 0;
+		recurrence = { kind: 'remove', changes: recurrenceChanges };
+	}
+	const timeChanges = (['start', 'end', 'startDate', 'endDate', 'timeZone'] as const).some(
+		(field) => {
+			const operation = patch[field];
+			return operation !== undefined && operationChanges(context.master, field, operation);
+		},
+	);
+	if ((recurrenceChanges || timeChanges) && state === 'dependent-or-unsupported') {
+		fail('UNSAFE_RECURRENCE_MUTATION', 'recurrence');
+	}
+	if (
+		timeChanges &&
+		requested === undefined &&
+		currentRule !== undefined &&
+		finalStart !== undefined
+	) {
+		normalizeRecurrenceRule(currentRule, finalStart);
+	}
+	return {
+		...patch,
+		...(recurrence === undefined ? {} : { recurrence }),
+	};
+}
+
+function preflightDependentRecurrenceTimeSafety(
+	context: CalendarEventPreservationContext,
+	patch: ValidatedPatch,
+	recurrenceContext?: CalendarEventRecurrencePatchContext,
+): void {
+	const rules = directProperties(context.master, 'RRULE');
+	const start = recurrenceContext?.current ?? currentRecurrenceStart(context.master);
+	const currentRule =
+		rules[0] === undefined || start === undefined ? undefined : supportedRule(rules[0], start);
+	const dependent =
+		context.exceptions.length > 0 ||
+		directProperties(context.master, 'EXDATE').length > 0 ||
+		directProperties(context.master, 'RDATE').length > 0 ||
+		directProperties(context.master, 'EXRULE').length > 0 ||
+		rules.length > 1 ||
+		(rules.length === 1 && (rules[0]!.parameters.length > 0 || currentRule === undefined));
+	if (!dependent) return;
+	const timeChanges = (['start', 'end', 'startDate', 'endDate', 'timeZone'] as const).some(
+		(field) => {
+			const operation = patch[field];
+			return operation !== undefined && operationChanges(context.master, field, operation);
+		},
+	);
+	if (timeChanges) fail('UNSAFE_RECURRENCE_MUTATION', 'recurrence');
 }
 
 function operationChanges(
@@ -1149,6 +1350,7 @@ function operationChanges(
 	const properties = directProperties(master, PROPERTY_NAMES[field]);
 	const property = properties[0];
 	if (operation.kind === 'remove') return properties.length > 0;
+	if (field === 'recurrence') return operation.changes ?? true;
 	if (field === 'categories' || field === 'status' || field === 'transparency') {
 		const expectedValues =
 			field === 'categories' ? operation.categories! : ([operation.text!] as readonly string[]);
@@ -1275,6 +1477,26 @@ function applyFieldOperation(
 	clearTimeParameters = false,
 ): void {
 	const name = PROPERTY_NAMES[field];
+	if (field === 'recurrence') {
+		for (let index = entries.length - 1; index >= 0; index -= 1) {
+			const entry = entries[index]!;
+			if (entry.kind === 'property' && asciiUpperCase(entry.name) === 'RRULE') {
+				entries.splice(index, 1);
+			}
+		}
+		if (operation.kind === 'set') {
+			insertCanonical(
+				entries,
+				freezeProperty({
+					kind: 'property',
+					name: 'RRULE',
+					parameters: [],
+					value: { kind: 'value', valueType: 'RECUR', raw: operation.text!, textValues: null },
+				}),
+			);
+		}
+		return;
+	}
 	if (field === 'categories' || field === 'status' || field === 'transparency') {
 		const metadataName =
 			field === 'categories' ? 'CATEGORIES' : field === 'status' ? 'STATUS' : 'TRANSP';
@@ -1555,6 +1777,7 @@ export function applyCalendarEventPatch(
 	timeZoneDefinition?: ICalendarComponent,
 	removedTimeZoneDefinition?: ICalendarComponent,
 	alarmUidFactory?: CalendarAlarmUidGenerator,
+	recurrenceContext?: CalendarEventRecurrencePatchContext,
 ): ICalendarResource {
 	const canonicalContext = validateStage(
 		() => snapshotCanonicalContext(context),
@@ -1563,9 +1786,17 @@ export function applyCalendarEventPatch(
 	validateIdentity(canonicalContext);
 	const metadata = validateSingletonsAndMetadata(canonicalContext.master);
 	const snapshot = validateStage(() => snapshotPatch(patch), 'INVALID_INPUT');
-	const validatedPatch = validateStage(() => validatePatchOperations(snapshot), 'INVALID_INPUT');
-	validateTouchedParameters(canonicalContext.master, validatedPatch);
-	const timePlan = planTimePatch(canonicalContext, validatedPatch);
+	const initialPatch = validateStage(() => validatePatchOperations(snapshot), 'INVALID_INPUT');
+	validateTouchedParameters(canonicalContext.master, initialPatch);
+	preflightDependentRecurrenceTimeSafety(canonicalContext, initialPatch, recurrenceContext);
+	const timePlan = planTimePatch(canonicalContext, initialPatch);
+	const validatedPatch = resolveRecurrencePatch(
+		canonicalContext,
+		initialPatch,
+		timePlan,
+		projectInstant,
+		recurrenceContext,
+	);
 	const eventFieldsChanged = PATCH_FIELDS.some((field) => {
 		const operation = validatedPatch[field];
 		return operation !== undefined && operationChanges(canonicalContext.master, field, operation);

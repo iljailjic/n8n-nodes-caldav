@@ -7,11 +7,17 @@ import {
 	createCalendarEventPreservationContext,
 	mapCalendarEventResource,
 } from '../icalendar/eventReadModel';
-import type { CalendarEvent } from '../icalendar/eventReadModel';
+import type {
+	CalendarDateString,
+	CalendarEvent,
+	UtcDateTimeString,
+} from '../icalendar/eventReadModel';
 import { authorCalendarAlarms } from '../icalendar/alarms';
 import type { CalendarAlarmUidGenerator } from '../icalendar/alarms';
 import { parseICalendarResource } from '../icalendar/parser';
 import type { ICalendarComponent } from '../icalendar/parser';
+import { classifyIanaRecurrenceCoverage, normalizeRecurrenceRule } from '../icalendar/recurrence';
+import type { RecurrenceRule, RecurrenceStartContext } from '../icalendar/recurrence';
 import {
 	serializeBasicTimedEvent,
 	serializeBasicUtcEvent,
@@ -24,6 +30,7 @@ import type { AbsoluteHttpUrl } from '../transport/url';
 import type { CalendarEventCreateClock, CalendarEventCreateInput } from './create';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
 import { resolveCalendarEventTimeZoneAuthoring } from './timeZoneAuthoring';
+import type { CalendarEventTimeZoneAuthoringCoverage } from './timeZoneAuthoring';
 import { resolveCalendarEventUid } from './uid';
 import type { CalendarEventUidGenerator } from './uid';
 
@@ -100,6 +107,55 @@ export interface PreparedCalendarEventCreate {
 	readonly uid: string;
 }
 
+function utcString(value: Date): UtcDateTimeString {
+	return value.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
+}
+
+function recurrenceStartContext(input: CalendarEventCreateInput): RecurrenceStartContext {
+	if (input.timeMode === 'allDay') {
+		return { timeMode: 'allDay', startDate: input.startDate as CalendarDateString };
+	}
+	const timeZone = input.timeZone ?? { timeZoneMode: 'utc' as const };
+	if (timeZone.timeZoneMode === 'utc') {
+		return { timeMode: 'timed', timeZoneMode: 'utc', start: utcString(input.start) };
+	}
+	return {
+		timeMode: 'timed',
+		timeZoneMode: 'iana',
+		start: utcString(input.start),
+		startLocal: projectInstantInTimeZone(input.start, timeZone.timeZone),
+	};
+}
+
+function normalizedRecurrence(
+	input: CalendarEventCreateInput,
+	start: RecurrenceStartContext,
+): RecurrenceRule | undefined {
+	return input.recurrence === undefined
+		? undefined
+		: normalizeRecurrenceRule(input.recurrence, start);
+}
+
+function ianaCoverage(
+	input: Extract<CalendarEventCreateInput, { readonly timeMode: 'timed' }>,
+	recurrence: RecurrenceRule | undefined,
+	start: Extract<RecurrenceStartContext, { readonly timeZoneMode: 'iana' }>,
+): CalendarEventTimeZoneAuthoringCoverage {
+	if (recurrence === undefined) {
+		return { kind: 'finite', interval: { start: input.start, end: input.end } };
+	}
+	const classification = classifyIanaRecurrenceCoverage(recurrence, start);
+	if (classification.kind === 'requiresReference') return { kind: classification.bound };
+	const duration = input.end.getTime() - input.start.getTime();
+	return {
+		kind: 'finite',
+		interval: {
+			start: new Date(classification.interval.start),
+			end: new Date(new Date(classification.interval.end).getTime() + duration),
+		},
+	};
+}
+
 export async function prepareCalendarEventCreate(
 	input: CalendarEventCreateInput,
 	clock: CalendarEventCreateClock,
@@ -107,6 +163,8 @@ export async function prepareCalendarEventCreate(
 	uidGenerator?: CalendarEventUidGenerator,
 	alarmUidGenerator: CalendarAlarmUidGenerator = randomUUID,
 ): Promise<PreparedCalendarEventCreate> {
+	const recurrenceStart = recurrenceStartContext(input);
+	const recurrence = normalizedRecurrence(input, recurrenceStart);
 	const timeZone =
 		input.timeMode === 'timed'
 			? (input.timeZone ?? { timeZoneMode: 'utc' as const })
@@ -121,7 +179,11 @@ export async function prepareCalendarEventCreate(
 		const selection = await resolveCalendarEventTimeZoneAuthoring({
 			calendarUrl: input.calendarUrl,
 			timeZone: timeZone.timeZone,
-			coverage: { kind: 'finite', interval: { start: input.start, end: input.end } },
+			coverage: ianaCoverage(
+				input,
+				recurrence,
+				recurrenceStart as Extract<RecurrenceStartContext, { readonly timeZoneMode: 'iana' }>,
+			),
 			...(timeZoneContext === undefined ? {} : { referenceContext: timeZoneContext }),
 		});
 		timeZoneDefinition = selection.definition;
@@ -143,6 +205,7 @@ export async function prepareCalendarEventCreate(
 		...(input.categories === undefined ? {} : { categories: input.categories }),
 		...(input.status === undefined ? {} : { status: input.status }),
 		...(input.transparency === undefined ? {} : { transparency: input.transparency }),
+		...(recurrence === undefined ? {} : { recurrence }),
 	};
 	let calendarData =
 		input.timeMode === 'allDay'

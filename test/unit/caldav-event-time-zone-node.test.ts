@@ -261,6 +261,8 @@ describe('CalDAV timed event timezone UI', () => {
 			'categories',
 			'description',
 			'location',
+			'recurrence',
+			'recurrence',
 			'status',
 			'transparency',
 			'url',

@@ -15,8 +15,11 @@ import type {
 	CalendarEvent,
 	CalendarEventStatus,
 	CalendarEventTransparency,
+	UtcDateTimeString,
 } from '../icalendar/eventReadModel';
 import type { CalendarEventPatch, OptionalFieldPatch } from '../icalendar/patcher';
+import { normalizeRecurrenceRule } from '../icalendar/recurrence';
+import type { RecurrenceRule, RecurrenceStartContext } from '../icalendar/recurrence';
 import { isAbsoluteICalendarUri } from '../icalendar/uri';
 import {
 	CalDavIanaTimeZoneError,
@@ -68,6 +71,7 @@ interface CalendarEventUpsertCommon {
 	readonly status?: OptionalFieldPatch<CalendarEventStatus>;
 	readonly transparency?: OptionalFieldPatch<CalendarEventTransparency>;
 	readonly alarms?: readonly CalendarAlarmMutation[];
+	readonly recurrence?: OptionalFieldPatch<RecurrenceRule>;
 }
 
 export type CalendarEventUpsertInput = CalendarEventUpsertCommon &
@@ -324,6 +328,47 @@ function alarmValidationMaster(summary: string): ICalendarComponent {
 	};
 }
 
+function recurrenceStartContext(
+	time:
+		| {
+				readonly timeMode: 'timed';
+				readonly start: Date;
+				readonly timeZone: CalendarEventTimeZone;
+		  }
+		| { readonly timeMode: 'allDay'; readonly startDate: CalendarDateString },
+): RecurrenceStartContext {
+	if (time.timeMode === 'allDay') return { timeMode: 'allDay', startDate: time.startDate };
+	const start = time.start.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
+	return time.timeZone.timeZoneMode === 'utc'
+		? { timeMode: 'timed', timeZoneMode: 'utc', start }
+		: {
+				timeMode: 'timed',
+				timeZoneMode: 'iana',
+				start,
+				startLocal: projectInstantInTimeZone(time.start, time.timeZone.timeZone),
+			};
+}
+
+function recurrencePatch(
+	value: unknown,
+	start: RecurrenceStartContext,
+): OptionalFieldPatch<RecurrenceRule> {
+	if (!isRecord(value)) return invalid(MESSAGES.INVALID_ADDITIONAL_FIELDS);
+	const keys = Reflect.ownKeys(value);
+	if (value.kind === 'remove' && keys.length === 1 && keys[0] === 'kind') {
+		return Object.freeze({ kind: 'remove' });
+	}
+	if (
+		value.kind !== 'set' ||
+		keys.length !== 2 ||
+		!keys.includes('kind') ||
+		!keys.includes('value')
+	) {
+		return invalid(MESSAGES.INVALID_ADDITIONAL_FIELDS);
+	}
+	return Object.freeze({ kind: 'set', value: normalizeRecurrenceRule(value.value, start) });
+}
+
 function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInput {
 	if (!isRecord(input)) return invalid(MESSAGES.INVALID_CALENDAR_URL);
 	let calendarUrl: AbsoluteHttpUrl;
@@ -420,6 +465,7 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 		'status',
 		'transparency',
 		'alarms',
+		'recurrence',
 		...(input.timeMode === 'timed' ? ['start', 'end', 'timeZone'] : ['startDate', 'endDate']),
 	]);
 	if (Reflect.ownKeys(input).some((key) => typeof key !== 'string' || !allowed.has(key))) {
@@ -458,6 +504,10 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 		input.alarms === undefined
 			? undefined
 			: normalizeCalendarAlarmMutations(alarmValidationMaster(input.summary), input.alarms);
+	const recurrence =
+		input.recurrence === undefined
+			? undefined
+			: recurrencePatch(input.recurrence, recurrenceStartContext(time));
 	if (uid === undefined && alarms?.some((mutation) => mutation.kind !== 'add')) {
 		return invalid(MESSAGES.INVALID_ADDITIONAL_FIELDS);
 	}
@@ -496,6 +546,7 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 		...(status === undefined ? {} : { status }),
 		...(transparency === undefined ? {} : { transparency }),
 		...(alarms === undefined ? {} : { alarms }),
+		...(recurrence === undefined ? {} : { recurrence }),
 	}) as CalendarEventUpsertInput;
 }
 
@@ -551,6 +602,7 @@ function createInput(
 						mutation.kind === 'add' ? [mutation.alarm] : [],
 					),
 				}),
+		...(input.recurrence?.kind === 'set' ? { recurrence: input.recurrence.value } : {}),
 	}) as CalendarEventCreateInput;
 }
 
@@ -579,6 +631,7 @@ function updatePatch(input: CalendarEventUpsertInput): CalendarEventPatch {
 		...(input.status === undefined ? {} : { status: input.status }),
 		...(input.transparency === undefined ? {} : { transparency: input.transparency }),
 		...(input.alarms === undefined ? {} : { alarms: input.alarms }),
+		...(input.recurrence === undefined ? {} : { recurrence: input.recurrence }),
 	}) as CalendarEventPatch;
 }
 
