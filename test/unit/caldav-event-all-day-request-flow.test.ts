@@ -239,11 +239,14 @@ describe('issue #41 read-only Update and Delete request boundaries', () => {
 		expect(requests.request.mock.calls[0]?.[0]).toMatchObject({ method: CalDavMethod.GET });
 	});
 
-	it('stops a recurrence-bearing time change after the mandatory resolution GET and before PUT', async () => {
+	it('stops a dependent recurrence time change after the mandatory resolution GET and before PUT', async () => {
 		const requests = transport(async (request) =>
 			response(200, request.url, {
 				etag: '"recurrence-etag"',
-				body: allDayEvent('recurrence-blocked', '20240229', '20240301', ['RRULE:FREQ=DAILY']),
+				body: allDayEvent('recurrence-blocked', '20240229', '20240301', [
+					'RRULE:FREQ=DAILY',
+					'EXDATE;VALUE=DATE:20240304',
+				]),
 			}),
 		);
 		const input: CalendarEventUpdateInput = {

@@ -341,7 +341,7 @@ describe('issue #41 same-mode patching and explicit conversion', () => {
 		expectPatchFailure(ics, value as Issue41Patch);
 	});
 
-	it.each(['RRULE:FREQ=DAILY', 'RDATE;VALUE=DATE:20240302', 'EXDATE;VALUE=DATE:20240302'])(
+	it.each(['RDATE;VALUE=DATE:20240302', 'EXDATE;VALUE=DATE:20240302'])(
 		'rejects a time change when %s is present',
 		(recurrenceLine) => {
 			expectPatchFailure(
@@ -353,6 +353,18 @@ describe('issue #41 same-mode patching and explicit conversion', () => {
 			);
 		},
 	);
+
+	it('allows a time change when a clean supported RRULE is present', () => {
+		const patched = patch(
+			allDayEvent('recurrence-supported', undefined, undefined, ['RRULE:FREQ=DAILY']),
+			{
+				timeMode: 'allDay',
+				endDate: { kind: 'set', value: '2024-03-02' },
+			},
+		);
+		expect(patched).toContain('DTEND;VALUE=DATE:20240302');
+		expect(patched).toContain('RRULE:FREQ=DAILY');
+	});
 
 	it('rejects a time change when a RECURRENCE-ID exception is present', () => {
 		const recurring = calendarObject([

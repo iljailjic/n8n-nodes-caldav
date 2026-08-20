@@ -39,6 +39,8 @@ const ERROR_MESSAGES: Readonly<Record<CalendarEventPatchErrorCodeType, string>> 
 	INVALID_TEXT: 'The calendar event patch TEXT value is invalid.',
 	INVALID_URI: 'The calendar event patch URI value is invalid.',
 	UNSUPPORTED_TIME: 'The calendar event uses an unsupported time representation for this patch.',
+	UNSAFE_RECURRENCE_MUTATION:
+		'This recurrence change cannot be applied safely. Use Raw ICS to change the complete recurrence set.',
 	INCOMPATIBLE_PARAMETERS:
 		'The calendar event property parameters are incompatible with this patch.',
 	INVALID_METADATA: 'The calendar event revision metadata is invalid.',
@@ -415,7 +417,6 @@ describe('time scope, parameters, ordering, and revision metadata', () => {
 	});
 
 	it.each([
-		['recurrence', ['RRULE:FREQ=DAILY;COUNT=2'], 'UNSUPPORTED_TIME', 'start'],
 		[
 			'all day',
 			['DTSTART;VALUE=DATE:20260812', 'DTEND;VALUE=DATE:20260813'],
@@ -454,6 +455,25 @@ describe('time scope, parameters, ordering, and revision metadata', () => {
 			expect(value(textOnly, 'SUMMARY')).toBe('Preserved time');
 		},
 	);
+
+	it('allows a time patch on a clean supported recurrence rule', () => {
+		const source = context(
+			event('supported-recurrence-time', [
+				'DTSTAMP:20260812T080000Z',
+				'DTSTART:20260812T090000Z',
+				'DTEND:20260812T100000Z',
+				'RRULE:FREQ=DAILY;COUNT=2',
+				'SUMMARY:Original',
+			]),
+		);
+		const output = applyCalendarEventPatch(
+			source,
+			{ start: { kind: 'set', value: new Date('2026-08-12T09:30:00Z') } },
+			MODIFIED_AT,
+		);
+		expect(value(output, 'DTSTART')).toBe('20260812T093000Z');
+		expect(value(output, 'RRULE')).toBe('FREQ=DAILY;COUNT=2');
+	});
 
 	it('preserves source casing, parameter order/names/values, and position on replacement', () => {
 		const source = context(

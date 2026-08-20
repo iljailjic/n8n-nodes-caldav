@@ -87,6 +87,35 @@ function calendarData(summary = 'Before update'): string {
 	].join('\r\n');
 }
 
+function recurringCalendarData(options: { readonly exception?: boolean } = {}): string {
+	return [
+		'BEGIN:VCALENDAR',
+		'VERSION:2.0',
+		'PRODID:-//example.test//Recurring update oracle//EN',
+		'BEGIN:VEVENT',
+		'UID:recurring-update@example.test',
+		'DTSTAMP:20400101T000000Z',
+		'DTSTART:20400102T100000Z',
+		'DTEND:20400102T103000Z',
+		'RRULE:INTERVAL=2;FREQ=WEEKLY;BYDAY=MO,WE',
+		'SUMMARY:Recurring before update',
+		'END:VEVENT',
+		...(options.exception
+			? [
+					'BEGIN:VEVENT',
+					'UID:recurring-update@example.test',
+					'RECURRENCE-ID:20400116T100000Z',
+					'DTSTART:20400116T120000Z',
+					'DTEND:20400116T123000Z',
+					'SUMMARY:Moved occurrence',
+					'END:VEVENT',
+				]
+			: []),
+		'END:VCALENDAR',
+		'',
+	].join('\r\n');
+}
+
 function readResult(
 	calendarText: string,
 	options: {
@@ -218,6 +247,94 @@ beforeEach(() => {
 });
 
 describe('calendar event Update coordinator requests and authoritative result', () => {
+	it('preserves the lexical recurrence set and exception components on a metadata update', async () => {
+		const current = readResult(recurringCalendarData({ exception: true }), { etag: '"snapshot"' });
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(current)
+			.mockImplementationOnce(async () => {
+				const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+				return readResult(sent, { etag: '"confirmed"' });
+			});
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: RESOURCE_URL,
+		});
+
+		await expect(
+			updateCalendarEvent(
+				TRANSPORT,
+				resourceInput({ summary: { kind: 'set', value: 'Recurring after update' } }),
+				() => CLOCK,
+			),
+		).resolves.toMatchObject({
+			recurrence: { frequency: 'weekly', interval: 2 },
+			summary: 'Recurring after update',
+		});
+
+		const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+		expect(sent).toContain('RRULE:INTERVAL=2;FREQ=WEEKLY;BYDAY=MO,WE');
+		expect(sent.match(/BEGIN:VEVENT/g)).toHaveLength(2);
+		expect(sent).toContain('RECURRENCE-ID:20400116T100000Z');
+	});
+
+	it('requires a verified server reference before changing a COUNT-bounded IANA series', async () => {
+		const recurring = SUPPORTED_EMBEDDED_IANA_EVENT.replace(
+			'SUMMARY:Synthetic event',
+			'RRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:Synthetic event',
+		);
+		const current = readResult(recurring, { etag: '"snapshot"' });
+		const resolveReference = vi.fn().mockRejectedValue(new Error('unavailable'));
+		mocks.getCalendarEventByResourceUrl.mockResolvedValueOnce(current);
+
+		await expect(
+			updateCalendarEvent(
+				TRANSPORT,
+				resourceInput({ start: { kind: 'set', value: new Date('2040-07-15T07:30:00Z') } }),
+				() => CLOCK,
+				{ resolveReference },
+			),
+		).rejects.toMatchObject({
+			code: 'COUNT_REQUIRES_REFERENCE',
+			message: 'A Count-bounded IANA recurrence requires server time-zone reference support.',
+		});
+		expect(resolveReference).toHaveBeenCalledOnce();
+		expect(mocks.updateCalendarEventResource).not.toHaveBeenCalled();
+	});
+
+	it('changes a clean finite IANA series using recurrence-wide embedded coverage', async () => {
+		const recurring = SUPPORTED_EMBEDDED_IANA_EVENT.replace(
+			'SUMMARY:Synthetic event',
+			'RRULE:FREQ=DAILY;UNTIL=20400720T070000Z\r\nSUMMARY:Synthetic event',
+		);
+		const current = readResult(recurring, { etag: '"snapshot"' });
+		const resolveReference = vi.fn().mockRejectedValue(new Error('unavailable'));
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(current)
+			.mockImplementationOnce(async () => {
+				const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+				return readResult(sent, { etag: '"confirmed"' });
+			});
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: RESOURCE_URL,
+		});
+
+		await expect(
+			updateCalendarEvent(
+				TRANSPORT,
+				resourceInput({ start: { kind: 'set', value: new Date('2040-07-15T07:30:00Z') } }),
+				() => CLOCK,
+				{ resolveReference },
+			),
+		).resolves.toMatchObject({
+			start: '2040-07-15T07:30:00Z',
+			recurrence: { frequency: 'daily' },
+		});
+		expect(resolveReference).not.toHaveBeenCalled();
+		const sent = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
+		expect(sent).toContain('RRULE:FREQ=DAILY;UNTIL=20400720T070000Z');
+	});
+
 	it('preserves a source TZID alias when timezone is omitted', async () => {
 		const aliased = SUPPORTED_EMBEDDED_IANA_EVENT.replaceAll('Europe/Prague', 'US/Eastern');
 		const current = readResult(aliased, { etag: '"snapshot"' });

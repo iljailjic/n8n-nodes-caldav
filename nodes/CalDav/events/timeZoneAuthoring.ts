@@ -15,6 +15,7 @@ import type { FiniteTimeZoneCoverage, IanaTimeZoneId } from '../icalendar/timeZo
 import type { AbsoluteHttpUrl } from '../transport/url';
 
 export const CalendarEventTimeZoneAuthoringErrorCode = Object.freeze({
+	COUNT_REQUIRES_REFERENCE: 'COUNT_REQUIRES_REFERENCE',
 	UNBOUNDED_REQUIRES_REFERENCE: 'UNBOUNDED_REQUIRES_REFERENCE',
 	UNREPRESENTABLE_TIME_ZONE: 'UNREPRESENTABLE_TIME_ZONE',
 } as const);
@@ -23,6 +24,8 @@ export type CalendarEventTimeZoneAuthoringErrorCode =
 	(typeof CalendarEventTimeZoneAuthoringErrorCode)[keyof typeof CalendarEventTimeZoneAuthoringErrorCode];
 
 const ERROR_MESSAGES: Readonly<Record<CalendarEventTimeZoneAuthoringErrorCode, string>> = {
+	COUNT_REQUIRES_REFERENCE:
+		'A Count-bounded IANA recurrence requires server time-zone reference support.',
 	UNBOUNDED_REQUIRES_REFERENCE:
 		'An unbounded IANA recurrence requires server time-zone reference support.',
 	UNREPRESENTABLE_TIME_ZONE:
@@ -41,6 +44,7 @@ export class CalDavCalendarEventTimeZoneAuthoringError extends Error {
 
 export type CalendarEventTimeZoneAuthoringCoverage =
 	| { readonly kind: 'finite'; readonly interval: FiniteTimeZoneCoverage }
+	| { readonly kind: 'count' }
 	| { readonly kind: 'unbounded' };
 
 export interface CalendarEventTimeZoneAuthoringInput {
@@ -119,6 +123,9 @@ export async function resolveCalendarEventTimeZoneAuthoring(
 	if (reference !== undefined) return reference;
 	if (input.coverage.kind === 'unbounded') {
 		throw new CalDavCalendarEventTimeZoneAuthoringError('UNBOUNDED_REQUIRES_REFERENCE');
+	}
+	if (input.coverage.kind === 'count') {
+		throw new CalDavCalendarEventTimeZoneAuthoringError('COUNT_REQUIRES_REFERENCE');
 	}
 	try {
 		if (input.reusableDefinition !== undefined) {

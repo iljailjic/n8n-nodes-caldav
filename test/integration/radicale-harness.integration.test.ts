@@ -1053,6 +1053,77 @@ describe('Radicale authenticated discovery', () => {
 	});
 });
 
+describe('Radicale recurring event authoring and preservation', () => {
+	it('creates, queries, updates, and reads one recurring master without expansion', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'recurrence-authoring', 'Recurrence Authoring'),
+			);
+			const liveTransport = transport(run);
+			const uid = `recurrence-authoring-${run.identity}@example.test`;
+			const created = await createCalendarEvent(
+				liveTransport,
+				{
+					calendarUrl,
+					uid,
+					timeMode: 'timed',
+					start: new Date('2040-01-02T10:00:00Z'),
+					end: new Date('2040-01-02T10:30:00Z'),
+					summary: 'Recurring master before update',
+					recurrence: {
+						frequency: 'weekly',
+						end: { kind: 'count', count: 4 },
+						byDay: [{ weekday: 'monday' }, { weekday: 'wednesday' }],
+					},
+				},
+				() => new Date('2040-01-01T00:00:00Z'),
+			);
+			expect(created.recurrence).toMatchObject({
+				frequency: 'weekly',
+				end: { kind: 'count', count: 4 },
+			});
+
+			const queried = await queryCalendarEventsByTimeRange(liveTransport, calendarUrl, {
+				start: new Date('2040-01-02T09:59:59Z'),
+				end: new Date('2040-01-03T00:00:00Z'),
+			});
+			expect(queried.filter(({ event }) => event.uid === uid)).toHaveLength(1);
+
+			const updated = await updateCalendarEvent(
+				liveTransport,
+				{
+					calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+					etag: created.etag,
+					patch: { summary: { kind: 'set', value: 'Recurring master after update' } },
+				},
+				() => new Date('2040-01-01T00:01:00Z'),
+			);
+			expect(updated).toMatchObject({
+				uid,
+				summary: 'Recurring master after update',
+				recurrence: { frequency: 'weekly', end: { kind: 'count', count: 4 } },
+			});
+
+			const storedBody = await (await authenticatedFetch(run, created.resourceUrl)).text();
+			expect(storedBody.match(/BEGIN:VEVENT/g)).toHaveLength(1);
+			expect(storedBody).toContain('RRULE:FREQ=WEEKLY;COUNT=4;BYDAY=MO,WE');
+			expect(storedBody).toContain('SUMMARY:Recurring master after update');
+			await expect(
+				getCalendarEventByResourceUrl(liveTransport, calendarUrl, created.resourceUrl),
+			).resolves.toMatchObject({
+				event: {
+					uid,
+					recurrence: { frequency: 'weekly', end: { kind: 'count', count: 4 } },
+				},
+			});
+		} finally {
+			await teardownRun(run);
+		}
+	});
+});
+
 describe('Radicale calendar-event UID resolution', () => {
 	it('retrieves one stored event identically by exact resource URL and UID with live missing and forbidden boundaries', async () => {
 		const run = await startRun();
