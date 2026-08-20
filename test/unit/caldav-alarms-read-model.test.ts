@@ -76,7 +76,6 @@ describe('VALARM event read-model integration', () => {
 			'resourceUrl',
 			'uid',
 			'summary',
-			'alarms',
 			'timeMode',
 			'accessMode',
 			'start',
@@ -84,6 +83,7 @@ describe('VALARM event read-model integration', () => {
 			'timeZoneMode',
 			'startLocal',
 			'endLocal',
+			'alarms',
 		]);
 		expect(Object.isFrozen(result.alarms)).toBe(true);
 	});

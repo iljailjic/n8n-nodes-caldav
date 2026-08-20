@@ -94,6 +94,12 @@ import type {
 	CalendarAlarmSelector,
 	CalendarAlarmTrigger,
 } from './icalendar/alarms';
+import { CalDavRecurrenceRuleError, normalizeRecurrenceRule } from './icalendar/recurrence';
+import type {
+	RecurrenceField,
+	RecurrenceRule,
+	RecurrenceStartContext,
+} from './icalendar/recurrence';
 import { CalDavCalendarEventPatchError, CalendarEventPatchErrorCode } from './icalendar/patcher';
 import type { CalendarEventPatch, OptionalFieldPatch } from './icalendar/patcher';
 import {
@@ -147,6 +153,354 @@ const GENERIC_LIST_SEARCH_ERROR_MESSAGE = 'The calendar list could not be loaded
 const ZONED_ISO_INSTANT_PATTERN =
 	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:([zZ])|([+-])(\d{2}):(\d{2}))$/;
 const CALENDAR_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+const RECURRENCE_WEEKDAY_OPTIONS = [
+	{ name: 'Monday', value: 'monday' },
+	{ name: 'Tuesday', value: 'tuesday' },
+	{ name: 'Wednesday', value: 'wednesday' },
+	{ name: 'Thursday', value: 'thursday' },
+	{ name: 'Friday', value: 'friday' },
+	{ name: 'Saturday', value: 'saturday' },
+	{ name: 'Sunday', value: 'sunday' },
+] as const;
+
+const RECURRENCE_MONTH_OPTIONS = [
+	{ name: 'January', value: 1 },
+	{ name: 'February', value: 2 },
+	{ name: 'March', value: 3 },
+	{ name: 'April', value: 4 },
+	{ name: 'May', value: 5 },
+	{ name: 'June', value: 6 },
+	{ name: 'July', value: 7 },
+	{ name: 'August', value: 8 },
+	{ name: 'September', value: 9 },
+	{ name: 'October', value: 10 },
+	{ name: 'November', value: 11 },
+	{ name: 'December', value: 12 },
+] as const;
+
+export function recurrenceRuleDescriptor(
+	timeMode: 'timed' | 'allDay',
+	displayOptions?: INodeProperties['displayOptions'],
+): INodeProperties {
+	return {
+		displayName: 'Recurrence',
+		name: 'recurrence',
+		type: 'fixedCollection',
+		typeOptions: { multipleValues: false },
+		default: {},
+		...(displayOptions === undefined ? {} : { displayOptions }),
+		options: [
+			{
+				displayName: 'Rule',
+				name: 'rule',
+				// eslint-disable-next-line n8n-nodes-base/node-param-fixed-collection-type-unsorted-items -- issue-47-contract-r1 fixes the recurrence control order.
+				values: [
+					{
+						displayName: 'Frequency',
+						name: 'frequency',
+						type: 'options',
+						required: true,
+						default: 'daily',
+						options: [
+							{ name: 'Daily', value: 'daily' },
+							{ name: 'Weekly', value: 'weekly' },
+							{ name: 'Monthly', value: 'monthly' },
+							{ name: 'Yearly', value: 'yearly' },
+						],
+					},
+					{
+						displayName: 'Interval',
+						name: 'interval',
+						type: 'number',
+						typeOptions: { minValue: 1, maxValue: 2_147_483_647 },
+						default: 1,
+					},
+					{
+						displayName: 'Ends',
+						name: 'endMode',
+						type: 'options',
+						default: 'never',
+						options: [
+							{ name: 'Never', value: 'never' },
+							{ name: 'After Number of Occurrences', value: 'count' },
+							{ name: 'On Date/Time', value: 'until' },
+						],
+					},
+					{
+						displayName: 'Count',
+						name: 'count',
+						type: 'number',
+						typeOptions: { minValue: 1, maxValue: 2_147_483_647 },
+						default: 1,
+						displayOptions: { show: { endMode: ['count'] } },
+					},
+					{
+						displayName: 'Until',
+						name: 'until',
+						type: 'dateTime',
+						...(timeMode === 'allDay' ? { typeOptions: { dateOnly: true } } : {}),
+						default: '',
+						displayOptions: { show: { endMode: ['until'] } },
+					},
+					{
+						displayName: 'By Day',
+						name: 'byDay',
+						type: 'fixedCollection',
+						typeOptions: { multipleValues: true },
+						default: {},
+						placeholder: 'Add Day',
+						options: [
+							{
+								displayName: 'Day',
+								name: 'day',
+								values: [
+									{
+										displayName: 'Weekday',
+										name: 'weekday',
+										type: 'options',
+										default: 'monday',
+										options: [...RECURRENCE_WEEKDAY_OPTIONS],
+									},
+									{
+										displayName: 'Mode',
+										name: 'ordinalMode',
+										type: 'options',
+										default: 'every',
+										options: [
+											{ name: 'Every', value: 'every' },
+											{ name: 'Ordinal', value: 'ordinal' },
+										],
+									},
+									{
+										displayName: 'Ordinal',
+										name: 'ordinal',
+										type: 'number',
+										typeOptions: { minValue: -53, maxValue: 53 },
+										default: 1,
+										displayOptions: { show: { ordinalMode: ['ordinal'] } },
+									},
+								],
+							},
+						],
+					},
+					{
+						displayName: 'By Month Day',
+						name: 'byMonthDay',
+						type: 'fixedCollection',
+						typeOptions: { multipleValues: true },
+						default: {},
+						placeholder: 'Add Month Day',
+						options: [
+							{
+								displayName: 'Day',
+								name: 'day',
+								values: [
+									{
+										displayName: 'Value',
+										name: 'value',
+										type: 'number',
+										typeOptions: { minValue: -31, maxValue: 31 },
+										default: 1,
+									},
+								],
+							},
+						],
+					},
+					{
+						displayName: 'By Month',
+						name: 'byMonth',
+						type: 'multiOptions',
+						default: [],
+						options: [...RECURRENCE_MONTH_OPTIONS],
+					},
+					{
+						displayName: 'Week Starts On',
+						name: 'weekStart',
+						type: 'options',
+						default: 'monday',
+						options: [...RECURRENCE_WEEKDAY_OPTIONS],
+						displayOptions: { show: { frequency: ['weekly'] } },
+					},
+				],
+			},
+		],
+	};
+}
+
+export function recurrencePatchDescriptor(timeMode: 'timed' | 'allDay'): INodeProperties {
+	const value = recurrenceRuleDescriptor(timeMode, { show: { action: ['set'] } });
+	return {
+		displayName: 'Recurrence',
+		name: 'recurrence',
+		type: 'fixedCollection',
+		typeOptions: { multipleValues: false },
+		default: {},
+		required: true,
+		options: [
+			{
+				displayName: 'Change',
+				name: 'change',
+				values: [
+					{
+						displayName: 'Action',
+						name: 'action',
+						type: 'options',
+						required: true,
+						noDataExpression: true,
+						options: [
+							{ name: 'Set', value: 'set' },
+							{ name: 'Remove', value: 'remove' },
+						],
+						default: 'set',
+					},
+					{ ...value, displayName: 'Value', name: 'value' },
+				],
+			},
+		],
+	};
+}
+
+function recurrenceUiError(
+	code: ConstructorParameters<typeof CalDavRecurrenceRuleError>[0],
+	field?: RecurrenceField,
+): never {
+	// eslint-disable-next-line n8n-nodes-base/node-execute-block-wrong-error-thrown -- this exported pure parameter normalizer is outside execute and its domain error is mapped when #48 wires it into the node boundary.
+	throw new CalDavRecurrenceRuleError(code, field);
+}
+
+function recurrenceUiRecord(
+	value: unknown,
+	allowedKeys: readonly string[],
+	field?: RecurrenceField,
+): Readonly<Record<string, PropertyDescriptor>> {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+		return recurrenceUiError('INVALID_INPUT', field);
+	}
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) {
+		return recurrenceUiError('INVALID_INPUT', field);
+	}
+	let descriptors: Readonly<Record<string, PropertyDescriptor>>;
+	try {
+		descriptors = Object.getOwnPropertyDescriptors(value);
+	} catch {
+		return recurrenceUiError('INVALID_INPUT', field);
+	}
+	if (Object.getOwnPropertySymbols(value).length > 0) return recurrenceUiError('UNKNOWN_FIELD');
+	const allowed = new Set(allowedKeys);
+	for (const [key, descriptor] of Object.entries(descriptors)) {
+		if (!allowed.has(key)) return recurrenceUiError('UNKNOWN_FIELD');
+		if (!descriptor.enumerable || !('value' in descriptor)) {
+			return recurrenceUiError('INVALID_INPUT', field);
+		}
+	}
+	return descriptors;
+}
+
+function recurrenceUiArray(value: unknown, field: RecurrenceField): readonly unknown[] {
+	if (!Array.isArray(value) || value.length === 0) return recurrenceUiError('INVALID_INPUT', field);
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	if (Object.getOwnPropertySymbols(value).length > 0)
+		return recurrenceUiError('INVALID_INPUT', field);
+	const result: unknown[] = [];
+	const allowed = new Set(['length']);
+	for (let index = 0; index < value.length; index += 1) {
+		const key = String(index);
+		allowed.add(key);
+		const descriptor = descriptors[key];
+		if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
+			return recurrenceUiError('INVALID_INPUT', field);
+		}
+		result.push(descriptor.value);
+	}
+	if (Object.keys(descriptors).some((key) => !allowed.has(key))) {
+		return recurrenceUiError('INVALID_INPUT', field);
+	}
+	return result;
+}
+
+function recurrenceRows(
+	value: unknown,
+	field: 'byDay' | 'byMonthDay',
+): readonly Readonly<Record<string, PropertyDescriptor>>[] {
+	const wrapper = recurrenceUiRecord(value, ['day'], field);
+	if (wrapper.day === undefined) return recurrenceUiError('INVALID_INPUT', field);
+	return recurrenceUiArray(wrapper.day.value, field).map((row) =>
+		recurrenceUiRecord(
+			row,
+			field === 'byDay' ? ['weekday', 'ordinalMode', 'ordinal'] : ['value'],
+			field,
+		),
+	);
+}
+
+export function normalizeRecurrenceParameter(
+	value: unknown,
+	start: RecurrenceStartContext,
+): RecurrenceRule {
+	const outer = recurrenceUiRecord(value, ['rule']);
+	if (outer.rule === undefined) return recurrenceUiError('INVALID_INPUT');
+	const rule = recurrenceUiRecord(outer.rule.value, [
+		'frequency',
+		'interval',
+		'endMode',
+		'count',
+		'until',
+		'byDay',
+		'byMonthDay',
+		'byMonth',
+		'weekStart',
+	]);
+	if (rule.frequency === undefined) return recurrenceUiError('INVALID_FREQUENCY', 'frequency');
+	const normalized: Record<string, unknown> = { frequency: rule.frequency.value };
+	if (rule.interval !== undefined) normalized.interval = rule.interval.value;
+	const endMode = rule.endMode?.value ?? 'never';
+	if (endMode === 'never') {
+		if (rule.count !== undefined || rule.until !== undefined)
+			return recurrenceUiError('INVALID_END', 'end');
+	} else if (endMode === 'count') {
+		if (rule.count === undefined || rule.until !== undefined)
+			return recurrenceUiError('INVALID_END', 'end');
+		normalized.end = { kind: 'count', count: rule.count.value };
+	} else if (endMode === 'until') {
+		if (rule.until === undefined || rule.count !== undefined)
+			return recurrenceUiError('INVALID_END', 'end');
+		normalized.end =
+			start.timeMode === 'allDay'
+				? { kind: 'until', value: { kind: 'date', date: rule.until.value } }
+				: { kind: 'until', value: { kind: 'dateTime', dateTime: rule.until.value } };
+	} else {
+		return recurrenceUiError('INVALID_END', 'end');
+	}
+	if (rule.byMonth !== undefined) normalized.byMonth = rule.byMonth.value;
+	if (rule.byMonthDay !== undefined) {
+		normalized.byMonthDay = recurrenceRows(rule.byMonthDay.value, 'byMonthDay').map(
+			(row) => row.value?.value,
+		);
+	}
+	if (rule.byDay !== undefined) {
+		normalized.byDay = recurrenceRows(rule.byDay.value, 'byDay').map((row) => {
+			if (row.weekday === undefined) return recurrenceUiError('INVALID_BY_DAY', 'byDay');
+			const ordinalMode = row.ordinalMode?.value ?? 'every';
+			if (ordinalMode === 'every') {
+				if (row.ordinal !== undefined) return recurrenceUiError('INVALID_BY_DAY', 'byDay');
+				return { weekday: row.weekday.value };
+			}
+			if (ordinalMode !== 'ordinal' || row.ordinal === undefined) {
+				return recurrenceUiError('INVALID_BY_DAY', 'byDay');
+			}
+			return { weekday: row.weekday.value, ordinal: row.ordinal.value };
+		});
+	}
+	if (
+		rule.weekStart !== undefined &&
+		(rule.frequency.value === 'weekly' || rule.weekStart.value !== 'monday')
+	) {
+		normalized.weekStart = rule.weekStart.value;
+	}
+	return normalizeRecurrenceRule(normalized, start);
+}
 
 function categoriesDescriptor(
 	name: string,
@@ -827,6 +1181,7 @@ function eventJson(event: CalendarEvent): IDataObject {
 		readonly categories?: readonly string[];
 		readonly status?: CalendarEvent['status'];
 		readonly transparency?: CalendarEvent['transparency'];
+		readonly recurrence?: CalendarEvent['recurrence'];
 		readonly alarms?: CalendarEvent['alarms'];
 		readonly start?: string;
 		readonly end?: string;
@@ -848,6 +1203,9 @@ function eventJson(event: CalendarEvent): IDataObject {
 			...(legacy.transparency === undefined
 				? {}
 				: { transparency: legacy.transparency as IDataObject[string] }),
+			...(legacy.recurrence === undefined
+				? {}
+				: { recurrence: legacy.recurrence as unknown as IDataObject }),
 			...(legacy.alarms === undefined ? {} : { alarms: legacy.alarms as unknown as IDataObject[] }),
 			...(legacy.start === undefined ? {} : { start: legacy.start }),
 			...(legacy.end === undefined ? {} : { end: legacy.end }),
@@ -867,7 +1225,6 @@ function eventJson(event: CalendarEvent): IDataObject {
 		...(event.transparency === undefined
 			? {}
 			: { transparency: event.transparency as IDataObject[string] }),
-		...(event.alarms === undefined ? {} : { alarms: event.alarms as unknown as IDataObject[] }),
 		timeMode: event.timeMode,
 		accessMode: event.accessMode,
 		...(event.timeMode === 'timed'
@@ -882,6 +1239,10 @@ function eventJson(event: CalendarEvent): IDataObject {
 			: event.timeMode === 'allDay'
 				? { startDate: event.startDate, endDate: event.endDate }
 				: { readOnlyReason: event.readOnlyReason }),
+		...(event.recurrence === undefined
+			? {}
+			: { recurrence: event.recurrence as unknown as IDataObject }),
+		...(event.alarms === undefined ? {} : { alarms: event.alarms as unknown as IDataObject[] }),
 		...(event.extensions === undefined ? {} : { extensions: event.extensions as IDataObject }),
 	};
 }

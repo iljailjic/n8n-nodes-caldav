@@ -10,6 +10,8 @@ import {
 	resolveLocalDateTimeInTimeZone,
 } from './timeZones';
 import type { IanaTimeZoneId, LocalDateTimeString } from './timeZones';
+import { projectRecurrenceRule } from './recurrence';
+import type { RecurrenceProjection, RecurrenceStartContext } from './recurrence';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type { AbsoluteHttpUrl } from '../transport/url';
 
@@ -103,6 +105,7 @@ interface CalendarEventCommon {
 	readonly categories?: readonly string[];
 	readonly status?: CalendarEventStatus | UnsupportedCalendarEventMetadataToken;
 	readonly transparency?: CalendarEventTransparency | UnsupportedCalendarEventMetadataToken;
+	readonly recurrence?: RecurrenceProjection;
 	readonly alarms?: readonly CalendarAlarm[];
 	readonly extensions?: CalendarEventExtensions;
 }
@@ -158,6 +161,7 @@ const PROJECTED_SINGLETONS = [
 	'DTEND',
 	'DURATION',
 	'RECURRENCE-ID',
+	'RRULE',
 ] as const;
 const UNSAFE_EXTENSION_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const PARSER_KINDS = new Set([
@@ -768,6 +772,9 @@ export function mapCalendarEventResource(
 		OPAQUE: 'opaque',
 		TRANSPARENT: 'transparent',
 	});
+	const recurrenceProperty = directProperties(master, 'RRULE')[0];
+	const recurrence = (start?: RecurrenceStartContext): RecurrenceProjection | undefined =>
+		recurrenceProperty === undefined ? undefined : projectRecurrenceRule(recurrenceProperty, start);
 	const startProperty = requireDateTimeProperty(master, 'DTSTART');
 	const endProperty = directProperties(master, 'DTEND')[0];
 	const durationProperty = directProperties(master, 'DURATION')[0];
@@ -798,7 +805,6 @@ export function mapCalendarEventResource(
 		...(categories !== undefined ? { categories } : {}),
 		...(status !== undefined ? { status } : {}),
 		...(transparency !== undefined ? { transparency } : {}),
-		...(alarms.length > 0 ? { alarms } : {}),
 	};
 
 	const startType = asciiUpperCase(startProperty.value.valueType);
@@ -814,20 +820,29 @@ export function mapCalendarEventResource(
 			const start = parseCalendarDate(startProperty);
 			const end = parseCalendarDate(endProperty);
 			if (end.comparisonKey <= start.comparisonKey) fail('INVALID_EVENT_TIME_RANGE');
+			const projectedRecurrence = recurrence({
+				timeMode: 'allDay',
+				startDate: start.formatted,
+			});
 			event = Object.freeze({
 				...common,
 				timeMode: 'allDay',
 				accessMode: 'editable',
 				startDate: start.formatted,
 				endDate: end.formatted,
+				...(projectedRecurrence === undefined ? {} : { recurrence: projectedRecurrence }),
+				...(alarms.length > 0 ? { alarms } : {}),
 				...(extensions !== undefined ? { extensions } : {}),
 			});
 		} else {
+			const projectedRecurrence = recurrence();
 			event = Object.freeze({
 				...common,
 				timeMode: 'unsupported',
 				accessMode: 'readOnly',
 				readOnlyReason: 'unsupportedTimeRepresentation',
+				...(projectedRecurrence === undefined ? {} : { recurrence: projectedRecurrence }),
+				...(alarms.length > 0 ? { alarms } : {}),
 				...(extensions !== undefined ? { extensions } : {}),
 			});
 		}
@@ -954,6 +969,19 @@ export function mapCalendarEventResource(
 		timed = undefined;
 	}
 
+	const projectedRecurrence =
+		timed === undefined
+			? recurrence()
+			: recurrence(
+					timed.timeZoneMode === 'iana'
+						? {
+								timeMode: 'timed',
+								timeZoneMode: 'iana',
+								start: timed.start,
+								startLocal: timed.startLocal,
+							}
+						: { timeMode: 'timed', timeZoneMode: 'utc', start: timed.start },
+				);
 	const event = Object.freeze(
 		timed === undefined
 			? {
@@ -961,6 +989,8 @@ export function mapCalendarEventResource(
 					timeMode: 'unsupported',
 					accessMode: 'readOnly',
 					readOnlyReason: 'unsupportedTimeRepresentation',
+					...(projectedRecurrence === undefined ? {} : { recurrence: projectedRecurrence }),
+					...(alarms.length > 0 ? { alarms } : {}),
 					...(extensions !== undefined ? { extensions } : {}),
 				}
 			: {
@@ -973,6 +1003,8 @@ export function mapCalendarEventResource(
 					...(timed.timeZoneMode === 'iana' ? { timeZone: timed.timeZone } : {}),
 					startLocal: timed.startLocal,
 					endLocal: timed.endLocal,
+					...(projectedRecurrence === undefined ? {} : { recurrence: projectedRecurrence }),
+					...(alarms.length > 0 ? { alarms } : {}),
 					...(extensions !== undefined ? { extensions } : {}),
 				},
 	) satisfies CalendarEvent;
