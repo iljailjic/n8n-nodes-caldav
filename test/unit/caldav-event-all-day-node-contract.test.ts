@@ -175,6 +175,8 @@ describe('issue #41 exact Event node surface', () => {
 		const properties = eventProperties('create');
 		expect(properties.map(({ displayName }) => displayName)).toEqual([
 			'Calendar',
+			'Input Mode',
+			'Raw ICS',
 			'UID',
 			'Time Mode',
 			'Time Zone Mode',
@@ -220,6 +222,8 @@ describe('issue #41 exact Event node surface', () => {
 		const properties = eventProperties('update');
 		expect(properties.map(({ displayName }) => displayName)).toEqual([
 			'Calendar',
+			'Input Mode',
+			'Raw ICS',
 			'Identifier Mode',
 			'Resource URL',
 			'UID',

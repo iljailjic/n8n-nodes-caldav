@@ -579,7 +579,11 @@ function decodedUid(property: ICalendarProperty): string {
 		: property.value.textValues.join(',');
 }
 
-function validateCalendar(calendar: ICalendarComponent): void {
+function validateCalendar(
+	calendar: ICalendarComponent,
+	allowMissingUid: boolean,
+	deferUidValidation: boolean,
+): void {
 	const versions = directProperties(calendar, 'VERSION');
 	if (versions.length === 0) {
 		throw new CalDavICalendarParseError('MISSING_VERSION');
@@ -610,9 +614,11 @@ function validateCalendar(calendar: ICalendarComponent): void {
 	let resourceUid: string | null = null;
 	for (const component of objectComponents) {
 		if (!UID_COMPONENT_NAMES.has(component.name.toUpperCase())) continue;
+		if (deferUidValidation) continue;
 
 		const uids = directProperties(component, 'UID');
 		if (uids.length === 0) {
+			if (allowMissingUid) continue;
 			throw new CalDavICalendarParseError('MISSING_UID');
 		}
 		if (uids.length > 1) {
@@ -654,7 +660,15 @@ function freezeComponent(component: ICalendarComponent): void {
 	Object.freeze(component);
 }
 
-export function parseICalendarResource(input: Uint8Array): ICalendarResource {
+export interface ParseICalendarResourceOptions {
+	readonly allowMissingUid?: boolean;
+	readonly deferUidValidation?: boolean;
+}
+
+export function parseICalendarResource(
+	input: Uint8Array,
+	options: ParseICalendarResourceOptions = {},
+): ICalendarResource {
 	if (input.byteLength > ICALENDAR_MAX_RESOURCE_BYTES) {
 		throw new CalDavICalendarParseError('MAX_RESOURCE_SIZE_EXCEEDED');
 	}
@@ -663,7 +677,7 @@ export function parseICalendarResource(input: Uint8Array): ICalendarResource {
 	const lines = unfoldLines(originalIcs);
 	const parsedLines = parseAllLines(lines);
 	const calendar = buildComponentTree(parsedLines);
-	validateCalendar(calendar);
+	validateCalendar(calendar, options.allowMissingUid === true, options.deferUidValidation === true);
 	freezeComponent(calendar);
 
 	const resource = Object.freeze({ kind: 'resource' as const, originalIcs, calendar });

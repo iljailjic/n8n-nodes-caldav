@@ -213,6 +213,8 @@ describe('CalDAV timed event timezone UI', () => {
 		const properties = createProperties();
 		expect(properties.map(({ displayName }) => displayName)).toEqual([
 			'Calendar',
+			'Input Mode',
+			'Raw ICS',
 			'UID',
 			'Time Mode',
 			'Time Zone Mode',
@@ -224,7 +226,7 @@ describe('CalDAV timed event timezone UI', () => {
 			'Summary',
 			'Additional Fields',
 		]);
-		expect(properties[3]).toMatchObject({
+		expect(properties[5]).toMatchObject({
 			name: 'timeZoneMode',
 			type: 'options',
 			required: true,
@@ -234,7 +236,7 @@ describe('CalDAV timed event timezone UI', () => {
 				{ name: 'IANA', value: 'iana' },
 			],
 		});
-		expect(properties[4]).toMatchObject({
+		expect(properties[6]).toMatchObject({
 			name: 'timeZone',
 			type: 'options',
 			required: true,

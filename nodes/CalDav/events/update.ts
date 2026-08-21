@@ -62,17 +62,39 @@ import {
 	resolveCalendarEventTimeZoneAuthoring,
 } from './timeZoneAuthoring';
 import type { CalendarEventTimeZoneAuthoringCoverage } from './timeZoneAuthoring';
+import {
+	CalDavRawCalendarEventError,
+	RawCalendarEventFailureCode,
+	prepareRawCalendarEventWrite,
+	rawCalendarEventResourcesAreSemanticallyEqual,
+} from '../icalendar/rawEventWrite';
+import type { PreparedRawCalendarEventWrite } from '../icalendar/rawEventWrite';
 
 export type CalendarEventUpdateIdentifier =
 	| { readonly kind: 'resourceUrl'; readonly resourceUrl: AbsoluteHttpUrl }
 	| { readonly kind: 'uid'; readonly uid: string };
 
-export interface CalendarEventUpdateInput {
+interface ExistingCalendarEventUpdateInput {
 	readonly calendarUrl: AbsoluteHttpUrl;
 	readonly identifier: CalendarEventUpdateIdentifier;
 	readonly patch: CalendarEventPatch;
 	readonly etag?: string;
 }
+
+export type StructuredCalendarEventUpdateInput = ExistingCalendarEventUpdateInput & {
+	readonly inputMode?: 'structured';
+};
+
+export interface RawCalendarEventUpdateInput {
+	readonly calendarUrl: AbsoluteHttpUrl;
+	readonly identifier: CalendarEventUpdateIdentifier;
+	readonly etag?: string;
+	readonly inputMode: 'rawIcs';
+	readonly rawIcs: string;
+}
+
+export type CalendarEventUpdateInput =
+	StructuredCalendarEventUpdateInput | RawCalendarEventUpdateInput;
 
 export type CalendarEventUpdateClock = () => Date;
 
@@ -120,7 +142,9 @@ function invalidInput(): never {
 	throw new CalDavCalendarEventUpdateError(CalendarEventUpdateFailureCode.INVALID_INPUT);
 }
 
-function snapshotInput(input: CalendarEventUpdateInput): CalendarEventUpdateInput {
+function snapshotInput(
+	input: StructuredCalendarEventUpdateInput,
+): StructuredCalendarEventUpdateInput {
 	try {
 		if (typeof input !== 'object' || input === null || Array.isArray(input)) return invalidInput();
 		const calendarUrl = input.calendarUrl;
@@ -732,7 +756,7 @@ function retainedTargetOwnership(
 
 async function updateCalendarEventInternal(
 	transport: CalDavTransport,
-	input: CalendarEventUpdateInput,
+	input: StructuredCalendarEventUpdateInput,
 	clock: CalendarEventUpdateClock,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 	resolvedCurrent?: CalendarEventReadResult,
@@ -1067,6 +1091,158 @@ async function updateCalendarEventInternal(
 	}
 }
 
+function snapshotRawUpdateInput(input: RawCalendarEventUpdateInput): RawCalendarEventUpdateInput {
+	const allowed = new Set(['calendarUrl', 'identifier', 'etag', 'inputMode', 'rawIcs']);
+	if (Reflect.ownKeys(input).some((key) => typeof key !== 'string' || !allowed.has(key))) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+	if (
+		typeof input.calendarUrl !== 'string' ||
+		typeof input.identifier !== 'object' ||
+		input.identifier === null ||
+		Array.isArray(input.identifier) ||
+		(input.etag !== undefined && typeof input.etag !== 'string')
+	) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+	const calendarUrl = normalizeCalendarCollectionUrl(validateAbsoluteHttpUrl(input.calendarUrl));
+	const identifierKeys = Reflect.ownKeys(input.identifier);
+	if (
+		input.identifier.kind === 'resourceUrl' &&
+		identifierKeys.length === 2 &&
+		identifierKeys.includes('kind') &&
+		identifierKeys.includes('resourceUrl') &&
+		typeof input.identifier.resourceUrl === 'string'
+	) {
+		return Object.freeze({
+			calendarUrl,
+			identifier: {
+				kind: 'resourceUrl' as const,
+				resourceUrl: validateAbsoluteHttpUrl(input.identifier.resourceUrl),
+			},
+			inputMode: 'rawIcs',
+			rawIcs: input.rawIcs,
+			...(input.etag === undefined ? {} : { etag: input.etag }),
+		});
+	}
+	if (
+		input.identifier.kind === 'uid' &&
+		identifierKeys.length === 2 &&
+		identifierKeys.includes('kind') &&
+		identifierKeys.includes('uid') &&
+		typeof input.identifier.uid === 'string'
+	) {
+		return Object.freeze({
+			calendarUrl,
+			identifier: { kind: 'uid' as const, uid: input.identifier.uid },
+			inputMode: 'rawIcs',
+			rawIcs: input.rawIcs,
+			...(input.etag === undefined ? {} : { etag: input.etag }),
+		});
+	}
+	throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+}
+
+export async function updatePreparedRawCalendarEvent(
+	transport: CalDavTransport,
+	calendarUrl: AbsoluteHttpUrl,
+	current: CalendarEventReadResult,
+	prepared: PreparedRawCalendarEventWrite,
+	etag: string,
+): Promise<UpdatedCalendarEvent> {
+	let updatedResourceUrl: AbsoluteHttpUrl;
+	try {
+		const mutation = await updateCalendarEventResource(
+			transport,
+			current.event.calendarUrl,
+			current.event.resourceUrl,
+			prepared.calendarData,
+			etag,
+		);
+		updatedResourceUrl = mutation.resourceUrl;
+	} catch (error) {
+		if (isPostPutMetadataFailure(error)) return confirmationFailed(error);
+		throw error;
+	}
+
+	try {
+		const confirmed = await getCalendarEventByResourceUrl(
+			transport,
+			current.event.calendarUrl,
+			updatedResourceUrl,
+		);
+		if (
+			confirmed.event.etag === undefined ||
+			normalizeCalendarCollectionUrl(confirmed.event.calendarUrl) !==
+				normalizeCalendarCollectionUrl(calendarUrl) ||
+			!isDirectCalendarChild(calendarUrl, confirmed.event.resourceUrl) ||
+			confirmed.event.uid !== prepared.uid ||
+			!rawCalendarEventResourcesAreSemanticallyEqual(prepared.resource, confirmed.context.resource)
+		) {
+			return confirmationFailed();
+		}
+		return Object.freeze({
+			...confirmed.event,
+			rawIcs: confirmed.rawIcs,
+			etag: confirmed.event.etag,
+		});
+	} catch (error) {
+		if (error instanceof CalDavCalendarEventUpdateError) throw error;
+		return confirmationFailed(error);
+	}
+}
+
+async function updateRawCalendarEvent(
+	transport: CalDavTransport,
+	input: RawCalendarEventUpdateInput,
+): Promise<UpdatedCalendarEvent> {
+	const snapshot = snapshotRawUpdateInput(input);
+	const prepared = prepareRawCalendarEventWrite({ operation: 'update', rawIcs: snapshot.rawIcs });
+	if (snapshot.identifier.kind === 'uid' && prepared.uid !== snapshot.identifier.uid) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.UID_MISMATCH);
+	}
+	const current =
+		snapshot.identifier.kind === 'resourceUrl'
+			? await getCalendarEventByResourceUrl(
+					transport,
+					snapshot.calendarUrl,
+					snapshot.identifier.resourceUrl,
+					{ allowMissingEtag: true },
+				)
+			: await resolveCalendarEventByUid(transport, snapshot.calendarUrl, snapshot.identifier.uid, {
+					allowMissingEtag: true,
+				});
+	if (snapshot.identifier.kind === 'uid') {
+		assertResolvedCalendarEventUidIdentity(snapshot.calendarUrl, snapshot.identifier.uid, current);
+	} else {
+		assertSnapshotResourceUrl(
+			snapshot.identifier,
+			snapshot.calendarUrl,
+			current.event.calendarUrl,
+			current.event.resourceUrl,
+			current.event.uid,
+		);
+	}
+	if (current.event.uid !== prepared.uid) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.UID_MISMATCH);
+	}
+	if (rawCalendarEventResourcesAreSemanticallyEqual(prepared.resource, current.context.resource)) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.NO_CHANGES);
+	}
+	const etag =
+		snapshot.etag !== undefined && snapshot.etag.length > 0 ? snapshot.etag : current.event.etag;
+	if (etag === undefined) {
+		throw new CalDavCalendarEventMutationError(CalendarEventMutationFailureCode.MISSING_ETAG);
+	}
+	return await updatePreparedRawCalendarEvent(
+		transport,
+		snapshot.calendarUrl,
+		current,
+		prepared,
+		etag,
+	);
+}
+
 export interface CalendarEventResolvedUpdateInput {
 	readonly calendarUrl: AbsoluteHttpUrl;
 	readonly current: CalendarEventReadResult;
@@ -1126,5 +1302,23 @@ export async function updateCalendarEvent(
 	clock: CalendarEventUpdateClock,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 ): Promise<UpdatedCalendarEvent> {
-	return await updateCalendarEventInternal(transport, input, clock, timeZoneContext);
+	if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+	const mode = (input as { readonly inputMode?: unknown }).inputMode;
+	if (mode === 'rawIcs') {
+		return await updateRawCalendarEvent(transport, input as RawCalendarEventUpdateInput);
+	}
+	if (
+		(mode !== undefined && mode !== 'structured') ||
+		Object.prototype.hasOwnProperty.call(input, 'rawIcs')
+	) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+	return await updateCalendarEventInternal(
+		transport,
+		input as StructuredCalendarEventUpdateInput,
+		clock,
+		timeZoneContext,
+	);
 }

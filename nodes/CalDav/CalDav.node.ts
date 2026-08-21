@@ -117,6 +117,7 @@ import {
 } from './icalendar/timeZones';
 import type { CalendarEventTimeZone } from './icalendar/timeZones';
 import { isAbsoluteICalendarUri } from './icalendar/uri';
+import { CalDavRawCalendarEventError } from './icalendar/rawEventWrite';
 import { testCalDavApiCredentials } from './methods/credentialTest';
 import { defaultCalDavProviderRegistry } from './providers/registry';
 import type { CalDavProviderAdapter } from './providers/types';
@@ -145,6 +146,8 @@ const UPSERT_OPERATION = 'upsert';
 const DELETE_OPERATION = 'delete';
 const RESOURCE_URL_IDENTIFIER_MODE = 'resourceUrl';
 const UID_IDENTIFIER_MODE = 'uid';
+const STRUCTURED_INPUT_MODE = 'structured';
+const RAW_ICS_INPUT_MODE = 'rawIcs';
 const INVALID_LIMIT_MESSAGE = 'Limit must be an integer greater than or equal to 1.';
 const UNSUPPORTED_OPERATION_MESSAGE = 'Unsupported CalDAV resource or operation.';
 const READ_ONLY_EVENT_UPDATE_MESSAGE =
@@ -1519,6 +1522,9 @@ function eventCreateSerializationFailure(error: CalDavICalendarSerializeError): 
 }
 
 function eventCreateFailure(error: unknown): EventCreateFailure {
+	if (error instanceof CalDavRawCalendarEventError) {
+		return { message: error.message, configuration: true };
+	}
 	if (error instanceof CalDavRecurrenceRuleError) {
 		return { message: error.message, configuration: true };
 	}
@@ -1668,6 +1674,9 @@ function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpd
 }
 
 function eventUpdateFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof CalDavRawCalendarEventError) {
+		return { message: error.message, configuration: true };
+	}
 	if (error instanceof CalDavRecurrenceRuleError) {
 		return { message: error.message, configuration: true };
 	}
@@ -1781,6 +1790,9 @@ function eventUpsertTransportFailure(error: CalDavTransportError): SafeNodeFailu
 }
 
 function eventUpsertFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof CalDavRawCalendarEventError) {
+		return { message: error.message, configuration: true };
+	}
 	if (error instanceof CalDavRecurrenceRuleError) {
 		return { message: error.message, configuration: true };
 	}
@@ -2524,6 +2536,18 @@ function eventCreateInput(
 ): CalendarEventCreateInput | string {
 	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
 	if (calendarUrl === undefined) return EVENT_CREATE_MESSAGES.INVALID_CALENDAR_URL;
+	const inputMode = nodeParameter(execution, 'inputMode', itemIndex) ?? STRUCTURED_INPUT_MODE;
+	if (inputMode === RAW_ICS_INPUT_MODE) {
+		const rawIcs = nodeParameter(execution, 'rawIcs', itemIndex);
+		return {
+			calendarUrl,
+			inputMode: RAW_ICS_INPUT_MODE,
+			rawIcs: typeof rawIcs === 'string' ? rawIcs : '',
+		};
+	}
+	if (inputMode !== STRUCTURED_INPUT_MODE) {
+		return 'Input Mode must be Structured or Raw ICS.';
+	}
 	const timeZoneMode = nodeParameter(execution, 'timeZoneMode', itemIndex) ?? 'utc';
 	let timeZone: CalendarEventTimeZone;
 	if (timeZoneMode === 'utc') {
@@ -2826,6 +2850,18 @@ function eventUpsertInput(
 ): CalendarEventUpsertInput | string {
 	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
 	if (calendarUrl === undefined) return EVENT_UPSERT_MESSAGES.INVALID_CALENDAR_URL;
+	const inputMode = nodeParameter(execution, 'inputMode', itemIndex) ?? STRUCTURED_INPUT_MODE;
+	if (inputMode === RAW_ICS_INPUT_MODE) {
+		const rawIcs = nodeParameter(execution, 'rawIcs', itemIndex);
+		return {
+			calendarUrl,
+			inputMode: RAW_ICS_INPUT_MODE,
+			rawIcs: typeof rawIcs === 'string' ? rawIcs : '',
+		};
+	}
+	if (inputMode !== STRUCTURED_INPUT_MODE) {
+		return 'Input Mode must be Structured or Raw ICS.';
+	}
 
 	const uidValue = nodeParameter(execution, 'uid', itemIndex);
 	if (typeof uidValue !== 'string' || (uidValue.length > 0 && !isValidICalendarText(uidValue))) {
@@ -3243,6 +3279,10 @@ function eventUpdateInput(
 ): CalendarEventUpdateInput | string {
 	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
 	if (calendarUrl === undefined) return EVENT_UPDATE_MESSAGES.INVALID_CALENDAR_URL;
+	const inputMode = nodeParameter(execution, 'inputMode', itemIndex) ?? STRUCTURED_INPUT_MODE;
+	if (inputMode !== STRUCTURED_INPUT_MODE && inputMode !== RAW_ICS_INPUT_MODE) {
+		return 'Input Mode must be Structured or Raw ICS.';
+	}
 
 	const identifierMode = nodeParameter(execution, 'identifierMode', itemIndex);
 	if (identifierMode !== RESOURCE_URL_IDENTIFIER_MODE && identifierMode !== UID_IDENTIFIER_MODE) {
@@ -3280,6 +3320,16 @@ function eventUpdateInput(
 		return EVENT_UPDATE_MESSAGES.INVALID_ETAG;
 	}
 	if (etag !== undefined && typeof etag !== 'string') return EVENT_UPDATE_MESSAGES.INVALID_ETAG;
+	if (inputMode === RAW_ICS_INPUT_MODE) {
+		const rawIcs = nodeParameter(execution, 'rawIcs', itemIndex);
+		return Object.freeze({
+			calendarUrl,
+			identifier,
+			inputMode: RAW_ICS_INPUT_MODE,
+			rawIcs: typeof rawIcs === 'string' ? rawIcs : '',
+			...(typeof etag === 'string' && etag.length > 0 ? { etag } : {}),
+		});
+	}
 	const timeMode = nodeParameter(execution, 'timeMode', itemIndex) ?? 'timed';
 	if (timeMode !== 'timed' && timeMode !== 'allDay') {
 		return EVENT_UPDATE_MESSAGES.INVALID_TIME_MODE;
@@ -3842,6 +3892,49 @@ export class CalDav implements INodeType {
 				],
 			},
 			{
+				displayName: 'Input Mode',
+				name: 'inputMode',
+				type: 'options',
+				required: true,
+				noDataExpression: true,
+				default: STRUCTURED_INPUT_MODE,
+				options: [
+					{
+						name: 'Structured',
+						value: STRUCTURED_INPUT_MODE,
+						description: 'Use individual event fields',
+					},
+					{
+						name: 'Raw ICS',
+						value: RAW_ICS_INPUT_MODE,
+						description: 'Supply a complete VCALENDAR object',
+					},
+				],
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION, UPDATE_OPERATION, UPSERT_OPERATION],
+					},
+				},
+			},
+			{
+				displayName: 'Raw ICS',
+				name: 'rawIcs',
+				type: 'string',
+				typeOptions: { rows: 12 },
+				required: true,
+				default: '',
+				description:
+					'Complete VCALENDAR event object. Raw Update and the update branch of Raw Upsert replace the entire stored calendar object.',
+				displayOptions: {
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION, UPDATE_OPERATION, UPSERT_OPERATION],
+						inputMode: [RAW_ICS_INPUT_MODE],
+					},
+				},
+			},
+			{
 				displayName: 'UID',
 				name: 'uid',
 				type: 'string',
@@ -3849,7 +3942,11 @@ export class CalDav implements INodeType {
 				description:
 					'Optional event identity. Leave blank to use a generated UUID. Each separate Create without a UID creates a new identity.',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 			},
 			{
@@ -3864,7 +3961,11 @@ export class CalDav implements INodeType {
 				],
 				default: 'timed',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 			},
 			{
@@ -3881,6 +3982,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['timed'],
 					},
 				},
@@ -3898,6 +4000,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['timed'],
 						timeZoneMode: ['iana'],
 					},
@@ -3913,6 +4016,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['timed'],
 					},
 				},
@@ -3927,6 +4031,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['timed'],
 					},
 				},
@@ -3942,6 +4047,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['allDay'],
 					},
 				},
@@ -3957,6 +4063,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['allDay'],
 					},
 				},
@@ -3968,7 +4075,11 @@ export class CalDav implements INodeType {
 				required: true,
 				default: '',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 			},
 			{
@@ -3978,7 +4089,11 @@ export class CalDav implements INodeType {
 				placeholder: 'Add Field',
 				default: {},
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [CREATE_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [CREATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 				options: [
 					alarmCreateDescriptor(),
@@ -4016,7 +4131,11 @@ export class CalDav implements INodeType {
 				description:
 					'Leave blank to generate a new UID; this always creates a new resource. A supplied UID is looked up in the selected calendar to choose Create or Update.',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 			},
 			{
@@ -4031,7 +4150,11 @@ export class CalDav implements INodeType {
 				],
 				default: 'timed',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 			},
 			{
@@ -4049,6 +4172,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['timed'],
 					},
 				},
@@ -4066,6 +4190,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['timed'],
 						timeZoneMode: ['iana'],
 					},
@@ -4081,6 +4206,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['timed'],
 					},
 				},
@@ -4095,6 +4221,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['timed'],
 					},
 				},
@@ -4110,6 +4237,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['allDay'],
 					},
 				},
@@ -4125,6 +4253,7 @@ export class CalDav implements INodeType {
 					show: {
 						resource: [EVENT_RESOURCE],
 						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
 						timeMode: ['allDay'],
 					},
 				},
@@ -4136,7 +4265,11 @@ export class CalDav implements INodeType {
 				required: true,
 				default: '',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 			},
 			{
@@ -4146,7 +4279,11 @@ export class CalDav implements INodeType {
 				placeholder: 'Add Field',
 				default: {},
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [UPSERT_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPSERT_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 				options: [
 					alarmMutationDescriptor(),
@@ -4345,7 +4482,11 @@ export class CalDav implements INodeType {
 				],
 				default: 'timed',
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [UPDATE_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPDATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 			},
 			{
@@ -4356,7 +4497,11 @@ export class CalDav implements INodeType {
 				default: {},
 				required: true,
 				displayOptions: {
-					show: { resource: [EVENT_RESOURCE], operation: [UPDATE_OPERATION] },
+					show: {
+						resource: [EVENT_RESOURCE],
+						operation: [UPDATE_OPERATION],
+						inputMode: [STRUCTURED_INPUT_MODE],
+					},
 				},
 				// eslint-disable-next-line n8n-nodes-base/node-param-collection-type-unsorted-items -- issue-42-contract-r2 requires Time Zone, Start, End, Summary, Description, Location, URL order.
 				options: [
@@ -4618,7 +4763,10 @@ export class CalDav implements INodeType {
 			if (isEventCreate) {
 				if (hasIanaEventCreate === undefined) {
 					hasIanaEventCreate = items.some(
-						(_item, index) => (nodeParameter(this, 'timeZoneMode', index) ?? 'utc') === 'iana',
+						(_item, index) =>
+							(nodeParameter(this, 'inputMode', index) ?? STRUCTURED_INPUT_MODE) ===
+								STRUCTURED_INPUT_MODE &&
+							(nodeParameter(this, 'timeZoneMode', index) ?? 'utc') === 'iana',
 					);
 				}
 				const input = eventCreateInput(this, itemIndex);
@@ -4676,8 +4824,9 @@ export class CalDav implements INodeType {
 						getTransport = await createN8nCalDavTransport(this);
 					}
 					if (
-						input.uid !== undefined ||
-						(input.timeMode === 'timed' && input.timeZone?.timeZoneMode === 'iana')
+						input.inputMode !== RAW_ICS_INPUT_MODE &&
+						(input.uid !== undefined ||
+							(input.timeMode === 'timed' && input.timeZone?.timeZoneMode === 'iana'))
 					) {
 						bindCalendarEventTimeZoneExecutionContext(
 							getTransport,
@@ -4781,7 +4930,9 @@ export class CalDav implements INodeType {
 						getTransport,
 						input,
 						() => new Date(),
-						ensureTimeZoneContext(getTransport),
+						input.inputMode === RAW_ICS_INPUT_MODE
+							? undefined
+							: ensureTimeZoneContext(getTransport),
 					);
 					returnData.push({
 						json: eventJson(updated, updated.rawIcs),

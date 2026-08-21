@@ -179,6 +179,8 @@ describe('Calendar Get Many node description', () => {
 			'returnAll',
 			'limit',
 			'calendar',
+			'inputMode',
+			'rawIcs',
 			'uid',
 			'timeMode',
 			'timeZoneMode',

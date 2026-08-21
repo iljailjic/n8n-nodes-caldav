@@ -6,6 +6,7 @@ import type {
 	CalendarEventStatus,
 	CalendarEventTransparency,
 } from '../icalendar/eventReadModel';
+import { mapCalendarEventResource } from '../icalendar/eventReadModel';
 import type { CalendarEventTimeZone } from '../icalendar/timeZones';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type { CalendarAlarmInput } from '../icalendar/alarms';
@@ -14,8 +15,14 @@ import { CalDavTransportError } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
-import { prepareCalendarEventCreate } from './createPreparation';
+import { calendarEventResourceUrlForUid, prepareCalendarEventCreate } from './createPreparation';
 import { createCalendarEventResource, getCalendarEventMutationEtag } from './mutations';
+import {
+	CalDavRawCalendarEventError,
+	RawCalendarEventFailureCode,
+	prepareRawCalendarEventWrite,
+} from '../icalendar/rawEventWrite';
+import type { PreparedRawCalendarEventWrite } from '../icalendar/rawEventWrite';
 
 export { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
 
@@ -33,7 +40,7 @@ interface CalendarEventCreateCommon {
 	readonly alarms?: readonly CalendarAlarmInput[];
 }
 
-export type CalendarEventCreateInput = CalendarEventCreateCommon &
+type ExistingCalendarEventCreateInput = CalendarEventCreateCommon &
 	(
 		| {
 				readonly timeMode: 'timed';
@@ -48,6 +55,19 @@ export type CalendarEventCreateInput = CalendarEventCreateCommon &
 		  }
 	);
 
+export type StructuredCalendarEventCreateInput = ExistingCalendarEventCreateInput & {
+	readonly inputMode?: 'structured';
+};
+
+export interface RawCalendarEventCreateInput {
+	readonly calendarUrl: AbsoluteHttpUrl;
+	readonly inputMode: 'rawIcs';
+	readonly rawIcs: string;
+}
+
+export type CalendarEventCreateInput =
+	StructuredCalendarEventCreateInput | RawCalendarEventCreateInput;
+
 export type CalendarEventCreateClock = () => Date;
 
 export type CreatedCalendarEvent = CalendarEvent & {
@@ -58,12 +78,72 @@ function safeStatusCode(error: unknown): number | undefined {
 	return error instanceof CalDavTransportError ? error.statusCode : undefined;
 }
 
+function assertCreateInputMode(
+	input: CalendarEventCreateInput,
+): asserts input is StructuredCalendarEventCreateInput | RawCalendarEventCreateInput {
+	if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+	const mode = (input as { readonly inputMode?: unknown }).inputMode;
+	if (mode !== undefined && mode !== 'structured' && mode !== 'rawIcs') {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+	if (mode === 'rawIcs') {
+		const allowed = new Set(['calendarUrl', 'inputMode', 'rawIcs']);
+		if (Reflect.ownKeys(input).some((key) => typeof key !== 'string' || !allowed.has(key))) {
+			throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+		}
+	} else if (Object.prototype.hasOwnProperty.call(input, 'rawIcs')) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+}
+
+async function createPreparedRawCalendarEvent(
+	transport: CalDavTransport,
+	calendarUrl: AbsoluteHttpUrl,
+	prepared: PreparedRawCalendarEventWrite,
+): Promise<CreatedCalendarEvent> {
+	const targetResourceUrl = calendarEventResourceUrlForUid(calendarUrl, prepared.uid);
+	const created = await createCalendarEventResource(
+		transport,
+		calendarUrl,
+		targetResourceUrl,
+		prepared.calendarData,
+	);
+	let resourceUrl = created.resourceUrl;
+	let etag = created.etag;
+	if (etag === undefined) {
+		try {
+			const metadata = await getCalendarEventMutationEtag(transport, calendarUrl, resourceUrl);
+			resourceUrl = metadata.resourceUrl;
+			etag = metadata.etag;
+		} catch (error) {
+			throw new CalDavCalendarEventCreateError(
+				CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED,
+				safeStatusCode(error),
+			);
+		}
+	}
+	const event = mapCalendarEventResource({
+		calendarUrl,
+		resourceUrl,
+		etag,
+		resource: prepared.resource,
+	}).event;
+	return Object.freeze({ ...event, resourceUrl, etag });
+}
+
 export async function createCalendarEvent(
 	transport: CalDavTransport,
 	input: CalendarEventCreateInput,
 	clock: CalendarEventCreateClock,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 ): Promise<CreatedCalendarEvent> {
+	assertCreateInputMode(input);
+	if (input.inputMode === 'rawIcs') {
+		const prepared = prepareRawCalendarEventWrite({ operation: 'create', rawIcs: input.rawIcs });
+		return await createPreparedRawCalendarEvent(transport, input.calendarUrl, prepared);
+	}
 	const prepared = await prepareCalendarEventCreate(input, clock, timeZoneContext);
 	const created = await createCalendarEventResource(
 		transport,

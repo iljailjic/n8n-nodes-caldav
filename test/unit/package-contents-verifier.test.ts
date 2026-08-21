@@ -83,6 +83,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/icalendar/patcher.d.ts',
 	'dist/nodes/CalDav/icalendar/patcher.js',
 	'dist/nodes/CalDav/icalendar/patcher.js.map',
+	'dist/nodes/CalDav/icalendar/rawEventWrite.d.ts',
+	'dist/nodes/CalDav/icalendar/rawEventWrite.js',
+	'dist/nodes/CalDav/icalendar/rawEventWrite.js.map',
 	'dist/nodes/CalDav/icalendar/recurrence.d.ts',
 	'dist/nodes/CalDav/icalendar/recurrence.js',
 	'dist/nodes/CalDav/icalendar/recurrence.js.map',
@@ -226,7 +229,7 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(130);
+		expect(expectedPackageFiles).toHaveLength(133);
 		expect(expectedPackageFiles.filter((path) => path.includes('/icalendar/alarms.'))).toEqual(
 			alarmArtifactPaths,
 		);
