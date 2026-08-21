@@ -3,6 +3,17 @@
 Changes from published releases and declared project milestones will be
 documented in this file.
 
+## [0.6.0] - 2026-08-21
+
+### Development checkpoint
+
+- Added structured categories, status, and transparency across Event reads, Create, Update, and Upsert with explicit omission/set/remove semantics and preservation of unrelated iCalendar content (#46).
+- Added a deterministic structured recurrence-rule model for daily, weekly, monthly, and yearly rules with bounded validation and preservation of unsupported recurrence data (#47).
+- Added recurrence authoring and safe recurrence mutation across Create, Update, and Upsert while preserving exceptions, EXDATE/RDATE, unsupported fields, and IANA VTIMEZONE correctness without occurrence expansion (#48).
+- Added multiple structured DISPLAY, AUDIO, and EMAIL reminders with relative triggers, targeted mutation, and preservation of unsupported or untouched VALARM content (#49).
+- Added bounded source `rawIcs` output for Event Get, Get Many, Update, and Upsert update results with authoritative snapshot provenance and privacy-safe errors (#50).
+- Added validated Raw ICS input mode for Event Create, Update, and Upsert with complete-object replacement semantics, UID/calendar/ETag safeguards, semantic preservation, and authoritative read-back (#51).
+
 ## [0.5.0] - 2026-08-17
 
 ### Development checkpoint
