@@ -93,6 +93,56 @@ describe('validated Raw ICS write preparation', () => {
 		expect(Object.isFrozen(prepared.resource)).toBe(true);
 	});
 
+	it('accepts real leap-day values, action-specific alarms and recurring timezone observances', () => {
+		const rawIcs = calendar(
+			[
+				'BEGIN:VEVENT',
+				`UID:${UID}`,
+				'DTSTAMP:20400229T235959Z',
+				'DTSTART:20400229T100000Z',
+				'DTEND:20400229T110000Z',
+				'STATUS:CONFIRMED',
+				'TRANSP:OPAQUE',
+				'BEGIN:VALARM',
+				'ACTION:DISPLAY',
+				'TRIGGER:-PT15M',
+				'DESCRIPTION:Display reminder',
+				'DURATION:PT5M',
+				'REPEAT:2',
+				'END:VALARM',
+				'BEGIN:VALARM',
+				'ACTION:EMAIL',
+				'TRIGGER;VALUE=DATE-TIME:20400229T090000Z',
+				'DESCRIPTION:Email reminder',
+				'SUMMARY:Event reminder',
+				'ATTENDEE:mailto:guest@example.test',
+				'END:VALARM',
+				'BEGIN:VALARM',
+				'ACTION:AUDIO',
+				'TRIGGER:PT0S',
+				'ATTACH:https://example.test/reminder.wav',
+				'END:VALARM',
+				'END:VEVENT',
+			],
+			[
+				'BEGIN:VTIMEZONE',
+				'TZID:Custom/Recurring',
+				'BEGIN:STANDARD',
+				'DTSTART:19701025T030000',
+				'TZOFFSETFROM:+0200',
+				'TZOFFSETTO:+0100',
+				'RRULE:BYMONTH=10;FREQ=YEARLY;BYDAY=-1SU',
+				'RDATE:19801026T030000',
+				'COMMENT:First note',
+				'COMMENT:Second note',
+				'END:STANDARD',
+				'END:VTIMEZONE',
+			],
+		);
+
+		expect(() => prepareRawCalendarEventWrite({ operation: 'create', rawIcs })).not.toThrow();
+	});
+
 	it.each(['create', 'upsert'] as const)(
 		'generates exactly once and inserts the same UID into every VEVENT for %s',
 		(operation) => {
@@ -205,6 +255,103 @@ describe('validated Raw ICS write preparation', () => {
 		expect(
 			failure(() => prepareRawCalendarEventWrite({ operation: 'create', rawIcs: oversized })).code,
 		).toBe('RESOURCE_LIMIT_EXCEEDED');
+	});
+
+	it.each([
+		['impossible DTSTART date', calendar(event()).replace('20400102T100000Z', '20400230T100000Z')],
+		[
+			'impossible DTSTAMP month and time',
+			calendar(event()).replace('20400101T000000Z', '20401301T250000Z'),
+		],
+		['DTEND before DTSTART', calendar(event()).replace('20400102T110000Z', '20400102T090000Z')],
+		[
+			'RRULE BYMONTHDAY with WEEKLY frequency',
+			calendar(event(UID, ['RRULE:FREQ=WEEKLY;BYMONTHDAY=1'])),
+		],
+		[
+			'numeric RRULE BYDAY with DAILY frequency',
+			calendar(event(UID, ['RRULE:FREQ=DAILY;BYDAY=1MO'])),
+		],
+		['invalid STATUS token', calendar(event(UID, ['STATUS:NOT-A-STATUS']))],
+		['invalid TRANSP token', calendar(event(UID, ['TRANSP:INVISIBLE']))],
+		['invalid URL', calendar(event(UID, ['URL:not a uri']))],
+		['invalid organizer CAL-ADDRESS', calendar(event(UID, ['ORGANIZER:not-a-calendar-address']))],
+		['invalid SEQUENCE integer', calendar(event(UID, ['SEQUENCE:1.5']))],
+		['out-of-range PRIORITY integer', calendar(event(UID, ['PRIORITY:10']))],
+		[
+			'invalid VTIMEZONE offset',
+			calendar(event(), [
+				'BEGIN:VTIMEZONE',
+				'TZID:Invalid/Offset',
+				'BEGIN:STANDARD',
+				'DTSTART:20400101T020000',
+				'TZOFFSETFROM:+2460',
+				'TZOFFSETTO:+0100',
+				'END:STANDARD',
+				'END:VTIMEZONE',
+			]),
+		],
+		[
+			'impossible observance date',
+			calendar(event(), [
+				'BEGIN:VTIMEZONE',
+				'TZID:Invalid/Date',
+				'BEGIN:DAYLIGHT',
+				'DTSTART:20400230T020000',
+				'TZOFFSETFROM:+0100',
+				'TZOFFSETTO:+0200',
+				'END:DAYLIGHT',
+				'END:VTIMEZONE',
+			]),
+		],
+		[
+			'DISPLAY alarm without DESCRIPTION',
+			calendar(event(UID, ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT5M', 'END:VALARM'])),
+		],
+		[
+			'EMAIL alarm without SUMMARY and ATTENDEE',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:EMAIL',
+					'TRIGGER:-PT5M',
+					'DESCRIPTION:Private reminder',
+					'END:VALARM',
+				]),
+			),
+		],
+		[
+			'AUDIO alarm with DISPLAY-only DESCRIPTION',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:AUDIO',
+					'TRIGGER:-PT5M',
+					'DESCRIPTION:Private reminder',
+					'END:VALARM',
+				]),
+			),
+		],
+		[
+			'REPEAT without DURATION',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:DISPLAY',
+					'TRIGGER:-PT5M',
+					'DESCRIPTION:Private reminder',
+					'REPEAT:2',
+					'END:VALARM',
+				]),
+			),
+		],
+	] as const)('rejects malformed RFC-defined content: %s', (_name, rawIcs) => {
+		const error = failure(() => prepareRawCalendarEventWrite({ operation: 'create', rawIcs }));
+		expect(error).toMatchObject({
+			code: 'INVALID_RESOURCE',
+			message: 'Raw ICS must contain one valid VCALENDAR event resource.',
+		});
+		expect(JSON.stringify(error)).not.toContain('Private reminder');
 	});
 
 	it('compares decoded semantics while ignoring folding and TEXT escape spelling', () => {

@@ -72,6 +72,88 @@ function dependencies(
 }
 
 describe('Raw ICS Create, Update and Upsert request branches', () => {
+	it.each([
+		['impossible date', raw('private-date').replace('20400102T100000Z', '20400230T100000Z')],
+		['impossible time', raw('private-time').replace('20400101T000000Z', '20400101T250000Z')],
+		['invalid status', raw('private-status', ['STATUS:NOT-A-STATUS'])],
+		['invalid transparency', raw('private-transparency', ['TRANSP:INVISIBLE'])],
+		['invalid URI', raw('private-uri', ['URL:not a uri'])],
+		[
+			'invalid calendar address',
+			raw('private-calendar-address', ['ORGANIZER:not-a-calendar-address']),
+		],
+		['invalid integer', raw('private-integer', ['SEQUENCE:1.5'])],
+		[
+			'invalid timezone offset',
+			raw('private-offset').replace(
+				'BEGIN:VEVENT',
+				[
+					'BEGIN:VTIMEZONE',
+					'TZID:Private/Offset',
+					'BEGIN:STANDARD',
+					'DTSTART:20400101T020000',
+					'TZOFFSETFROM:+2460',
+					'TZOFFSETTO:+0100',
+					'END:STANDARD',
+					'END:VTIMEZONE',
+					'BEGIN:VEVENT',
+				].join('\r\n'),
+			),
+		],
+		[
+			'invalid timezone observance',
+			raw('private-observance').replace(
+				'BEGIN:VEVENT',
+				[
+					'BEGIN:VTIMEZONE',
+					'TZID:Private/Observance',
+					'BEGIN:DAYLIGHT',
+					'DTSTART:20400230T020000',
+					'TZOFFSETFROM:+0100',
+					'TZOFFSETTO:+0200',
+					'END:DAYLIGHT',
+					'END:VTIMEZONE',
+					'BEGIN:VEVENT',
+				].join('\r\n'),
+			),
+		],
+		[
+			'invalid DISPLAY alarm',
+			raw('private-alarm', ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT5M', 'END:VALARM']),
+		],
+		[
+			'invalid EMAIL alarm',
+			raw('private-email-alarm', [
+				'BEGIN:VALARM',
+				'ACTION:EMAIL',
+				'TRIGGER:-PT5M',
+				'DESCRIPTION:private-description',
+				'END:VALARM',
+			]),
+		],
+	] as const)(
+		'rejects %s before any event request without leaking Raw ICS',
+		async (_name, rawIcs) => {
+			const requests = transport(async () => response(500, CALENDAR_URL));
+			let failure: unknown;
+			try {
+				await createCalendarEvent(requests, {
+					calendarUrl: CALENDAR_URL,
+					inputMode: 'rawIcs',
+					rawIcs,
+				});
+			} catch (error) {
+				failure = error;
+			}
+			expect(failure).toMatchObject({
+				code: 'INVALID_RESOURCE',
+				message: 'Raw ICS must contain one valid VCALENDAR event resource.',
+			});
+			expect(JSON.stringify(failure)).not.toContain('private-');
+			expect(requests.request).not.toHaveBeenCalled();
+		},
+	);
+
 	it('creates the full object conditionally and returns normalized metadata without rawIcs', async () => {
 		let put: CalDavTransportRequest | undefined;
 		const requests = transport(async (request) => {
