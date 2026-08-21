@@ -241,7 +241,7 @@ describe('Raw ICS public type, compatibility, documentation, and package contrac
 		};
 		const verifier = await repositoryFile('scripts/verify-package-contents.mjs');
 
-		expect(packageJson.version).toBe('0.5.0');
+		expect(packageJson.version).toBe('0.6.0');
 		expect(packageJson.n8n.nodes).toHaveLength(1);
 		expect(packageJson.n8n.credentials).toHaveLength(1);
 		expect(packageJson.dependencies).toBeUndefined();

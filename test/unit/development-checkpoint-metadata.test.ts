@@ -9,17 +9,18 @@ import { cwd } from 'node:process';
 import { describe, expect, it } from 'vitest';
 
 const PACKAGE_NAME = '@iljailjic/n8n-nodes-caldav';
-const CHECKPOINT_VERSION = '0.5.0';
-const CHECKPOINT_HEADING = '## [0.5.0] - 2026-08-17';
-const CHECKPOINT_SECTION = `## [0.5.0] - 2026-08-17
+const CHECKPOINT_VERSION = '0.6.0';
+const CHECKPOINT_HEADING = '## [0.6.0] - 2026-08-21';
+const CHECKPOINT_SECTION = `## [0.6.0] - 2026-08-21
 
 ### Development checkpoint
 
-- Added optional cryptographically generated RFC 4122 UUIDv4 event UIDs while preserving supplied opaque UIDs and one consistent identity across serialization, resource naming, and output (#40).
-- Added explicit timed, all-day, and safe read-only event-time modes with strict Gregorian exclusive end dates, workflow-time-zone normalization, preservation-first conversions, and fixed-UTC query semantics (#41).
-- Added pinned IANA TZDB 2026c validation and deterministic UTC/IANA conversion with embedded VTIMEZONE authority and secure RFC 7808/7809 time-zone reference discovery (#42).
-- Added reference-first finite IANA authoring with deterministic RFC-compliant embedded VTIMEZONE fallback, proven closed-event coverage, and safe rejection when a representation cannot be proved (#43).
-- Added deterministic calendar-scoped Event Upsert with supplied/omitted UID branching, preservation-first conditional Create/Update, semantic no-op handling, and strict race classification without deleting history (#44).
+- Added structured categories, status, and transparency across Event reads, Create, Update, and Upsert with explicit omission/set/remove semantics and preservation of unrelated iCalendar content (#46).
+- Added a deterministic structured recurrence-rule model for daily, weekly, monthly, and yearly rules with bounded validation and preservation of unsupported recurrence data (#47).
+- Added recurrence authoring and safe recurrence mutation across Create, Update, and Upsert while preserving exceptions, EXDATE/RDATE, unsupported fields, and IANA VTIMEZONE correctness without occurrence expansion (#48).
+- Added multiple structured DISPLAY, AUDIO, and EMAIL reminders with relative triggers, targeted mutation, and preservation of unsupported or untouched VALARM content (#49).
+- Added bounded source \`rawIcs\` output for Event Get, Get Many, Update, and Upsert update results with authoritative snapshot provenance and privacy-safe errors (#50).
+- Added validated Raw ICS input mode for Event Create, Update, and Upsert with complete-object replacement semantics, UID/calendar/ETag safeguards, semantic preservation, and authoritative read-back (#51).
 `;
 
 interface PackageIdentity {
@@ -39,8 +40,8 @@ async function readJson<T>(path: string): Promise<T> {
 	return JSON.parse(await readRepositoryFile(path)) as T;
 }
 
-describe('0.5.0 development checkpoint metadata', () => {
-	it('synchronizes the package and root lockfile identities at exactly 0.5.0', async () => {
+describe('0.6.0 development checkpoint metadata', () => {
+	it('synchronizes the package and root lockfile identities at exactly 0.6.0', async () => {
 		const packageJson = await readJson<PackageIdentity>('package.json');
 		const packageLock = await readJson<PackageLock>('package-lock.json');
 
@@ -52,16 +53,16 @@ describe('0.5.0 development checkpoint metadata', () => {
 		});
 	});
 
-	it('documents the exact dated checkpoint before 0.4.0 without claiming a release', async () => {
+	it('documents the exact dated checkpoint before 0.5.0 without claiming a release', async () => {
 		const changelog = await readRepositoryFile('CHANGELOG.md');
 		const checkpointStart = changelog.indexOf(CHECKPOINT_HEADING);
-		const previousCheckpointStart = changelog.indexOf('## [0.4.0]');
+		const previousCheckpointStart = changelog.indexOf('## [0.5.0]');
 		const nextHeadingStart = changelog.indexOf(
 			'\n## ',
 			checkpointStart + CHECKPOINT_HEADING.length,
 		);
 
-		expect(changelog.match(/^## \[0\.5\.0\] - 2026-08-17$/gm) ?? []).toHaveLength(1);
+		expect(changelog.match(/^## \[0\.6\.0\] - 2026-08-21$/gm) ?? []).toHaveLength(1);
 		expect(checkpointStart).toBeGreaterThanOrEqual(0);
 		expect(previousCheckpointStart).toBeGreaterThan(checkpointStart);
 		expect(nextHeadingStart).toBe(previousCheckpointStart - 1);
