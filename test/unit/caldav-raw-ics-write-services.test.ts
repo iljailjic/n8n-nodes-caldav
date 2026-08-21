@@ -169,6 +169,35 @@ describe('Raw ICS Create, Update and Upsert request branches', () => {
 				'END:VALARM',
 			]),
 		],
+		[
+			'generic alarm without trigger',
+			raw('private-generic-missing-trigger', [
+				'BEGIN:VALARM',
+				'ACTION:PROCEDURE',
+				'X-PROCEDURE-DATA:private-generic-data',
+				'END:VALARM',
+			]),
+		],
+		[
+			'generic alarm with duplicate trigger',
+			raw('private-generic-duplicate-trigger', [
+				'BEGIN:VALARM',
+				'ACTION:X-VENDOR-ACTION',
+				'TRIGGER:-PT5M',
+				'TRIGGER:-PT10M',
+				'X-VENDOR-DATA:private-generic-data',
+				'END:VALARM',
+			]),
+		],
+		[
+			'generic alarm with invalid trigger',
+			raw('private-generic-invalid-trigger', [
+				'BEGIN:VALARM',
+				'ACTION:PROCEDURE',
+				'TRIGGER:private-invalid-trigger',
+				'END:VALARM',
+			]),
+		],
 	] as const)(
 		'rejects %s before any event request without leaking Raw ICS',
 		async (_name, rawIcs) => {

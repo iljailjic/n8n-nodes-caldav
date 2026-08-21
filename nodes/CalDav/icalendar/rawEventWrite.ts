@@ -814,26 +814,19 @@ function validateEventProperty(property: ICalendarProperty, eventStart: ICalenda
 function validateAlarm(alarm: ICalendarComponent): void {
 	if (components(alarm).length > 0) return fail('INVALID_RESOURCE');
 	rejectKnownPropertiesOutside(alarm, ALARM_PROPERTY_NAMES);
-	if (properties(alarm, 'ACTION').length !== 1) return fail('INVALID_RESOURCE');
+	if (properties(alarm, 'ACTION').length !== 1 || properties(alarm, 'TRIGGER').length !== 1) {
+		return fail('INVALID_RESOURCE');
+	}
+	for (const name of ['REPEAT', 'DURATION'] as const) {
+		if (properties(alarm, name).length > 1) return fail('INVALID_RESOURCE');
+	}
+	if ((properties(alarm, 'REPEAT').length === 0) !== (properties(alarm, 'DURATION').length === 0)) {
+		return fail('INVALID_RESOURCE');
+	}
 	const actionProperty = properties(alarm, 'ACTION')[0]!;
 	validateTextProperty(actionProperty);
 	const action = decodedText(actionProperty)?.toUpperCase();
 	if (action === undefined || !isExtensionToken(action)) return fail('INVALID_RESOURCE');
-	if (!['AUDIO', 'DISPLAY', 'EMAIL'].includes(action)) return;
-	if (properties(alarm, 'TRIGGER').length !== 1) return fail('INVALID_RESOURCE');
-	if ((properties(alarm, 'REPEAT').length === 0) !== (properties(alarm, 'DURATION').length === 0)) {
-		return fail('INVALID_RESOURCE');
-	}
-	for (const name of [
-		'ACTION',
-		'TRIGGER',
-		'REPEAT',
-		'DURATION',
-		'DESCRIPTION',
-		'SUMMARY',
-	] as const) {
-		if (properties(alarm, name).length > 1) return fail('INVALID_RESOURCE');
-	}
 
 	const trigger = properties(alarm, 'TRIGGER')[0]!;
 	validateParameters(trigger, ['RELATED', 'VALUE']);
@@ -858,6 +851,10 @@ function validateAlarm(alarm: ICalendarComponent): void {
 		requireValueType(durations[0]!, 'DURATION');
 		validateParameters(durations[0]!, ['VALUE']);
 		if (!isValidDuration(durations[0]!.value.raw, true)) return fail('INVALID_RESOURCE');
+	}
+	if (!['AUDIO', 'DISPLAY', 'EMAIL'].includes(action)) return;
+	for (const name of ['DESCRIPTION', 'SUMMARY'] as const) {
+		if (properties(alarm, name).length > 1) return fail('INVALID_RESOURCE');
 	}
 
 	for (const property of properties(alarm, 'DESCRIPTION'))

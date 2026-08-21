@@ -189,10 +189,15 @@ describe('validated Raw ICS write preparation', () => {
 			'ATTENDEE;ROLE=IANA-ROLE;CUTYPE=IANA-CUTYPE:mailto:guest@example.test',
 			'BEGIN:VALARM',
 			'ACTION:PROCEDURE',
+			'TRIGGER:-PT5M',
+			'DURATION:PT1M',
+			'REPEAT:2',
+			'PROCEDURE-DATA:opaque-iana',
 			'X-PROCEDURE-DATA:opaque',
 			'END:VALARM',
 			'BEGIN:VALARM',
 			'ACTION:X-VENDOR-ACTION',
+			'TRIGGER;VALUE=DATE-TIME:20400102T090000Z',
 			'X-VENDOR-DATA:preserved',
 			'END:VALARM',
 			'END:VEVENT',
@@ -202,6 +207,7 @@ describe('validated Raw ICS write preparation', () => {
 
 		expect(prepared.calendarData).toContain('ACTION:PROCEDURE');
 		expect(prepared.calendarData).toContain('ACTION:X-VENDOR-ACTION');
+		expect(prepared.calendarData).toContain('PROCEDURE-DATA:opaque-iana');
 		expect(prepared.calendarData).toContain('ROLE=IANA-ROLE');
 		expect(prepared.calendarData).toContain('DTSTAMP:20400101T100060Z');
 	});
@@ -462,13 +468,62 @@ describe('validated Raw ICS write preparation', () => {
 				]),
 			),
 		],
+		[
+			'generic alarm without TRIGGER',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:PROCEDURE',
+					'X-PROCEDURE-DATA:Private generic alarm',
+					'END:VALARM',
+				]),
+			),
+		],
+		[
+			'generic alarm with duplicate TRIGGER',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:X-VENDOR-ACTION',
+					'TRIGGER:-PT5M',
+					'TRIGGER:-PT10M',
+					'X-VENDOR-DATA:Private generic alarm',
+					'END:VALARM',
+				]),
+			),
+		],
+		[
+			'generic alarm with invalid TRIGGER',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:PROCEDURE',
+					'TRIGGER:NOT-A-DURATION',
+					'X-PROCEDURE-DATA:Private generic alarm',
+					'END:VALARM',
+				]),
+			),
+		],
+		[
+			'generic alarm with REPEAT without DURATION',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:PROCEDURE',
+					'TRIGGER:-PT5M',
+					'REPEAT:2',
+					'X-PROCEDURE-DATA:Private generic alarm',
+					'END:VALARM',
+				]),
+			),
+		],
 	] as const)('rejects malformed RFC-defined content: %s', (_name, rawIcs) => {
 		const error = failure(() => prepareRawCalendarEventWrite({ operation: 'create', rawIcs }));
 		expect(error).toMatchObject({
 			code: 'INVALID_RESOURCE',
 			message: 'Raw ICS must contain one valid VCALENDAR event resource.',
 		});
-		expect(JSON.stringify(error)).not.toContain('Private reminder');
+		expect(JSON.stringify(error)).not.toContain('Private');
 	});
 
 	it('compares decoded semantics while ignoring folding and TEXT escape spelling', () => {
