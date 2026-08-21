@@ -27,7 +27,7 @@ import type { CalendarEventInstantProjector } from '../icalendar/serializer';
 import { projectInstantInTimeZone } from '../icalendar/timeZones';
 import { joinCalendarCollectionUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
-import type { CalendarEventCreateClock, CalendarEventCreateInput } from './create';
+import type { CalendarEventCreateClock, StructuredCalendarEventCreateInput } from './create';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
 import { resolveCalendarEventTimeZoneAuthoring } from './timeZoneAuthoring';
 import type { CalendarEventTimeZoneAuthoringCoverage } from './timeZoneAuthoring';
@@ -47,6 +47,13 @@ function resourceNameForUid(uid: string): string {
 		throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.RESOURCE_NAME_TOO_LONG);
 	}
 	return resourceName;
+}
+
+export function calendarEventResourceUrlForUid(
+	calendarUrl: AbsoluteHttpUrl,
+	uid: string,
+): AbsoluteHttpUrl {
+	return joinCalendarCollectionUrl(calendarUrl, resourceNameForUid(uid));
 }
 
 function readClock(clock: CalendarEventCreateClock): Date {
@@ -72,7 +79,7 @@ function readClock(clock: CalendarEventCreateClock): Date {
 }
 
 function normalizeCreatedEvent(
-	input: CalendarEventCreateInput,
+	input: StructuredCalendarEventCreateInput,
 	resourceUrl: AbsoluteHttpUrl,
 	calendarData: string,
 	timeZoneDefinition?: ICalendarComponent,
@@ -111,7 +118,7 @@ function utcString(value: Date): UtcDateTimeString {
 	return value.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
 }
 
-function recurrenceStartContext(input: CalendarEventCreateInput): RecurrenceStartContext {
+function recurrenceStartContext(input: StructuredCalendarEventCreateInput): RecurrenceStartContext {
 	if (input.timeMode === 'allDay') {
 		return { timeMode: 'allDay', startDate: input.startDate as CalendarDateString };
 	}
@@ -128,7 +135,7 @@ function recurrenceStartContext(input: CalendarEventCreateInput): RecurrenceStar
 }
 
 function normalizedRecurrence(
-	input: CalendarEventCreateInput,
+	input: StructuredCalendarEventCreateInput,
 	start: RecurrenceStartContext,
 ): RecurrenceRule | undefined {
 	return input.recurrence === undefined
@@ -137,7 +144,7 @@ function normalizedRecurrence(
 }
 
 function ianaCoverage(
-	input: Extract<CalendarEventCreateInput, { readonly timeMode: 'timed' }>,
+	input: Extract<StructuredCalendarEventCreateInput, { readonly timeMode: 'timed' }>,
 	recurrence: RecurrenceRule | undefined,
 	start: Extract<RecurrenceStartContext, { readonly timeZoneMode: 'iana' }>,
 ): CalendarEventTimeZoneAuthoringCoverage {
@@ -157,7 +164,7 @@ function ianaCoverage(
 }
 
 export async function prepareCalendarEventCreate(
-	input: CalendarEventCreateInput,
+	input: StructuredCalendarEventCreateInput,
 	clock: CalendarEventCreateClock,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 	uidGenerator?: CalendarEventUidGenerator,
@@ -193,7 +200,7 @@ export async function prepareCalendarEventCreate(
 			projectInstantInTimeZone(instant, selectedTimeZone, definition);
 	}
 	const uid = resolveCalendarEventUid(input.uid, uidGenerator);
-	const resourceUrl = joinCalendarCollectionUrl(input.calendarUrl, resourceNameForUid(uid));
+	const resourceUrl = calendarEventResourceUrlForUid(input.calendarUrl, uid);
 	const dtstamp = readClock(clock);
 	const common = {
 		uid,

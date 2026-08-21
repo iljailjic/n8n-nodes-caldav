@@ -202,6 +202,8 @@ describe('CalDAV Event Upsert metadata', () => {
 		const properties = upsertProperties();
 		expect(properties.map(({ displayName }) => displayName)).toEqual([
 			'Calendar',
+			'Input Mode',
+			'Raw ICS',
 			'UID',
 			'Time Mode',
 			'Time Zone Mode',
@@ -213,7 +215,7 @@ describe('CalDAV Event Upsert metadata', () => {
 			'Summary',
 			'Additional Fields',
 		]);
-		const uid = properties[1]!;
+		const uid = properties[3]!;
 		expect(uid).toMatchObject({ name: 'uid', type: 'string', default: '' });
 		expect(uid.required).toBeUndefined();
 		expect(uid.description).toContain('blank');
@@ -222,7 +224,7 @@ describe('CalDAV Event Upsert metadata', () => {
 		expect(uid.description).toContain('supplied UID');
 		expect(uid.description).toContain('selected calendar');
 
-		expect(properties.slice(2, 10).map(({ name }) => name)).toEqual([
+		expect(properties.slice(4, 12).map(({ name }) => name)).toEqual([
 			'timeMode',
 			'timeZoneMode',
 			'timeZone',
@@ -232,7 +234,7 @@ describe('CalDAV Event Upsert metadata', () => {
 			'endDate',
 			'summary',
 		]);
-		expect(properties[2]).toMatchObject({
+		expect(properties[4]).toMatchObject({
 			required: true,
 			noDataExpression: true,
 			default: 'timed',
@@ -241,13 +243,13 @@ describe('CalDAV Event Upsert metadata', () => {
 				{ name: 'All-Day', value: 'allDay' },
 			],
 		});
-		expect(properties[3]).toMatchObject({
+		expect(properties[5]).toMatchObject({
 			required: true,
 			noDataExpression: true,
 			default: 'utc',
 			displayOptions: { show: { operation: ['upsert'], timeMode: ['timed'] } },
 		});
-		expect(properties[4]).toMatchObject({
+		expect(properties[6]).toMatchObject({
 			required: true,
 			default: '',
 			displayOptions: {
@@ -255,7 +257,7 @@ describe('CalDAV Event Upsert metadata', () => {
 			},
 		});
 
-		const additional = properties[10]!;
+		const additional = properties[12]!;
 		expect(additional).toMatchObject({
 			name: 'additionalFields',
 			type: 'collection',

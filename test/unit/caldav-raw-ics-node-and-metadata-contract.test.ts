@@ -233,7 +233,7 @@ describe('Raw ICS public type, compatibility, documentation, and package contrac
 		}
 	});
 
-	it('keeps the package identity, registrations, dependencies, and 130-file manifest unchanged', async () => {
+	it('keeps package identity, registrations and dependencies while adding only the Raw write triplet', async () => {
 		const packageJson = JSON.parse(await repositoryFile('package.json')) as {
 			readonly version: string;
 			readonly dependencies?: Readonly<Record<string, string>>;
@@ -245,8 +245,8 @@ describe('Raw ICS public type, compatibility, documentation, and package contrac
 		expect(packageJson.n8n.nodes).toHaveLength(1);
 		expect(packageJson.n8n.credentials).toHaveLength(1);
 		expect(packageJson.dependencies).toBeUndefined();
-		expect(verifier.match(/^\s*'[^']+',$/gm)).toHaveLength(130);
+		expect(verifier.match(/^\s*'[^']+',$/gm)).toHaveLength(133);
 		expect(verifier).toContain('EXPECTED_PACKAGE_FILES.size');
-		expect(verifier).not.toMatch(/rawIcs|raw-ics/i);
+		expect(verifier.match(/rawEventWrite\.(?:d\.ts|js|js\.map)/g)).toHaveLength(3);
 	});
 });

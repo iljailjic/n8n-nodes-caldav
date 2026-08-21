@@ -65,6 +65,17 @@ Event operations cover timed and all-day events, UTC and IANA time zones,
 description, location, URL, categories, status, transparency, reminders,
 recurrence, and raw iCalendar data.
 
+Event Create, Update, and Upsert provide an explicit **Input Mode**. Structured
+mode uses the individual event fields and remains preservation-first: Event
+Update changes only selected fields. Raw ICS mode accepts one complete,
+validated `VCALENDAR` event object. Raw Update and the update branch of Raw
+Upsert intentionally replace the entire stored calendar object, so properties
+omitted from the Raw ICS input are removed. Raw mode still enforces event UID,
+calendar URL, 5 MiB resource, ETag concurrency, parser-security, and CalDAV
+request limits. A UID-less Raw Create or Upsert generates one UUID and inserts
+it into the complete VEVENT set; Raw Update requires the body UID to match its
+target.
+
 Successful event reads expose the source calendar object as the flat `rawIcs`
 JSON string alongside normalized event fields:
 
@@ -92,6 +103,11 @@ recovers the same JavaScript string.
 > `rawIcs` is sensitive workflow output and can contain calendar information
 > that is absent from normalized fields. It follows normal n8n execution-data
 > retention, so configure retention and access controls accordingly.
+
+Raw ICS input is equally sensitive. It is stored in workflow configuration and
+may be retained in execution data according to the n8n instance's retention and
+access-control settings. Do not paste production calendar objects into shared
+workflows, issue reports, logs, or test fixtures.
 
 For Event Create, supply a UID to preserve that exact event identity, or leave
 UID blank to generate a standards-compliant UUID. Each separate Create with a

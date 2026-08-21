@@ -2957,6 +2957,150 @@ describe('Radicale deterministic Event Upsert', () => {
 	});
 });
 
+describe('Radicale validated Raw ICS writes', () => {
+	it('creates, fully replaces and upserts complex event objects with authoritative read-back and stale-ETag safety', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = validateAbsoluteHttpUrl(
+				await createSyntheticCalendar(run, 'raw-write', 'Validated Raw Writes'),
+			);
+			const uid = `raw-write-${run.identity}@example.test`;
+			const raw = (summary: string, extras: readonly string[] = []): string =>
+				[
+					'BEGIN:VCALENDAR',
+					'VERSION:2.0',
+					'PRODID:-//example.test//Radicale raw write//EN',
+					'BEGIN:VEVENT',
+					`UID:${uid}`,
+					'DTSTART:20400902T100000Z',
+					'DTEND:20400902T110000Z',
+					'DTSTAMP:20400101T000000Z',
+					`SUMMARY:${summary}`,
+					...extras,
+					'END:VEVENT',
+					'END:VCALENDAR',
+					'',
+				].join('\r\n');
+			const initial = raw('Raw create', [
+				'DESCRIPTION:removed by replacement',
+				'RRULE:FREQ=DAILY;COUNT=2',
+				'EXDATE:20400903T100000Z',
+				'RDATE:20400904T100000Z',
+				'X-RAW-COMPLEX:kept-on-create',
+			]);
+			const liveTransport = transport(run);
+			const request = vi.fn(liveTransport.request.bind(liveTransport));
+			const inspectedTransport: CalDavTransport = { ...liveTransport, request };
+
+			const created = await createCalendarEvent(
+				inspectedTransport,
+				{ calendarUrl, inputMode: 'rawIcs', rawIcs: initial },
+				vi.fn(() => new Date('2040-01-01T00:00:00Z')),
+			);
+			expect(created).toMatchObject({ uid, summary: 'Raw create', etag: expect.any(String) });
+			expect(created).not.toHaveProperty('rawIcs');
+			const storedInitial = await (await authenticatedFetch(run, created.resourceUrl)).text();
+			expect(storedInitial).toContain('X-RAW-COMPLEX:kept-on-create');
+
+			const alarmUid = `raw-alarm-${run.identity}@example.test`;
+			const alarmSource = raw('Raw alarm', [
+				'BEGIN:VALARM',
+				'ACTION:DISPLAY',
+				'TRIGGER:-PT10M',
+				'DESCRIPTION:Raw reminder',
+				'END:VALARM',
+			]).replaceAll(uid, alarmUid);
+			const alarmCreated = await createCalendarEvent(inspectedTransport, {
+				calendarUrl,
+				inputMode: 'rawIcs',
+				rawIcs: alarmSource,
+			});
+			const storedAlarm = await (await authenticatedFetch(run, alarmCreated.resourceUrl)).text();
+			expect(storedAlarm).toContain('BEGIN:VALARM');
+			expect(storedAlarm).toContain(`UID:${alarmUid}`);
+
+			const replacement = raw('Raw URL replacement', ['X-RAW-REPLACED:yes']);
+			const byUrl = await updateCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+					etag: created.etag,
+					inputMode: 'rawIcs',
+					rawIcs: replacement,
+				},
+				vi.fn(() => new Date('2040-01-01T00:00:01Z')),
+			);
+			expect(byUrl).toMatchObject({
+				uid,
+				resourceUrl: created.resourceUrl,
+				summary: 'Raw URL replacement',
+				etag: expect.any(String),
+			});
+			expect(byUrl.rawIcs).not.toContain('DESCRIPTION:removed by replacement');
+			expect(byUrl.rawIcs).toContain('X-RAW-REPLACED:yes');
+
+			await expect(
+				updateCalendarEvent(
+					inspectedTransport,
+					{
+						calendarUrl,
+						identifier: { kind: 'resourceUrl', resourceUrl: created.resourceUrl },
+						etag: '"stale"',
+						inputMode: 'rawIcs',
+						rawIcs: raw('Stale attempt'),
+					},
+					vi.fn(() => new Date('2040-01-01T00:00:02Z')),
+				),
+			).rejects.toMatchObject({ code: 'CALENDAR_EVENT_CONCURRENCY_CONFLICT' });
+
+			const byUid = await updateCalendarEvent(
+				inspectedTransport,
+				{
+					calendarUrl,
+					identifier: { kind: 'uid', uid },
+					inputMode: 'rawIcs',
+					rawIcs: raw('Raw UID replacement'),
+				},
+				vi.fn(() => new Date('2040-01-01T00:00:03Z')),
+			);
+			expect(byUid).toMatchObject({ uid, summary: 'Raw UID replacement' });
+
+			const upsertUid = `raw-upsert-${run.identity}@example.test`;
+			const upsertRaw = (summary: string): string => raw(summary).replaceAll(uid, upsertUid);
+			const createdByUpsert = await upsertCalendarEvent(
+				inspectedTransport,
+				{ calendarUrl, inputMode: 'rawIcs', rawIcs: upsertRaw('Upsert create') },
+				{
+					clock: vi.fn(() => new Date('2040-01-01T00:00:04Z')),
+					uidFactory: vi.fn(() => '00000000-0000-4000-8000-000000000051'),
+				},
+			);
+			expect(createdByUpsert).toMatchObject({
+				action: 'create',
+				event: { uid: upsertUid, summary: 'Upsert create' },
+			});
+
+			const updatedByUpsert = await upsertCalendarEvent(
+				inspectedTransport,
+				{ calendarUrl, inputMode: 'rawIcs', rawIcs: upsertRaw('Upsert update') },
+				{
+					clock: vi.fn(() => new Date('2040-01-01T00:00:05Z')),
+					uidFactory: vi.fn(() => '00000000-0000-4000-8000-000000000052'),
+				},
+			);
+			expect(updatedByUpsert).toMatchObject({
+				action: 'update',
+				event: { uid: upsertUid, summary: 'Upsert update', rawIcs: expect.any(String) },
+			});
+			const methods = request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method);
+			expect(methods.filter((method) => method === 'DELETE')).toHaveLength(0);
+		} finally {
+			await teardownRun(run);
+		}
+	});
+});
+
 describe('Radicale run isolation and confinement', () => {
 	it('resets only the selected run and preserves authenticated reconnection', async () => {
 		const [resetRun, controlRun] = await Promise.all([startRun(), startRun()]);

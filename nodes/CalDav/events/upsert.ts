@@ -10,12 +10,13 @@ import type {
 	CalendarAlarmUidGenerator,
 } from '../icalendar/alarms';
 import type { ICalendarComponent, ICalendarProperty } from '../icalendar/parser';
-import type {
-	CalendarDateString,
-	CalendarEvent,
-	CalendarEventStatus,
-	CalendarEventTransparency,
-	UtcDateTimeString,
+import {
+	mapCalendarEventResource,
+	type CalendarDateString,
+	type CalendarEvent,
+	type CalendarEventStatus,
+	type CalendarEventTransparency,
+	type UtcDateTimeString,
 } from '../icalendar/eventReadModel';
 import type { CalendarEventPatch, OptionalFieldPatch } from '../icalendar/patcher';
 import { normalizeRecurrenceRule } from '../icalendar/recurrence';
@@ -38,8 +39,8 @@ import type { CalDavTransport } from '../transport/http';
 import { normalizeCalendarCollectionUrl, validateAbsoluteHttpUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './create';
-import type { CalendarEventCreateClock, CalendarEventCreateInput } from './create';
-import { prepareCalendarEventCreate } from './createPreparation';
+import type { CalendarEventCreateClock, StructuredCalendarEventCreateInput } from './create';
+import { calendarEventResourceUrlForUid, prepareCalendarEventCreate } from './createPreparation';
 import {
 	CalDavCalendarEventMutationError,
 	CalendarEventMutationFailureCode,
@@ -58,7 +59,14 @@ import {
 	CalendarEventUpdateFailureCode,
 	assertResolvedCalendarEventUidIdentity,
 	updateResolvedCalendarEvent,
+	updatePreparedRawCalendarEvent,
 } from './update';
+import {
+	CalDavRawCalendarEventError,
+	RawCalendarEventFailureCode,
+	prepareRawCalendarEventWrite,
+	rawCalendarEventResourcesAreSemanticallyEqual,
+} from '../icalendar/rawEventWrite';
 
 interface CalendarEventUpsertCommon {
 	readonly calendarUrl: AbsoluteHttpUrl;
@@ -74,7 +82,7 @@ interface CalendarEventUpsertCommon {
 	readonly recurrence?: OptionalFieldPatch<RecurrenceRule>;
 }
 
-export type CalendarEventUpsertInput = CalendarEventUpsertCommon &
+type ExistingCalendarEventUpsertInput = CalendarEventUpsertCommon &
 	(
 		| {
 				readonly timeMode: 'timed';
@@ -88,6 +96,19 @@ export type CalendarEventUpsertInput = CalendarEventUpsertCommon &
 				readonly endDate: CalendarDateString;
 		  }
 	);
+
+export type StructuredCalendarEventUpsertInput = ExistingCalendarEventUpsertInput & {
+	readonly inputMode?: 'structured';
+};
+
+export interface RawCalendarEventUpsertInput {
+	readonly calendarUrl: AbsoluteHttpUrl;
+	readonly inputMode: 'rawIcs';
+	readonly rawIcs: string;
+}
+
+export type CalendarEventUpsertInput =
+	StructuredCalendarEventUpsertInput | RawCalendarEventUpsertInput;
 
 export interface CalendarEventUpsertDependencies {
 	readonly clock: CalendarEventCreateClock;
@@ -371,7 +392,9 @@ function recurrencePatch(
 	return Object.freeze({ kind: 'set', value: normalizeRecurrenceRule(value.value, start) });
 }
 
-function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInput {
+function snapshotInput(
+	input: StructuredCalendarEventUpsertInput,
+): StructuredCalendarEventUpsertInput {
 	if (!isRecord(input)) return invalid(MESSAGES.INVALID_CALENDAR_URL);
 	let calendarUrl: AbsoluteHttpUrl;
 	try {
@@ -457,6 +480,7 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 	}
 	const allowed = new Set([
 		'calendarUrl',
+		'inputMode',
 		'uid',
 		'timeMode',
 		'summary',
@@ -549,7 +573,7 @@ function snapshotInput(input: CalendarEventUpsertInput): CalendarEventUpsertInpu
 		...(transparency === undefined ? {} : { transparency }),
 		...(alarms === undefined ? {} : { alarms }),
 		...(recurrence === undefined ? {} : { recurrence }),
-	}) as CalendarEventUpsertInput;
+	}) as StructuredCalendarEventUpsertInput;
 }
 
 function generatedUid(factory: CalendarEventUidGenerator): string {
@@ -565,9 +589,9 @@ function generatedUid(factory: CalendarEventUidGenerator): string {
 }
 
 function createInput(
-	input: CalendarEventUpsertInput,
+	input: StructuredCalendarEventUpsertInput,
 	uid: string | undefined,
-): CalendarEventCreateInput {
+): StructuredCalendarEventCreateInput {
 	if (input.alarms?.some((mutation) => mutation.kind !== 'add')) {
 		return invalid(MESSAGES.INVALID_ADDITIONAL_FIELDS);
 	}
@@ -605,10 +629,13 @@ function createInput(
 					),
 				}),
 		...(input.recurrence?.kind === 'set' ? { recurrence: input.recurrence.value } : {}),
-	}) as CalendarEventCreateInput;
+	}) as StructuredCalendarEventCreateInput;
 }
 
-function updatePatch(input: CalendarEventUpsertInput, current: CalendarEvent): CalendarEventPatch {
+function updatePatch(
+	input: StructuredCalendarEventUpsertInput,
+	current: CalendarEvent,
+): CalendarEventPatch {
 	const timePatch =
 		input.timeMode === 'timed'
 			? (() => {
@@ -696,7 +723,7 @@ function mapConflict(error: unknown, update: boolean): never {
 
 async function createBranch(
 	transport: CalDavTransport,
-	input: CalendarEventUpsertInput,
+	input: StructuredCalendarEventUpsertInput,
 	uid: string | undefined,
 	clock: CalendarEventCreateClock,
 	uidFactory: CalendarEventUidGenerator,
@@ -744,12 +771,145 @@ async function createBranch(
 	return Object.freeze({ action: 'create', event });
 }
 
+async function createPreparedRawEvent(
+	transport: CalDavTransport,
+	calendarUrl: AbsoluteHttpUrl,
+	prepared: ReturnType<typeof prepareRawCalendarEventWrite>,
+): Promise<UpsertedCalendarEvent> {
+	const target = calendarEventResourceUrlForUid(calendarUrl, prepared.uid);
+	const mutation = await createCalendarEventResource(
+		transport,
+		calendarUrl,
+		target,
+		prepared.calendarData,
+	);
+	let resourceUrl = mutation.resourceUrl;
+	let etag = mutation.etag;
+	if (etag === undefined) {
+		try {
+			const metadata = await getCalendarEventMutationEtag(transport, calendarUrl, resourceUrl);
+			resourceUrl = metadata.resourceUrl;
+			etag = metadata.etag;
+		} catch (error) {
+			throw new CalDavCalendarEventCreateError(
+				CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED,
+				statusCode(error),
+			);
+		}
+	}
+	const event = mapCalendarEventResource({
+		calendarUrl,
+		resourceUrl,
+		etag,
+		resource: prepared.resource,
+	}).event;
+	return Object.freeze({ ...event, resourceUrl, etag });
+}
+
+function rawUpsertInput(input: RawCalendarEventUpsertInput): RawCalendarEventUpsertInput {
+	const allowed = new Set(['calendarUrl', 'inputMode', 'rawIcs']);
+	if (
+		typeof input.calendarUrl !== 'string' ||
+		Reflect.ownKeys(input).some((key) => typeof key !== 'string' || !allowed.has(key))
+	) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+	return Object.freeze({
+		calendarUrl: normalizeCalendarCollectionUrl(validateAbsoluteHttpUrl(input.calendarUrl)),
+		inputMode: 'rawIcs',
+		rawIcs: input.rawIcs,
+	});
+}
+
+async function upsertRawCalendarEvent(
+	transport: CalDavTransport,
+	input: RawCalendarEventUpsertInput,
+	dependencies: CalendarEventUpsertDependencies,
+): Promise<CalendarEventUpsertResult> {
+	const rawInput = rawUpsertInput(input);
+	const prepared = prepareRawCalendarEventWrite(
+		{ operation: 'upsert', rawIcs: rawInput.rawIcs },
+		dependencies.uidFactory,
+	);
+	if (prepared.uidSource === 'generated') {
+		try {
+			const event = await createPreparedRawEvent(transport, rawInput.calendarUrl, prepared);
+			return Object.freeze({ action: 'create', event });
+		} catch (error) {
+			return mapConflict(error, false);
+		}
+	}
+
+	let current;
+	try {
+		current = await resolveCalendarEventByUid(transport, rawInput.calendarUrl, prepared.uid, {
+			allowMissingEtag: true,
+		});
+	} catch (error) {
+		if (
+			error instanceof CalDavCalendarEventUidResolutionError &&
+			error.code === CalendarEventUidResolutionFailureCode.NOT_FOUND
+		) {
+			try {
+				const event = await createPreparedRawEvent(transport, rawInput.calendarUrl, prepared);
+				return Object.freeze({ action: 'create', event });
+			} catch (createError) {
+				return mapConflict(createError, false);
+			}
+		}
+		throw error;
+	}
+	assertResolvedCalendarEventUidIdentity(rawInput.calendarUrl, prepared.uid, current);
+	if (current.event.etag === undefined) {
+		throw new CalDavCalendarEventMutationError(CalendarEventMutationFailureCode.MISSING_ETAG);
+	}
+	if (rawCalendarEventResourcesAreSemanticallyEqual(prepared.resource, current.context.resource)) {
+		return Object.freeze({
+			action: 'update',
+			event: Object.freeze({
+				...current.event,
+				rawIcs: current.rawIcs,
+				etag: current.event.etag,
+			}),
+		});
+	}
+	try {
+		const event = await updatePreparedRawCalendarEvent(
+			transport,
+			rawInput.calendarUrl,
+			current,
+			prepared,
+			current.event.etag,
+		);
+		return Object.freeze({ action: 'update', event });
+	} catch (error) {
+		return mapConflict(error, true);
+	}
+}
+
 export async function upsertCalendarEvent(
 	transport: CalDavTransport,
 	input: CalendarEventUpsertInput,
 	dependencies: CalendarEventUpsertDependencies,
 ): Promise<CalendarEventUpsertResult> {
-	const snapshot = snapshotInput(input);
+	if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+	const mode = (input as { readonly inputMode?: unknown }).inputMode;
+	if (mode === 'rawIcs') {
+		return await upsertRawCalendarEvent(
+			transport,
+			input as RawCalendarEventUpsertInput,
+			dependencies,
+		);
+	}
+	if (
+		(mode !== undefined && mode !== 'structured') ||
+		Object.prototype.hasOwnProperty.call(input, 'rawIcs')
+	) {
+		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
+	}
+	const snapshot = snapshotInput(input as StructuredCalendarEventUpsertInput);
 	const timeZoneContext = calendarEventTimeZoneExecutionContext(transport);
 	const suppliedUid = snapshot.uid;
 	if (suppliedUid === undefined) {
