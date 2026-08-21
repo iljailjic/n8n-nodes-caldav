@@ -33,6 +33,16 @@ function event(uid: string | null = UID, overrides: readonly string[] = []): rea
 	];
 }
 
+function endRelatedAlarm(): readonly string[] {
+	return [
+		'BEGIN:VALARM',
+		'ACTION:DISPLAY',
+		'TRIGGER;RELATED=END:-PT5M',
+		'DESCRIPTION:Private end alarm',
+		'END:VALARM',
+	];
+}
+
 function failure(run: () => unknown): CalDavRawCalendarEventError {
 	try {
 		run();
@@ -210,6 +220,37 @@ describe('validated Raw ICS write preparation', () => {
 		expect(prepared.calendarData).toContain('PROCEDURE-DATA:opaque-iana');
 		expect(prepared.calendarData).toContain('ROLE=IANA-ROLE');
 		expect(prepared.calendarData).toContain('DTSTAMP:20400101T100060Z');
+	});
+
+	it.each([
+		['DTEND', calendar(event(UID, endRelatedAlarm()))],
+		[
+			'DURATION',
+			calendar(event(UID, endRelatedAlarm())).replace('DTEND:20400102T110000Z', 'DURATION:PT1H'),
+		],
+	] as const)('accepts an END-related alarm when VEVENT has %s', (_endKind, rawIcs) => {
+		const prepared = prepareRawCalendarEventWrite({ operation: 'create', rawIcs });
+
+		expect(prepared.calendarData).toContain('TRIGGER;RELATED=END:-PT5M');
+	});
+
+	it('rejects an END-related alarm without a VEVENT end before generating a UID', () => {
+		const generator = vi.fn(() => '00000000-0000-4000-8000-000000000051');
+		const rawIcs = calendar(event(null, endRelatedAlarm())).replace(
+			'DTEND:20400102T110000Z\r\n',
+			'',
+		);
+
+		const error = failure(() =>
+			prepareRawCalendarEventWrite({ operation: 'create', rawIcs }, generator),
+		);
+
+		expect(error).toMatchObject({
+			code: 'INVALID_RESOURCE',
+			message: 'Raw ICS must contain one valid VCALENDAR event resource.',
+		});
+		expect(JSON.stringify(error)).not.toContain('Private end alarm');
+		expect(generator).not.toHaveBeenCalled();
 	});
 
 	it.each(['create', 'upsert'] as const)(

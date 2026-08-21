@@ -124,6 +124,16 @@ describe('Raw ICS Create, Update and Upsert request branches', () => {
 			]),
 		],
 		[
+			'END-related alarm without a VEVENT end',
+			raw('private-end-related-alarm', [
+				'BEGIN:VALARM',
+				'ACTION:DISPLAY',
+				'TRIGGER;RELATED=END:-PT5M',
+				'DESCRIPTION:private-end-alarm-description',
+				'END:VALARM',
+			]).replace('DTEND:20400102T110000Z\r\n', ''),
+		],
+		[
 			'RDATE period with reversed explicit end',
 			raw('private-reversed-period', ['RDATE;VALUE=PERIOD:20400102T120000Z/20400102T110000Z']),
 		],

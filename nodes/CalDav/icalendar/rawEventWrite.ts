@@ -814,7 +814,7 @@ function validateEventProperty(property: ICalendarProperty, eventStart: ICalenda
 	}
 }
 
-function validateAlarm(alarm: ICalendarComponent): void {
+function validateAlarm(alarm: ICalendarComponent, hasEventEnd: boolean): void {
 	if (components(alarm).length > 0) return fail('INVALID_RESOURCE');
 	rejectKnownPropertiesOutside(alarm, ALARM_PROPERTY_NAMES);
 	if (properties(alarm, 'ACTION').length !== 1 || properties(alarm, 'TRIGGER').length !== 1) {
@@ -835,6 +835,9 @@ function validateAlarm(alarm: ICalendarComponent): void {
 	validateParameters(trigger, ['RELATED', 'VALUE']);
 	if (trigger.value.valueType === 'DURATION') {
 		if (!isValidDuration(trigger.value.raw, false, true)) return fail('INVALID_RESOURCE');
+		if (singleParameterValue(trigger, 'RELATED')?.toUpperCase() === 'END' && !hasEventEnd) {
+			return fail('INVALID_RESOURCE');
+		}
 	} else if (
 		trigger.value.valueType !== 'DATE-TIME' ||
 		!isValidDateTime(trigger.value.raw, 'utc') ||
@@ -918,9 +921,10 @@ function validateEvent(event: ICalendarComponent): void {
 		return fail('INVALID_RESOURCE');
 	}
 	if (end !== undefined && end.value.raw <= start.value.raw) return fail('INVALID_RESOURCE');
+	const hasEventEnd = end !== undefined || properties(event, 'DURATION').length === 1;
 	for (const child of components(event)) {
 		if (child.name.toUpperCase() !== 'VALARM') return fail('INVALID_RESOURCE');
-		validateAlarm(child);
+		validateAlarm(child, hasEventEnd);
 	}
 }
 
