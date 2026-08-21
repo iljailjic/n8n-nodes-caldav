@@ -103,6 +103,15 @@ describe('validated Raw ICS write preparation', () => {
 		expect(Object.isFrozen(prepared.resource)).toBe(true);
 	});
 
+	it('preserves standard COLOR on VEVENT', () => {
+		const prepared = prepareRawCalendarEventWrite({
+			operation: 'create',
+			rawIcs: calendar(event(UID, ['COLOR:turquoise'])),
+		});
+
+		expect(prepared.calendarData).toContain('COLOR:turquoise');
+	});
+
 	it('accepts real leap-day values, action-specific alarms and recurring timezone observances', () => {
 		const rawIcs = calendar(
 			[
@@ -505,6 +514,33 @@ describe('validated Raw ICS write preparation', () => {
 				'TZOFFSETFROM:+0100',
 				'TZOFFSETTO:+0200',
 				'END:DAYLIGHT',
+				'END:VTIMEZONE',
+			]),
+		],
+		[
+			'COLOR inside VALARM',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:DISPLAY',
+					'TRIGGER:-PT5M',
+					'DESCRIPTION:Private reminder',
+					'COLOR:private-color',
+					'END:VALARM',
+				]),
+			),
+		],
+		[
+			'COLOR inside VTIMEZONE',
+			calendar(event(), [
+				'BEGIN:VTIMEZONE',
+				'TZID:Private/Color',
+				'COLOR:private-color',
+				'BEGIN:STANDARD',
+				'DTSTART:20400101T020000',
+				'TZOFFSETFROM:+0200',
+				'TZOFFSETTO:+0100',
+				'END:STANDARD',
 				'END:VTIMEZONE',
 			]),
 		],

@@ -178,6 +178,35 @@ describe('Raw ICS Create, Update and Upsert request branches', () => {
 			),
 		],
 		[
+			'COLOR inside VALARM',
+			raw('private-alarm-color', [
+				'BEGIN:VALARM',
+				'ACTION:DISPLAY',
+				'TRIGGER:-PT5M',
+				'DESCRIPTION:private-alarm-description',
+				'COLOR:private-color',
+				'END:VALARM',
+			]),
+		],
+		[
+			'COLOR inside VTIMEZONE',
+			raw('private-timezone-color').replace(
+				'BEGIN:VEVENT',
+				[
+					'BEGIN:VTIMEZONE',
+					'TZID:Private/Color',
+					'COLOR:private-color',
+					'BEGIN:STANDARD',
+					'DTSTART:20400101T020000',
+					'TZOFFSETFROM:+0200',
+					'TZOFFSETTO:+0100',
+					'END:STANDARD',
+					'END:VTIMEZONE',
+					'BEGIN:VEVENT',
+				].join('\r\n'),
+			),
+		],
+		[
 			'DATE recurrence with DATE-TIME UNTIL',
 			raw('private-date-until', ['RRULE:FREQ=DAILY;UNTIL=20400105T000000Z'])
 				.replace('DTSTART:20400102T100000Z', 'DTSTART;VALUE=DATE:20400102')
