@@ -98,6 +98,42 @@ describe('Raw ICS Create, Update and Upsert request branches', () => {
 		],
 		['invalid integer', raw('private-integer', ['SEQUENCE:1.5'])],
 		[
+			'event duration with a dangling T',
+			raw('private-event-duration').replace('DTEND:20400102T110000Z', 'DURATION:P1DT'),
+		],
+		[
+			'alarm trigger duration with a dangling T',
+			raw('private-alarm-trigger-duration', [
+				'BEGIN:VALARM',
+				'ACTION:DISPLAY',
+				'TRIGGER:P1DT',
+				'DESCRIPTION:private-alarm-description',
+				'END:VALARM',
+			]),
+		],
+		[
+			'alarm duration with a dangling T',
+			raw('private-alarm-duration', [
+				'BEGIN:VALARM',
+				'ACTION:DISPLAY',
+				'TRIGGER:-PT5M',
+				'DESCRIPTION:private-alarm-description',
+				'DURATION:P1DT',
+				'REPEAT:2',
+				'END:VALARM',
+			]),
+		],
+		[
+			'RDATE period with reversed explicit end',
+			raw('private-reversed-period', ['RDATE;VALUE=PERIOD:20400102T120000Z/20400102T110000Z']),
+		],
+		[
+			'RDATE period with an extra slash segment',
+			raw('private-extra-period-segment', [
+				'RDATE;VALUE=PERIOD:20400102T120000Z/20400102T130000Z/20400102T140000Z',
+			]),
+		],
+		[
 			'invalid timezone offset',
 			raw('private-offset').replace(
 				'BEGIN:VEVENT',

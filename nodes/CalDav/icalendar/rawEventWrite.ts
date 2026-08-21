@@ -86,7 +86,8 @@ const DATE_PATTERN = /^\d{8}$/;
 const LOCAL_DATE_TIME_PATTERN = /^\d{8}T\d{6}$/;
 const UTC_DATE_TIME_PATTERN = /^\d{8}T\d{6}Z$/;
 const UTC_OFFSET_PATTERN = /^[+-](?:0\d|1\d|2[0-3])[0-5]\d(?:[0-5]\d)?$/;
-const DURATION_PATTERN = /^([+-])?P(?:(\d+)W|(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)$/;
+const DURATION_PATTERN =
+	/^([+-])?P(?:(\d+)W|(?:(\d+)D)?(?:T(?=\d+[HMS])(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)$/;
 const INTEGER_PATTERN = /^[+-]?\d+$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9-]+$/;
 const ABSOLUTE_URI_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:\S*$/;
@@ -639,14 +640,16 @@ function validateDateProperty(property: ICalendarProperty, allowList: boolean): 
 			}
 			if (value.endsWith('Z') && tzids.length > 0) return fail('INVALID_RESOURCE');
 		} else if (propertyName === 'RDATE' && valueType === 'PERIOD') {
-			const [start, end] = value.split('/');
-			const endIsDateTime = end !== undefined && isValidDateTime(end);
+			const segments = value.split('/');
+			if (segments.length !== 2) return fail('INVALID_RESOURCE');
+			const start = segments[0]!;
+			const end = segments[1]!;
+			const endIsDateTime = isValidDateTime(end);
 			if (
-				end === undefined ||
-				!isValidDateTime(start!) ||
+				!isValidDateTime(start) ||
 				(!endIsDateTime && !isValidDuration(end, true)) ||
-				(endIsDateTime && start!.endsWith('Z') !== end.endsWith('Z')) ||
-				(start!.endsWith('Z') && tzids.length > 0)
+				(endIsDateTime && (start.endsWith('Z') !== end.endsWith('Z') || end <= start)) ||
+				(start.endsWith('Z') && tzids.length > 0)
 			) {
 				return fail('INVALID_RESOURCE');
 			}

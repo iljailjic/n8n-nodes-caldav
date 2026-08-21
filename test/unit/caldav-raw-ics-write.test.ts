@@ -402,6 +402,46 @@ describe('validated Raw ICS write preparation', () => {
 		['invalid SEQUENCE integer', calendar(event(UID, ['SEQUENCE:1.5']))],
 		['out-of-range PRIORITY integer', calendar(event(UID, ['PRIORITY:10']))],
 		[
+			'event DURATION with a dangling T',
+			calendar(event()).replace('DTEND:20400102T110000Z', 'DURATION:P1DT'),
+		],
+		[
+			'VALARM TRIGGER duration with a dangling T',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:DISPLAY',
+					'TRIGGER:P1DT',
+					'DESCRIPTION:Private reminder',
+					'END:VALARM',
+				]),
+			),
+		],
+		[
+			'VALARM DURATION with a dangling T',
+			calendar(
+				event(UID, [
+					'BEGIN:VALARM',
+					'ACTION:DISPLAY',
+					'TRIGGER:-PT5M',
+					'DESCRIPTION:Private reminder',
+					'DURATION:P1DT',
+					'REPEAT:2',
+					'END:VALARM',
+				]),
+			),
+		],
+		[
+			'RDATE period with an explicit end before its start',
+			calendar(event(UID, ['RDATE;VALUE=PERIOD:20400102T120000Z/20400102T110000Z'])),
+		],
+		[
+			'RDATE period with an extra slash segment',
+			calendar(
+				event(UID, ['RDATE;VALUE=PERIOD:20400102T120000Z/20400102T130000Z/20400102T140000Z']),
+			),
+		],
+		[
 			'invalid VTIMEZONE offset',
 			calendar(event(), [
 				'BEGIN:VTIMEZONE',
