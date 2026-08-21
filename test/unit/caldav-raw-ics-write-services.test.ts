@@ -38,6 +38,20 @@ function raw(summary: string, extra: readonly string[] = []): string {
 	].join('\r\n');
 }
 
+function mixedCaseRaw(summary: string): string {
+	return raw(summary, ['DESCRIPTION;LANGUAGE=en:Case normalized'])
+		.replace('BEGIN:VCALENDAR', 'begin:vcalendar')
+		.replace('BEGIN:VEVENT', 'begin:vevent')
+		.replace('END:VEVENT', 'end:vevent')
+		.replace('END:VCALENDAR', 'end:vcalendar')
+		.replace('UID:', 'uid:')
+		.replace('DTSTAMP:', 'dtstamp:')
+		.replace('DTSTART:', 'dtstart:')
+		.replace('DTEND:', 'dtend:')
+		.replace('SUMMARY:', 'summary:')
+		.replace('DESCRIPTION;LANGUAGE=', 'description;language=');
+}
+
 function response(
 	statusCode: number,
 	effectiveUrl: string,
@@ -75,8 +89,8 @@ describe('Raw ICS Create, Update and Upsert request branches', () => {
 	it.each([
 		['impossible date', raw('private-date').replace('20400102T100000Z', '20400230T100000Z')],
 		['impossible time', raw('private-time').replace('20400101T000000Z', '20400101T250000Z')],
-		['invalid status', raw('private-status', ['STATUS:NOT-A-STATUS'])],
-		['invalid transparency', raw('private-transparency', ['TRANSP:INVISIBLE'])],
+		['invalid status', raw('private-status', ['STATUS:NOT_A_STATUS'])],
+		['invalid transparency', raw('private-transparency', ['TRANSP:IN/VISIBLE'])],
 		['invalid URI', raw('private-uri', ['URL:not a uri'])],
 		[
 			'invalid calendar address',
@@ -112,6 +126,30 @@ describe('Raw ICS Create, Update and Upsert request branches', () => {
 					'TZOFFSETFROM:+0100',
 					'TZOFFSETTO:+0200',
 					'END:DAYLIGHT',
+					'END:VTIMEZONE',
+					'BEGIN:VEVENT',
+				].join('\r\n'),
+			),
+		],
+		[
+			'DATE recurrence with DATE-TIME UNTIL',
+			raw('private-date-until', ['RRULE:FREQ=DAILY;UNTIL=20400105T000000Z'])
+				.replace('DTSTART:20400102T100000Z', 'DTSTART;VALUE=DATE:20400102')
+				.replace('DTEND:20400102T110000Z', 'DTEND;VALUE=DATE:20400103'),
+		],
+		[
+			'VTIMEZONE recurrence with local UNTIL',
+			raw('private-timezone-until').replace(
+				'BEGIN:VEVENT',
+				[
+					'BEGIN:VTIMEZONE',
+					'TZID:Private/Until',
+					'BEGIN:STANDARD',
+					'DTSTART:20400101T020000',
+					'TZOFFSETFROM:+0200',
+					'TZOFFSETTO:+0100',
+					'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;UNTIL=20501030T020000',
+					'END:STANDARD',
 					'END:VTIMEZONE',
 					'BEGIN:VEVENT',
 				].join('\r\n'),
@@ -299,6 +337,46 @@ describe('Raw ICS Create, Update and Upsert request branches', () => {
 			dependencies(),
 		);
 		expect(updated).toMatchObject({ action: 'update', event: { summary: 'Changed' } });
+		expect(methods(changed)).toEqual([CalDavMethod.REPORT, CalDavMethod.PUT, CalDavMethod.GET]);
+	});
+
+	it('Upsert compares normalized names case-insensitively for no-op and final read-back', async () => {
+		const canonicalSame = raw('Same', ['DESCRIPTION;LANGUAGE=en:Case normalized']);
+		const noOp = transport(async () =>
+			response(207, CALENDAR_URL, {
+				body: multiStatus(reportResponse('raw-write.ics', '"lookup"', xmlText(canonicalSame))),
+			}),
+		);
+		const unchanged = await upsertCalendarEvent(
+			noOp,
+			{ calendarUrl: CALENDAR_URL, inputMode: 'rawIcs', rawIcs: mixedCaseRaw('Same') },
+			dependencies(),
+		);
+		expect(unchanged).toMatchObject({ action: 'update', event: { summary: 'Same' } });
+		expect(methods(noOp)).toEqual([CalDavMethod.REPORT]);
+
+		const canonicalBefore = raw('Before', ['DESCRIPTION;LANGUAGE=en:Case normalized']);
+		const canonicalAfter = raw('After', ['DESCRIPTION;LANGUAGE=en:Case normalized']);
+		const changed = transport(async (request) => {
+			if (request.method === CalDavMethod.REPORT) {
+				return response(207, CALENDAR_URL, {
+					body: multiStatus(reportResponse('raw-write.ics', '"lookup"', xmlText(canonicalBefore))),
+				});
+			}
+			if (request.method === CalDavMethod.PUT) {
+				return response(204, RESOURCE_URL);
+			}
+			return response(200, RESOURCE_URL, { body: canonicalAfter, etag: '"confirmed"' });
+		});
+		const updated = await upsertCalendarEvent(
+			changed,
+			{ calendarUrl: CALENDAR_URL, inputMode: 'rawIcs', rawIcs: mixedCaseRaw('After') },
+			dependencies(),
+		);
+		expect(updated).toMatchObject({
+			action: 'update',
+			event: { summary: 'After', etag: '"confirmed"' },
+		});
 		expect(methods(changed)).toEqual([CalDavMethod.REPORT, CalDavMethod.PUT, CalDavMethod.GET]);
 	});
 });

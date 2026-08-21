@@ -85,7 +85,7 @@ const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}
 const DATE_PATTERN = /^\d{8}$/;
 const LOCAL_DATE_TIME_PATTERN = /^\d{8}T\d{6}$/;
 const UTC_DATE_TIME_PATTERN = /^\d{8}T\d{6}Z$/;
-const UTC_OFFSET_PATTERN = /^[+-](?:0\d|1\d|2[0-3])[0-5]\d(?:[0-5]\d|60)?$/;
+const UTC_OFFSET_PATTERN = /^[+-](?:0\d|1\d|2[0-3])[0-5]\d(?:[0-5]\d)?$/;
 const DURATION_PATTERN = /^([+-])?P(?:(\d+)W|(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)$/;
 const INTEGER_PATTERN = /^[+-]?\d+$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9-]+$/;
@@ -283,11 +283,7 @@ function isValidDate(value: string): boolean {
 function isValidTime(value: string): boolean {
 	const match = /^(\d{2})(\d{2})(\d{2})$/.exec(value);
 	if (match === null) return false;
-	const minute = Number(match[2]);
-	const second = Number(match[3]);
-	return (
-		Number(match[1]) <= 23 && minute <= 59 && (second <= 59 || (second === 60 && minute === 59))
-	);
+	return Number(match[1]) <= 23 && Number(match[2]) <= 59 && Number(match[3]) <= 60;
 }
 
 function isValidDateTime(value: string, form: 'local' | 'utc' | 'either' = 'either'): boolean {
@@ -341,8 +337,8 @@ function requireValueType(property: ICalendarProperty, ...types: readonly string
 	if (!types.includes(property.value.valueType)) return fail('INVALID_RESOURCE');
 }
 
-function isExtensionValue(value: string): boolean {
-	return /^X-[A-Za-z0-9-]+$/i.test(value);
+function isExtensionToken(value: string): boolean {
+	return TOKEN_PATTERN.test(value);
 }
 
 function validateParameterValue(name: string, value: string): void {
@@ -357,7 +353,7 @@ function validateParameterValue(name: string, value: string): void {
 		case 'CUTYPE':
 			if (
 				!['INDIVIDUAL', 'GROUP', 'RESOURCE', 'ROOM', 'UNKNOWN'].includes(upper) &&
-				!isExtensionValue(value)
+				!isExtensionToken(value)
 			)
 				return fail('INVALID_RESOURCE');
 			break;
@@ -378,7 +374,7 @@ function validateParameterValue(name: string, value: string): void {
 		case 'PARTSTAT':
 			if (
 				!['NEEDS-ACTION', 'ACCEPTED', 'DECLINED', 'TENTATIVE', 'DELEGATED'].includes(upper) &&
-				!isExtensionValue(value)
+				!isExtensionToken(value)
 			)
 				return fail('INVALID_RESOURCE');
 			break;
@@ -389,13 +385,13 @@ function validateParameterValue(name: string, value: string): void {
 			if (!['START', 'END'].includes(upper)) return fail('INVALID_RESOURCE');
 			break;
 		case 'RELTYPE':
-			if (!['PARENT', 'CHILD', 'SIBLING'].includes(upper) && !isExtensionValue(value))
+			if (!['PARENT', 'CHILD', 'SIBLING'].includes(upper) && !isExtensionToken(value))
 				return fail('INVALID_RESOURCE');
 			break;
 		case 'ROLE':
 			if (
 				!['CHAIR', 'REQ-PARTICIPANT', 'OPT-PARTICIPANT', 'NON-PARTICIPANT'].includes(upper) &&
-				!isExtensionValue(value)
+				!isExtensionToken(value)
 			)
 				return fail('INVALID_RESOURCE');
 			break;
@@ -470,7 +466,12 @@ function validateAttachment(property: ICalendarProperty): void {
 	}
 }
 
-function validateRecurrenceRule(property: ICalendarProperty): void {
+interface RecurrenceContext {
+	readonly start: ICalendarProperty;
+	readonly timeZoneObservance?: boolean;
+}
+
+function validateRecurrenceRule(property: ICalendarProperty, context: RecurrenceContext): void {
 	requireValueType(property, 'RECUR');
 	validateParameters(property, []);
 	const parts = property.value.raw.split(';');
@@ -506,8 +507,21 @@ function validateRecurrenceRule(property: ICalendarProperty): void {
 	positiveInteger('COUNT');
 	positiveInteger('INTERVAL');
 	const until = parsed.get('UNTIL');
-	if (until !== undefined && !isValidDate(until) && !isValidDateTime(until))
-		return fail('INVALID_RESOURCE');
+	if (until !== undefined) {
+		if (context.start.value.valueType === 'DATE') {
+			if (!isValidDate(until)) return fail('INVALID_RESOURCE');
+		} else if (context.start.value.valueType === 'DATE-TIME') {
+			const mustBeUtc =
+				context.timeZoneObservance === true ||
+				context.start.value.raw.endsWith('Z') ||
+				parameter(context.start, 'TZID').length > 0;
+			if (!isValidDateTime(until, mustBeUtc ? 'utc' : 'local')) {
+				return fail('INVALID_RESOURCE');
+			}
+		} else {
+			return fail('INVALID_RESOURCE');
+		}
+	}
 	const numericList = (
 		name: string,
 		minimum: number,
@@ -535,6 +549,12 @@ function validateRecurrenceRule(property: ICalendarProperty): void {
 	numericList('BYYEARDAY', -366, 366, true);
 	numericList('BYWEEKNO', -53, 53, true);
 	numericList('BYSETPOS', -366, 366, true);
+	if (
+		context.start.value.valueType === 'DATE' &&
+		['BYSECOND', 'BYMINUTE', 'BYHOUR'].some((name) => parsed.has(name))
+	) {
+		return fail('INVALID_RESOURCE');
+	}
 	const byDay = parsed.get('BYDAY');
 	if (
 		byDay !== undefined &&
@@ -660,7 +680,7 @@ const EVENT_SINGLETONS = new Set([
 	'URL',
 ]);
 
-function validateEventProperty(property: ICalendarProperty): void {
+function validateEventProperty(property: ICalendarProperty, eventStart: ICalendarProperty): void {
 	const name = property.name.toUpperCase();
 	switch (name) {
 		case 'DTSTART':
@@ -683,7 +703,7 @@ function validateEventProperty(property: ICalendarProperty): void {
 			if (!isValidDuration(property.value.raw, true)) return fail('INVALID_RESOURCE');
 			return;
 		case 'RRULE':
-			validateRecurrenceRule(property);
+			validateRecurrenceRule(property, { start: eventStart });
 			return;
 		case 'ATTACH':
 			validateAttachment(property);
@@ -739,7 +759,7 @@ function validateEventProperty(property: ICalendarProperty): void {
 			if (
 				value === undefined ||
 				(!['TENTATIVE', 'CONFIRMED', 'CANCELLED'].includes(value.toUpperCase()) &&
-					!isExtensionValue(value))
+					!isExtensionToken(value))
 			)
 				return fail('INVALID_RESOURCE');
 			return;
@@ -749,7 +769,7 @@ function validateEventProperty(property: ICalendarProperty): void {
 			const value = decodedText(property);
 			if (
 				value === undefined ||
-				(!['OPAQUE', 'TRANSPARENT'].includes(value.toUpperCase()) && !isExtensionValue(value))
+				(!['OPAQUE', 'TRANSPARENT'].includes(value.toUpperCase()) && !isExtensionToken(value))
 			)
 				return fail('INVALID_RESOURCE');
 			return;
@@ -760,7 +780,7 @@ function validateEventProperty(property: ICalendarProperty): void {
 			if (
 				value === undefined ||
 				(!['PUBLIC', 'PRIVATE', 'CONFIDENTIAL'].includes(value.toUpperCase()) &&
-					!isExtensionValue(value))
+					!isExtensionToken(value))
 			)
 				return fail('INVALID_RESOURCE');
 			return;
@@ -794,15 +814,13 @@ function validateEventProperty(property: ICalendarProperty): void {
 function validateAlarm(alarm: ICalendarComponent): void {
 	if (components(alarm).length > 0) return fail('INVALID_RESOURCE');
 	rejectKnownPropertiesOutside(alarm, ALARM_PROPERTY_NAMES);
-	if (properties(alarm, 'ACTION').length !== 1 || properties(alarm, 'TRIGGER').length !== 1) {
-		return fail('INVALID_RESOURCE');
-	}
+	if (properties(alarm, 'ACTION').length !== 1) return fail('INVALID_RESOURCE');
 	const actionProperty = properties(alarm, 'ACTION')[0]!;
 	validateTextProperty(actionProperty);
 	const action = decodedText(actionProperty)?.toUpperCase();
-	if (action === undefined || !['AUDIO', 'DISPLAY', 'EMAIL'].includes(action)) {
-		return fail('INVALID_RESOURCE');
-	}
+	if (action === undefined || !isExtensionToken(action)) return fail('INVALID_RESOURCE');
+	if (!['AUDIO', 'DISPLAY', 'EMAIL'].includes(action)) return;
+	if (properties(alarm, 'TRIGGER').length !== 1) return fail('INVALID_RESOURCE');
 	if ((properties(alarm, 'REPEAT').length === 0) !== (properties(alarm, 'DURATION').length === 0)) {
 		return fail('INVALID_RESOURCE');
 	}
@@ -890,7 +908,7 @@ function validateEvent(event: ICalendarComponent): void {
 	}
 	const start = properties(event, 'DTSTART')[0]!;
 	for (const entry of event.entries) {
-		if (entry.kind === 'property') validateEventProperty(entry);
+		if (entry.kind === 'property') validateEventProperty(entry, start);
 	}
 	const end = properties(event, 'DTEND')[0];
 	if (
@@ -1006,7 +1024,10 @@ function validateTimeZones(resource: ICalendarResource): void {
 				validateParameters(selected[0]!, ['VALUE']);
 			}
 			for (const recurrenceRule of properties(observance, 'RRULE')) {
-				validateRecurrenceRule(recurrenceRule);
+				validateRecurrenceRule(recurrenceRule, {
+					start,
+					timeZoneObservance: true,
+				});
 				if (!/(?:^|;)FREQ=YEARLY(?:;|$)/.test(recurrenceRule.value.raw.toUpperCase()))
 					return fail('INVALID_RESOURCE');
 			}
@@ -1204,7 +1225,7 @@ export function prepareRawCalendarEventWrite(
 
 function sameParameter(left: ICalendarParameter, right: ICalendarParameter): boolean {
 	return (
-		left.name === right.name &&
+		left.name.toUpperCase() === right.name.toUpperCase() &&
 		left.values.length === right.values.length &&
 		left.values.every((value, index) => value.value === right.values[index]!.value)
 	);
@@ -1212,7 +1233,7 @@ function sameParameter(left: ICalendarParameter, right: ICalendarParameter): boo
 
 function sameProperty(left: ICalendarProperty, right: ICalendarProperty): boolean {
 	return (
-		left.name === right.name &&
+		left.name.toUpperCase() === right.name.toUpperCase() &&
 		left.parameters.length === right.parameters.length &&
 		left.parameters.every((value, index) => sameParameter(value, right.parameters[index]!)) &&
 		left.value.valueType === right.value.valueType &&
@@ -1227,7 +1248,7 @@ function sameProperty(left: ICalendarProperty, right: ICalendarProperty): boolea
 
 function sameComponent(left: ICalendarComponent, right: ICalendarComponent): boolean {
 	return (
-		left.name === right.name &&
+		left.name.toUpperCase() === right.name.toUpperCase() &&
 		left.entries.length === right.entries.length &&
 		left.entries.every((entry, index) => {
 			const candidate = right.entries[index]!;

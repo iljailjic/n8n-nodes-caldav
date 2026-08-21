@@ -131,7 +131,7 @@ describe('validated Raw ICS write preparation', () => {
 				'DTSTART:19701025T030000',
 				'TZOFFSETFROM:+0200',
 				'TZOFFSETTO:+0100',
-				'RRULE:BYMONTH=10;FREQ=YEARLY;BYDAY=-1SU',
+				'RRULE:BYMONTH=10;FREQ=YEARLY;BYDAY=-1SU;UNTIL=20501030T020000Z',
 				'RDATE:19801026T030000',
 				'COMMENT:First note',
 				'COMMENT:Second note',
@@ -141,6 +141,69 @@ describe('validated Raw ICS write preparation', () => {
 		);
 
 		expect(() => prepareRawCalendarEventWrite({ operation: 'create', rawIcs })).not.toThrow();
+	});
+
+	it.each([
+		[
+			'DATE DTSTART and DATE UNTIL',
+			calendar([
+				'BEGIN:VEVENT',
+				`UID:${UID}`,
+				'DTSTAMP:20400101T000000Z',
+				'DTSTART;VALUE=DATE:20400102',
+				'DTEND;VALUE=DATE:20400103',
+				'RRULE:FREQ=DAILY;UNTIL=20400105',
+				'END:VEVENT',
+			]),
+		],
+		[
+			'floating DTSTART and floating UNTIL',
+			calendar([
+				'BEGIN:VEVENT',
+				`UID:${UID}`,
+				'DTSTAMP:20400101T000000Z',
+				'DTSTART:20400102T100000',
+				'DTEND:20400102T110000',
+				'RRULE:FREQ=DAILY;UNTIL=20400105T100000',
+				'END:VEVENT',
+			]),
+		],
+		[
+			'UTC DTSTART and UTC UNTIL',
+			calendar(event(UID, ['RRULE:FREQ=DAILY;UNTIL=20400105T100000Z'])),
+		],
+	] as const)('accepts %s', (_name, rawIcs) => {
+		expect(() => prepareRawCalendarEventWrite({ operation: 'create', rawIcs })).not.toThrow();
+	});
+
+	it('preserves IANA/X tokens and ignores generic extension alarms while accepting second 60', () => {
+		const rawIcs = calendar([
+			'BEGIN:VEVENT',
+			`UID:${UID}`,
+			'DTSTAMP:20400101T100060Z',
+			'DTSTART:20400102T100000Z',
+			'DTEND:20400102T110000Z',
+			'STATUS:IANA-STATUS',
+			'TRANSP:X-VENDOR-TRANSPARENCY',
+			'CLASS:IANA-CLASSIFICATION',
+			'ATTENDEE;ROLE=IANA-ROLE;CUTYPE=IANA-CUTYPE:mailto:guest@example.test',
+			'BEGIN:VALARM',
+			'ACTION:PROCEDURE',
+			'X-PROCEDURE-DATA:opaque',
+			'END:VALARM',
+			'BEGIN:VALARM',
+			'ACTION:X-VENDOR-ACTION',
+			'X-VENDOR-DATA:preserved',
+			'END:VALARM',
+			'END:VEVENT',
+		]);
+
+		const prepared = prepareRawCalendarEventWrite({ operation: 'create', rawIcs });
+
+		expect(prepared.calendarData).toContain('ACTION:PROCEDURE');
+		expect(prepared.calendarData).toContain('ACTION:X-VENDOR-ACTION');
+		expect(prepared.calendarData).toContain('ROLE=IANA-ROLE');
+		expect(prepared.calendarData).toContain('DTSTAMP:20400101T100060Z');
 	});
 
 	it.each(['create', 'upsert'] as const)(
@@ -272,8 +335,62 @@ describe('validated Raw ICS write preparation', () => {
 			'numeric RRULE BYDAY with DAILY frequency',
 			calendar(event(UID, ['RRULE:FREQ=DAILY;BYDAY=1MO'])),
 		],
-		['invalid STATUS token', calendar(event(UID, ['STATUS:NOT-A-STATUS']))],
-		['invalid TRANSP token', calendar(event(UID, ['TRANSP:INVISIBLE']))],
+		[
+			'DATE DTSTART with UTC DATE-TIME UNTIL',
+			calendar([
+				'BEGIN:VEVENT',
+				`UID:${UID}`,
+				'DTSTAMP:20400101T000000Z',
+				'DTSTART;VALUE=DATE:20400102',
+				'DTEND;VALUE=DATE:20400103',
+				'RRULE:FREQ=DAILY;UNTIL=20400105T000000Z',
+				'END:VEVENT',
+			]),
+		],
+		[
+			'UTC DTSTART with local UNTIL',
+			calendar(event(UID, ['RRULE:FREQ=DAILY;UNTIL=20400105T100000'])),
+		],
+		[
+			'floating DTSTART with UTC UNTIL',
+			calendar([
+				'BEGIN:VEVENT',
+				`UID:${UID}`,
+				'DTSTAMP:20400101T000000Z',
+				'DTSTART:20400102T100000',
+				'DTEND:20400102T110000',
+				'RRULE:FREQ=DAILY;UNTIL=20400105T100000Z',
+				'END:VEVENT',
+			]),
+		],
+		[
+			'DATE DTSTART with BYHOUR',
+			calendar([
+				'BEGIN:VEVENT',
+				`UID:${UID}`,
+				'DTSTAMP:20400101T000000Z',
+				'DTSTART;VALUE=DATE:20400102',
+				'DTEND;VALUE=DATE:20400103',
+				'RRULE:FREQ=DAILY;BYHOUR=10',
+				'END:VEVENT',
+			]),
+		],
+		[
+			'VTIMEZONE local UNTIL',
+			calendar(event(), [
+				'BEGIN:VTIMEZONE',
+				'TZID:Invalid/Until',
+				'BEGIN:STANDARD',
+				'DTSTART:20400101T020000',
+				'TZOFFSETFROM:+0200',
+				'TZOFFSETTO:+0100',
+				'RRULE:FREQ=YEARLY;UNTIL=20500101T020000',
+				'END:STANDARD',
+				'END:VTIMEZONE',
+			]),
+		],
+		['invalid STATUS token', calendar(event(UID, ['STATUS:NOT_A_STATUS']))],
+		['invalid TRANSP token', calendar(event(UID, ['TRANSP:IN/VISIBLE']))],
 		['invalid URL', calendar(event(UID, ['URL:not a uri']))],
 		['invalid organizer CAL-ADDRESS', calendar(event(UID, ['ORGANIZER:not-a-calendar-address']))],
 		['invalid SEQUENCE integer', calendar(event(UID, ['SEQUENCE:1.5']))],
@@ -366,5 +483,31 @@ describe('validated Raw ICS write preparation', () => {
 		expect(rawCalendarEventResourcesAreSemanticallyEqual(first.resource, second.resource)).toBe(
 			true,
 		);
+	});
+
+	it('compares component, property and parameter names case-insensitively', () => {
+		const canonical = prepareRawCalendarEventWrite({
+			operation: 'update',
+			rawIcs: calendar(event(UID, ['DESCRIPTION;LANGUAGE=en:Case normalized'])),
+		});
+		const mixedCase = prepareRawCalendarEventWrite({
+			operation: 'update',
+			rawIcs: calendar(event(UID, ['description;language=en:Case normalized']))
+				.replace('BEGIN:VCALENDAR', 'begin:vcalendar')
+				.replace('BEGIN:VEVENT', 'Begin:Vevent')
+				.replace('END:VEVENT', 'End:Vevent')
+				.replace('END:VCALENDAR', 'end:vcalendar')
+				.replace('VERSION:', 'version:')
+				.replace('PRODID:', 'ProdId:')
+				.replace('UID:', 'uid:')
+				.replace('DTSTAMP:', 'DtStamp:')
+				.replace('DTSTART:', 'dtstart:')
+				.replace('DTEND:', 'DtEnd:')
+				.replace('SUMMARY:', 'summary:'),
+		});
+
+		expect(
+			rawCalendarEventResourcesAreSemanticallyEqual(canonical.resource, mixedCase.resource),
+		).toBe(true);
 	});
 });
