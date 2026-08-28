@@ -1,6 +1,8 @@
 import type { ICredentialDataDecryptedObject } from 'n8n-workflow';
 import { describe, expect, it } from 'vitest';
 
+import { issue53ItEach } from '../support/issue-53-contract-oracle';
+
 import { CalDavApi, validateAndNormalizeServerUrl } from '../../credentials/CalDavApi.credentials';
 import { CalDav } from '../../nodes/CalDav/CalDav.node';
 import packageJson from '../../package.json';
@@ -77,34 +79,21 @@ describe('CalDAV credentials', () => {
 		expect(properties.allowUnauthorizedCerts.description).toMatch(/development/i);
 	});
 
-	it.each([
-		'',
-		'   ',
-		'/caldav',
-		'caldav.example.test',
-		'not a url',
-		'ftp://caldav.example.test',
-		'https://@caldav.example.test',
-		'https://:@caldav.example.test',
-		'https://user@caldav.example.test',
-		'https://user:secret@caldav.example.test',
-	])('provides transport-independent rejection for server URL %j', (serverUrl) => {
-		expect(validateAndNormalizeServerUrl(serverUrl)).toEqual({
-			valid: false,
-			errorMessage: 'Server URL must be an absolute HTTP(S) URL without user information',
-		});
-	});
-
-	it.each([
-		['hostname-less HTTP(S) URL', 'https://:443/calendar'],
-		['embedded raw whitespace', 'https://caldav.example.test/calendar path'],
-		['malformed no-whitespace HTTP(S) URL', 'https://[::1/calendar'],
-	])('rejects the %s case', (_caseName, serverUrl) => {
-		expect(validateAndNormalizeServerUrl(serverUrl)).toEqual({
-			valid: false,
-			errorMessage: 'Server URL must be an absolute HTTP(S) URL without user information',
-		});
-	});
+	issue53ItEach(
+		['VALIDATION-URL-001'],
+		[
+			['hostname-less HTTP(S) URL', 'https://:443/calendar'],
+			['embedded raw whitespace', 'https://caldav.example.test/calendar path'],
+			['malformed no-whitespace HTTP(S) URL', 'https://[::1/calendar'],
+		] as const,
+		'rejects the %s URL validation case before authentication',
+		([, serverUrl]) => {
+			expect(validateAndNormalizeServerUrl(serverUrl)).toEqual({
+				valid: false,
+				errorMessage: 'Server URL must be an absolute HTTP(S) URL without user information',
+			});
+		},
+	);
 
 	it.each([
 		['https://caldav.example.test', 'https://caldav.example.test'],

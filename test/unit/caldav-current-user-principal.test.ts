@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { issue53It } from '../support/issue-53-contract-oracle';
+
 import * as currentUserPrincipalDiscovery from '../../nodes/CalDav/discovery/currentUserPrincipal';
 import {
 	CalDavCurrentUserPrincipalDiscoveryError,
@@ -284,7 +286,7 @@ describe('current-user-principal selection and URL resolution', () => {
 		await expectSemanticError(xml, 'AMBIGUOUS_CURRENT_USER_PRINCIPAL_RESPONSE');
 	});
 
-	it('rejects a response-level status form', async () => {
+	issue53It(['INVALID-MULTISTATUS-001'], 'rejects a response-level status form', async () => {
 		const xml = multistatus(
 			'<response><href>/response-private/</href><status>HTTP/1.1 200 OK</status></response>',
 		);
@@ -404,25 +406,29 @@ describe('current-user-principal transport, XML, and URL error propagation', () 
 		},
 	);
 
-	it('propagates the existing safe XML parse error unchanged', async () => {
-		const transport = mockTransport(async () =>
-			transportResponse('<multistatus xmlns="DAV:"><response>xml-private'),
-		);
-		let caughtError: unknown;
-		try {
-			await discoverCurrentUserPrincipal(transport);
-		} catch (error) {
-			caughtError = error;
-		}
+	issue53It(
+		['MALFORMED-XML-001'],
+		'propagates the existing safe XML parse error unchanged',
+		async () => {
+			const transport = mockTransport(async () =>
+				transportResponse('<multistatus xmlns="DAV:"><response>xml-private'),
+			);
+			let caughtError: unknown;
+			try {
+				await discoverCurrentUserPrincipal(transport);
+			} catch (error) {
+				caughtError = error;
+			}
 
-		expect(caughtError).toBeInstanceOf(CalDavXmlParseError);
-		expect(caughtError).toMatchObject({
-			name: 'CalDavXmlParseError',
-			code: 'TRUNCATED_XML',
-			message: 'The XML document ended unexpectedly.',
-		});
-		expect(transport.request).toHaveBeenCalledTimes(1);
-	});
+			expect(caughtError).toBeInstanceOf(CalDavXmlParseError);
+			expect(caughtError).toMatchObject({
+				name: 'CalDavXmlParseError',
+				code: 'TRUNCATED_XML',
+				message: 'The XML document ended unexpectedly.',
+			});
+			expect(transport.request).toHaveBeenCalledTimes(1);
+		},
+	);
 
 	it.each([
 		['whitespace', ' private/'],

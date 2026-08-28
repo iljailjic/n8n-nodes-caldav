@@ -2,6 +2,8 @@ import type { IExecuteFunctions, INode } from 'n8n-workflow';
 import { NodeApiError } from 'n8n-workflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { issue53It } from '../support/issue-53-contract-oracle';
+
 const mocks = vi.hoisted(() => ({
 	createN8nCalDavTransport: vi.fn(),
 }));
@@ -145,41 +147,44 @@ beforeEach(() => {
 });
 
 describe('Event Delete missing-remote-ETag resolution regression', () => {
-	it.each(['resourceUrl', 'uid'] as const)(
-		'uses the non-empty caller ETag after real %s resolution omits the remote ETag',
-		async (identifierMode) => {
-			const liveTransport = transport(identifierMode);
-			mocks.createN8nCalDavTransport.mockResolvedValue(liveTransport);
-			const callerEtag = ' W/"caller-validator" ';
+	issue53It(
+		['EVENT-DELETE-UNSUPPORTED-001'],
+		'uses the non-empty caller ETag after real resource URL and UID resolution omit the remote ETag',
+		async () => {
+			for (const identifierMode of ['resourceUrl', 'uid'] as const) {
+				const liveTransport = transport(identifierMode);
+				mocks.createN8nCalDavTransport.mockResolvedValue(liveTransport);
+				const callerEtag = ' W/"caller-validator" ';
 
-			await expect(
-				new CalDav().execute.call(context(parameters(identifierMode, callerEtag))),
-			).resolves.toEqual([
-				[
-					{
-						json: {
-							calendarUrl: CALENDAR_URL,
-							resourceUrl: RESOURCE_URL,
-							uid: UID,
-							deleted: true,
+				await expect(
+					new CalDav().execute.call(context(parameters(identifierMode, callerEtag))),
+				).resolves.toEqual([
+					[
+						{
+							json: {
+								calendarUrl: CALENDAR_URL,
+								resourceUrl: RESOURCE_URL,
+								uid: UID,
+								deleted: true,
+							},
+							pairedItem: { item: 0 },
 						},
-						pairedItem: { item: 0 },
-					},
-				],
-			]);
+					],
+				]);
 
-			const requests = liveTransport.request.mock.calls.map(
-				([request]) => request as CalDavTransportRequest,
-			);
-			expect(requests.map(({ method }) => method)).toEqual([
-				identifierMode === 'resourceUrl' ? CalDavMethod.GET : CalDavMethod.REPORT,
-				CalDavMethod.DELETE,
-			]);
-			expect(requests[1]).toEqual({
-				method: CalDavMethod.DELETE,
-				url: RESOURCE_URL,
-				headers: { 'If-Match': callerEtag },
-			});
+				const requests = liveTransport.request.mock.calls.map(
+					([request]) => request as CalDavTransportRequest,
+				);
+				expect(requests.map(({ method }) => method)).toEqual([
+					identifierMode === 'resourceUrl' ? CalDavMethod.GET : CalDavMethod.REPORT,
+					CalDavMethod.DELETE,
+				]);
+				expect(requests[1]).toEqual({
+					method: CalDavMethod.DELETE,
+					url: RESOURCE_URL,
+					headers: { 'If-Match': callerEtag },
+				});
+			}
 		},
 	);
 

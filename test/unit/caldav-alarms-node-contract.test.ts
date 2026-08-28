@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { issue53It } from '../support/issue-53-contract-oracle';
+
 import {
 	alarmCreateDescriptor,
 	alarmMutationDescriptor,
@@ -188,15 +190,19 @@ describe('CalDAV alarm n8n contract', () => {
 		).toThrow(CalDavCalendarAlarmError);
 	});
 
-	it('rejects malformed wrappers, unknown fields and missing selectors with fixed errors', () => {
-		for (const invoke of [
-			() => normalizeAlarmCreateParameter({ alarm: [], extra: true }, 'Summary'),
-			() =>
-				normalizeAlarmMutationParameter({
-					change: [{ kind: 'remove', selectorKind: 'uid', alarmUid: '' }],
-				}),
-		]) {
-			expect(invoke).toThrow(CalDavCalendarAlarmError);
-		}
-	});
+	issue53It(
+		['VALIDATION-METADATA-001', 'VALIDATION-ALARM-001'],
+		'rejects malformed wrappers, unknown fields and missing selectors with fixed errors',
+		() => {
+			for (const invoke of [
+				() => normalizeAlarmCreateParameter({ alarm: [], extra: true }, 'Summary'),
+				() =>
+					normalizeAlarmMutationParameter({
+						change: [{ kind: 'remove', selectorKind: 'uid', alarmUid: '' }],
+					}),
+			]) {
+				expect(invoke).toThrow(CalDavCalendarAlarmError);
+			}
+		},
+	);
 });

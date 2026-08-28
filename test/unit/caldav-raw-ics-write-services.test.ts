@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { issue53ItEach } from '../support/issue-53-contract-oracle';
+
 import { createCalendarEvent } from '../../nodes/CalDav/events/create';
 import { updateCalendarEvent } from '../../nodes/CalDav/events/update';
 import { upsertCalendarEvent } from '../../nodes/CalDav/events/upsert';
@@ -86,196 +88,198 @@ function dependencies(
 }
 
 describe('Raw ICS Create, Update and Upsert request branches', () => {
-	it.each([
-		['impossible date', raw('private-date').replace('20400102T100000Z', '20400230T100000Z')],
-		['impossible time', raw('private-time').replace('20400101T000000Z', '20400101T250000Z')],
-		['invalid status', raw('private-status', ['STATUS:NOT_A_STATUS'])],
-		['invalid transparency', raw('private-transparency', ['TRANSP:IN/VISIBLE'])],
-		['invalid URI', raw('private-uri', ['URL:not a uri'])],
+	issue53ItEach(
+		['VALIDATION-RAW-001'],
 		[
-			'invalid calendar address',
-			raw('private-calendar-address', ['ORGANIZER:not-a-calendar-address']),
-		],
-		['invalid integer', raw('private-integer', ['SEQUENCE:1.5'])],
-		[
-			'event duration with a dangling T',
-			raw('private-event-duration').replace('DTEND:20400102T110000Z', 'DURATION:P1DT'),
-		],
-		[
-			'alarm trigger duration with a dangling T',
-			raw('private-alarm-trigger-duration', [
-				'BEGIN:VALARM',
-				'ACTION:DISPLAY',
-				'TRIGGER:P1DT',
-				'DESCRIPTION:private-alarm-description',
-				'END:VALARM',
-			]),
-		],
-		[
-			'alarm duration with a dangling T',
-			raw('private-alarm-duration', [
-				'BEGIN:VALARM',
-				'ACTION:DISPLAY',
-				'TRIGGER:-PT5M',
-				'DESCRIPTION:private-alarm-description',
-				'DURATION:P1DT',
-				'REPEAT:2',
-				'END:VALARM',
-			]),
-		],
-		[
-			'END-related alarm without a VEVENT end',
-			raw('private-end-related-alarm', [
-				'BEGIN:VALARM',
-				'ACTION:DISPLAY',
-				'TRIGGER;RELATED=END:-PT5M',
-				'DESCRIPTION:private-end-alarm-description',
-				'END:VALARM',
-			]).replace('DTEND:20400102T110000Z\r\n', ''),
-		],
-		[
-			'RDATE period with reversed explicit end',
-			raw('private-reversed-period', ['RDATE;VALUE=PERIOD:20400102T120000Z/20400102T110000Z']),
-		],
-		[
-			'RDATE period with an extra slash segment',
-			raw('private-extra-period-segment', [
-				'RDATE;VALUE=PERIOD:20400102T120000Z/20400102T130000Z/20400102T140000Z',
-			]),
-		],
-		[
-			'invalid timezone offset',
-			raw('private-offset').replace(
-				'BEGIN:VEVENT',
-				[
-					'BEGIN:VTIMEZONE',
-					'TZID:Private/Offset',
-					'BEGIN:STANDARD',
-					'DTSTART:20400101T020000',
-					'TZOFFSETFROM:+2460',
-					'TZOFFSETTO:+0100',
-					'END:STANDARD',
-					'END:VTIMEZONE',
+			['impossible date', raw('private-date').replace('20400102T100000Z', '20400230T100000Z')],
+			['impossible time', raw('private-time').replace('20400101T000000Z', '20400101T250000Z')],
+			['invalid status', raw('private-status', ['STATUS:NOT_A_STATUS'])],
+			['invalid transparency', raw('private-transparency', ['TRANSP:IN/VISIBLE'])],
+			['invalid URI', raw('private-uri', ['URL:not a uri'])],
+			[
+				'invalid calendar address',
+				raw('private-calendar-address', ['ORGANIZER:not-a-calendar-address']),
+			],
+			['invalid integer', raw('private-integer', ['SEQUENCE:1.5'])],
+			[
+				'event duration with a dangling T',
+				raw('private-event-duration').replace('DTEND:20400102T110000Z', 'DURATION:P1DT'),
+			],
+			[
+				'alarm trigger duration with a dangling T',
+				raw('private-alarm-trigger-duration', [
+					'BEGIN:VALARM',
+					'ACTION:DISPLAY',
+					'TRIGGER:P1DT',
+					'DESCRIPTION:private-alarm-description',
+					'END:VALARM',
+				]),
+			],
+			[
+				'alarm duration with a dangling T',
+				raw('private-alarm-duration', [
+					'BEGIN:VALARM',
+					'ACTION:DISPLAY',
+					'TRIGGER:-PT5M',
+					'DESCRIPTION:private-alarm-description',
+					'DURATION:P1DT',
+					'REPEAT:2',
+					'END:VALARM',
+				]),
+			],
+			[
+				'END-related alarm without a VEVENT end',
+				raw('private-end-related-alarm', [
+					'BEGIN:VALARM',
+					'ACTION:DISPLAY',
+					'TRIGGER;RELATED=END:-PT5M',
+					'DESCRIPTION:private-end-alarm-description',
+					'END:VALARM',
+				]).replace('DTEND:20400102T110000Z\r\n', ''),
+			],
+			[
+				'RDATE period with reversed explicit end',
+				raw('private-reversed-period', ['RDATE;VALUE=PERIOD:20400102T120000Z/20400102T110000Z']),
+			],
+			[
+				'RDATE period with an extra slash segment',
+				raw('private-extra-period-segment', [
+					'RDATE;VALUE=PERIOD:20400102T120000Z/20400102T130000Z/20400102T140000Z',
+				]),
+			],
+			[
+				'invalid timezone offset',
+				raw('private-offset').replace(
 					'BEGIN:VEVENT',
-				].join('\r\n'),
-			),
-		],
-		[
-			'invalid timezone observance',
-			raw('private-observance').replace(
-				'BEGIN:VEVENT',
-				[
-					'BEGIN:VTIMEZONE',
-					'TZID:Private/Observance',
-					'BEGIN:DAYLIGHT',
-					'DTSTART:20400230T020000',
-					'TZOFFSETFROM:+0100',
-					'TZOFFSETTO:+0200',
-					'END:DAYLIGHT',
-					'END:VTIMEZONE',
+					[
+						'BEGIN:VTIMEZONE',
+						'TZID:Private/Offset',
+						'BEGIN:STANDARD',
+						'DTSTART:20400101T020000',
+						'TZOFFSETFROM:+2460',
+						'TZOFFSETTO:+0100',
+						'END:STANDARD',
+						'END:VTIMEZONE',
+						'BEGIN:VEVENT',
+					].join('\r\n'),
+				),
+			],
+			[
+				'invalid timezone observance',
+				raw('private-observance').replace(
 					'BEGIN:VEVENT',
-				].join('\r\n'),
-			),
-		],
-		[
-			'COLOR inside VALARM',
-			raw('private-alarm-color', [
-				'BEGIN:VALARM',
-				'ACTION:DISPLAY',
-				'TRIGGER:-PT5M',
-				'DESCRIPTION:private-alarm-description',
-				'COLOR:private-color',
-				'END:VALARM',
-			]),
-		],
-		[
-			'COLOR inside VTIMEZONE',
-			raw('private-timezone-color').replace(
-				'BEGIN:VEVENT',
-				[
-					'BEGIN:VTIMEZONE',
-					'TZID:Private/Color',
+					[
+						'BEGIN:VTIMEZONE',
+						'TZID:Private/Observance',
+						'BEGIN:DAYLIGHT',
+						'DTSTART:20400230T020000',
+						'TZOFFSETFROM:+0100',
+						'TZOFFSETTO:+0200',
+						'END:DAYLIGHT',
+						'END:VTIMEZONE',
+						'BEGIN:VEVENT',
+					].join('\r\n'),
+				),
+			],
+			[
+				'COLOR inside VALARM',
+				raw('private-alarm-color', [
+					'BEGIN:VALARM',
+					'ACTION:DISPLAY',
+					'TRIGGER:-PT5M',
+					'DESCRIPTION:private-alarm-description',
 					'COLOR:private-color',
-					'BEGIN:STANDARD',
-					'DTSTART:20400101T020000',
-					'TZOFFSETFROM:+0200',
-					'TZOFFSETTO:+0100',
-					'END:STANDARD',
-					'END:VTIMEZONE',
+					'END:VALARM',
+				]),
+			],
+			[
+				'COLOR inside VTIMEZONE',
+				raw('private-timezone-color').replace(
 					'BEGIN:VEVENT',
-				].join('\r\n'),
-			),
-		],
-		[
-			'DATE recurrence with DATE-TIME UNTIL',
-			raw('private-date-until', ['RRULE:FREQ=DAILY;UNTIL=20400105T000000Z'])
-				.replace('DTSTART:20400102T100000Z', 'DTSTART;VALUE=DATE:20400102')
-				.replace('DTEND:20400102T110000Z', 'DTEND;VALUE=DATE:20400103'),
-		],
-		[
-			'VTIMEZONE recurrence with local UNTIL',
-			raw('private-timezone-until').replace(
-				'BEGIN:VEVENT',
-				[
-					'BEGIN:VTIMEZONE',
-					'TZID:Private/Until',
-					'BEGIN:STANDARD',
-					'DTSTART:20400101T020000',
-					'TZOFFSETFROM:+0200',
-					'TZOFFSETTO:+0100',
-					'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;UNTIL=20501030T020000',
-					'END:STANDARD',
-					'END:VTIMEZONE',
+					[
+						'BEGIN:VTIMEZONE',
+						'TZID:Private/Color',
+						'COLOR:private-color',
+						'BEGIN:STANDARD',
+						'DTSTART:20400101T020000',
+						'TZOFFSETFROM:+0200',
+						'TZOFFSETTO:+0100',
+						'END:STANDARD',
+						'END:VTIMEZONE',
+						'BEGIN:VEVENT',
+					].join('\r\n'),
+				),
+			],
+			[
+				'DATE recurrence with DATE-TIME UNTIL',
+				raw('private-date-until', ['RRULE:FREQ=DAILY;UNTIL=20400105T000000Z'])
+					.replace('DTSTART:20400102T100000Z', 'DTSTART;VALUE=DATE:20400102')
+					.replace('DTEND:20400102T110000Z', 'DTEND;VALUE=DATE:20400103'),
+			],
+			[
+				'VTIMEZONE recurrence with local UNTIL',
+				raw('private-timezone-until').replace(
 					'BEGIN:VEVENT',
-				].join('\r\n'),
-			),
-		],
-		[
-			'invalid DISPLAY alarm',
-			raw('private-alarm', ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT5M', 'END:VALARM']),
-		],
-		[
-			'invalid EMAIL alarm',
-			raw('private-email-alarm', [
-				'BEGIN:VALARM',
-				'ACTION:EMAIL',
-				'TRIGGER:-PT5M',
-				'DESCRIPTION:private-description',
-				'END:VALARM',
-			]),
-		],
-		[
-			'generic alarm without trigger',
-			raw('private-generic-missing-trigger', [
-				'BEGIN:VALARM',
-				'ACTION:PROCEDURE',
-				'X-PROCEDURE-DATA:private-generic-data',
-				'END:VALARM',
-			]),
-		],
-		[
-			'generic alarm with duplicate trigger',
-			raw('private-generic-duplicate-trigger', [
-				'BEGIN:VALARM',
-				'ACTION:X-VENDOR-ACTION',
-				'TRIGGER:-PT5M',
-				'TRIGGER:-PT10M',
-				'X-VENDOR-DATA:private-generic-data',
-				'END:VALARM',
-			]),
-		],
-		[
-			'generic alarm with invalid trigger',
-			raw('private-generic-invalid-trigger', [
-				'BEGIN:VALARM',
-				'ACTION:PROCEDURE',
-				'TRIGGER:private-invalid-trigger',
-				'END:VALARM',
-			]),
-		],
-	] as const)(
-		'rejects %s before any event request without leaking Raw ICS',
-		async (_name, rawIcs) => {
+					[
+						'BEGIN:VTIMEZONE',
+						'TZID:Private/Until',
+						'BEGIN:STANDARD',
+						'DTSTART:20400101T020000',
+						'TZOFFSETFROM:+0200',
+						'TZOFFSETTO:+0100',
+						'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;UNTIL=20501030T020000',
+						'END:STANDARD',
+						'END:VTIMEZONE',
+						'BEGIN:VEVENT',
+					].join('\r\n'),
+				),
+			],
+			[
+				'invalid DISPLAY alarm',
+				raw('private-alarm', ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT5M', 'END:VALARM']),
+			],
+			[
+				'invalid EMAIL alarm',
+				raw('private-email-alarm', [
+					'BEGIN:VALARM',
+					'ACTION:EMAIL',
+					'TRIGGER:-PT5M',
+					'DESCRIPTION:private-description',
+					'END:VALARM',
+				]),
+			],
+			[
+				'generic alarm without trigger',
+				raw('private-generic-missing-trigger', [
+					'BEGIN:VALARM',
+					'ACTION:PROCEDURE',
+					'X-PROCEDURE-DATA:private-generic-data',
+					'END:VALARM',
+				]),
+			],
+			[
+				'generic alarm with duplicate trigger',
+				raw('private-generic-duplicate-trigger', [
+					'BEGIN:VALARM',
+					'ACTION:X-VENDOR-ACTION',
+					'TRIGGER:-PT5M',
+					'TRIGGER:-PT10M',
+					'X-VENDOR-DATA:private-generic-data',
+					'END:VALARM',
+				]),
+			],
+			[
+				'generic alarm with invalid trigger',
+				raw('private-generic-invalid-trigger', [
+					'BEGIN:VALARM',
+					'ACTION:PROCEDURE',
+					'TRIGGER:private-invalid-trigger',
+					'END:VALARM',
+				]),
+			],
+		] as const,
+		'rejects invalid Raw ICS %s before any event request without leaking Raw ICS',
+		async ([, rawIcs]) => {
 			const requests = transport(async () => response(500, CALENDAR_URL));
 			let failure: unknown;
 			try {

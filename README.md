@@ -223,7 +223,9 @@ command reports the failed lifecycle stage without printing generated
 credentials or private response bodies.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution requirements and
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries. The
+[complete Radicale matrix](docs/RADICALE-INTEGRATION.md) lists every accepted
+issue-53 contract ID, its oracle, and failure interpretation.
 
 ## Security
 
