@@ -236,9 +236,9 @@ an exact match for the configured selector; it does not fall back to another
 calendar.
 
 Use an Apple app-specific password, not the Apple Account password. Create it
-for the dedicated account, store it only in the local environment or the
-repository's GitHub Actions secrets, and revoke it after testing or rotate it
-if it may have been exposed. The required names are:
+for the dedicated account, store it only in the ignored local E2E environment
+file or the repository's GitHub Actions secrets, and revoke it after testing
+or rotate it if it may have been exposed. The required names are:
 
 ```text
 CALDAV_ICLOUD_E2E_SERVER_URL
@@ -251,35 +251,45 @@ CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME
 userinfo (username or password) or a fragment. Cleartext `http://` URLs are
 rejected before credentials are used or any transport request is made.
 
-The live suite also requires the explicit opt-in variable
-`CALDAV_ICLOUD_E2E_OPT_IN=1`. Run the fake transport dry run first, before
-providing live credentials:
+Create the ignored local configuration from the committed placeholder file and
+replace every value in `.env.icloud-e2e`:
+
+```bash
+cp .env.icloud-e2e.example .env.icloud-e2e
+```
+
+The npm scripts load `.env.icloud-e2e` automatically through Node.js. The real
+file is covered by `.gitignore`; never force-add it or put live values in the
+committed example. The scripts control `CALDAV_ICLOUD_E2E_OPT_IN` themselves:
+the dry run forces it to `0`, and the composite live command sets it to `1`
+only after the dry run succeeds.
+
+Run the fake transport dry run first:
 
 ```bash
 npm run test:e2e:icloud:dry-run
 ```
 
 Only after that succeeds, and after confirming the dedicated account and empty
-calendar, run locally with the four values supplied through the environment:
+calendar, run locally without repeating the credentials:
 
 ```bash
-CALDAV_ICLOUD_E2E_SERVER_URL='<server-url>' \
-CALDAV_ICLOUD_E2E_USERNAME='<dedicated-account>' \
-CALDAV_ICLOUD_E2E_APP_PASSWORD='<app-specific-password>' \
-CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME='<exact-display-name>' \
-CALDAV_ICLOUD_E2E_OPT_IN=1 \
 npm run test:e2e:icloud
 ```
 
 The GitHub Actions workflow is `iCloud E2E (manual)` in
 `.github/workflows/icloud-e2e.yml`. It can be started only with
 `workflow_dispatch` on `main`, with the required boolean
-`confirm_live_icloud_e2e` explicitly enabled. Configure the same four names as
-repository or environment secrets; never put their values in workflow files,
-commands committed to the repository, issues, or pull requests. The workflow
-runs the fake dry run before the live job, uses least-privilege read-only
-repository access, and serializes runs per calendar scope. It is not a
-required CI or pull-request check.
+`confirm_live_icloud_e2e` explicitly enabled. Configure
+`CALDAV_ICLOUD_E2E_SERVER_URL`, `CALDAV_ICLOUD_E2E_USERNAME`, and
+`CALDAV_ICLOUD_E2E_APP_PASSWORD` as repository **Secrets**. Configure
+`CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME` as a repository **Variable**. Never
+put live values in workflow files, commands
+committed to the repository, issues, or pull requests. GitHub injects these
+values directly; the workflow does not create or consume the local env file.
+It runs the fake dry run before the live job, uses least-privilege read-only
+repository access, and serializes runs per calendar scope. It is not a required
+CI or pull-request check.
 
 Every event created by a run has a fresh UUID `runId` and a matching UID/title
 prefix. Cleanup is attempted in a `finally` path and is limited to resources
