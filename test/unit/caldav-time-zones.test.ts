@@ -2,6 +2,8 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { issue53It } from '../support/issue-53-contract-oracle';
+
 import {
 	CalDavIanaTimeZoneError,
 	IANA_TIME_ZONE_DATABASE_VERSION,
@@ -108,23 +110,29 @@ describe('pinned IANA TZDB 2026c identity oracle', () => {
 		for (const zone of zones) expect(canonicalizeIanaTimeZone(zone)).toBe(zone);
 	});
 
-	it('resolves every checked-in 2026c Link chain and ASCII case variant to one primary spelling', () => {
-		for (const link of tzdbOracle.links) {
-			if (DISALLOWED_IMPLEMENTATION_LINKS.has(link.name)) {
-				expect(captureError(() => canonicalizeIanaTimeZone(link.name)).code).toBe(
-					'INVALID_TIME_ZONE',
-				);
-				continue;
+	issue53It(
+		['VALIDATION-IANA-001'],
+		'resolves every checked-in 2026c Link chain and ASCII case variant to one primary spelling',
+		() => {
+			for (const link of tzdbOracle.links) {
+				if (DISALLOWED_IMPLEMENTATION_LINKS.has(link.name)) {
+					expect(captureError(() => canonicalizeIanaTimeZone(link.name)).code).toBe(
+						'INVALID_TIME_ZONE',
+					);
+					continue;
+				}
+				const canonical = resolveOracleLink(link.name);
+				if (UTC_EQUIVALENT_PRIMARY_ZONES.has(canonical)) {
+					expect(captureError(() => canonicalizeIanaTimeZone(link.name)).code).toBe(
+						'UTC_EQUIVALENT',
+					);
+					continue;
+				}
+				expect(canonicalizeIanaTimeZone(link.name)).toBe(canonical);
+				expect(canonicalizeIanaTimeZone(link.name.toUpperCase())).toBe(canonical);
 			}
-			const canonical = resolveOracleLink(link.name);
-			if (UTC_EQUIVALENT_PRIMARY_ZONES.has(canonical)) {
-				expect(captureError(() => canonicalizeIanaTimeZone(link.name)).code).toBe('UTC_EQUIVALENT');
-				continue;
-			}
-			expect(canonicalizeIanaTimeZone(link.name)).toBe(canonical);
-			expect(canonicalizeIanaTimeZone(link.name.toUpperCase())).toBe(canonical);
-		}
-	});
+		},
+	);
 
 	it.each(INVALID_ZONE_ORACLE)(
 		'rejects invalid/private identifier %# without echoing it',
@@ -156,22 +164,26 @@ describe('instant/local conversion', () => {
 		},
 	);
 
-	it('uses RFC 5545 first-occurrence and pre-gap-offset transition semantics', () => {
-		const prague = canonicalizeIanaTimeZone('Europe/Prague');
-		const newYork = canonicalizeIanaTimeZone('America/New_York');
-		expect(iso(resolveLocalDateTimeInTimeZone(TRANSITION_ORACLE.pragueGap.local, prague))).toBe(
-			TRANSITION_ORACLE.pragueGap.resolved,
-		);
-		expect(iso(resolveLocalDateTimeInTimeZone(TRANSITION_ORACLE.pragueOverlap.local, prague))).toBe(
-			TRANSITION_ORACLE.pragueOverlap.first,
-		);
-		expect(iso(resolveLocalDateTimeInTimeZone(TRANSITION_ORACLE.newYorkGap.local, newYork))).toBe(
-			TRANSITION_ORACLE.newYorkGap.resolved,
-		);
-		expect(
-			iso(resolveLocalDateTimeInTimeZone(TRANSITION_ORACLE.newYorkOverlap.local, newYork)),
-		).toBe(TRANSITION_ORACLE.newYorkOverlap.first);
-	});
+	issue53It(
+		['VALIDATION-TIME-001'],
+		'uses RFC 5545 first-occurrence and pre-gap-offset transition semantics',
+		() => {
+			const prague = canonicalizeIanaTimeZone('Europe/Prague');
+			const newYork = canonicalizeIanaTimeZone('America/New_York');
+			expect(iso(resolveLocalDateTimeInTimeZone(TRANSITION_ORACLE.pragueGap.local, prague))).toBe(
+				TRANSITION_ORACLE.pragueGap.resolved,
+			);
+			expect(
+				iso(resolveLocalDateTimeInTimeZone(TRANSITION_ORACLE.pragueOverlap.local, prague)),
+			).toBe(TRANSITION_ORACLE.pragueOverlap.first);
+			expect(iso(resolveLocalDateTimeInTimeZone(TRANSITION_ORACLE.newYorkGap.local, newYork))).toBe(
+				TRANSITION_ORACLE.newYorkGap.resolved,
+			);
+			expect(
+				iso(resolveLocalDateTimeInTimeZone(TRANSITION_ORACLE.newYorkOverlap.local, newYork)),
+			).toBe(TRANSITION_ORACLE.newYorkOverlap.first);
+		},
+	);
 
 	it('makes the second overlap occurrence visibly fail the authoring round-trip', () => {
 		const zone = canonicalizeIanaTimeZone('Europe/Prague');

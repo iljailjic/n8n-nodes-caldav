@@ -1,0 +1,370 @@
+{
+	"revision": "issue-53-contract-r1",
+	"cases": [
+		{
+			"id": "MATRIX-001",
+			"source": "test/unit/radicale-harness-static-contract.test.ts",
+			"scenario": "keeps npm test as the aggregate unit-plus-integration CI entry point"
+		},
+		{
+			"id": "MATRIX-002",
+			"source": "test/unit/radicale-harness-static-contract.test.ts",
+			"scenario": "keeps the unchanged Node.js matrix wired through npm test"
+		},
+		{
+			"id": "HARNESS-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "resets only the selected run and preserves authenticated reconnection"
+		},
+		{
+			"id": "HARNESS-002",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "allocates distinct parallel identities and confines each runtime"
+		},
+		{
+			"id": "HARNESS-003",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "returns nonzero only after deliberate failure cleanup and redacts the run secret"
+		},
+		{
+			"id": "HARNESS-004",
+			"source": "test/unit/radicale-harness-static-contract.test.ts",
+			"scenario": "keeps host access race-free and loopback-only without publishing the internal network"
+		},
+		{
+			"id": "HARNESS-005",
+			"source": "test/unit/radicale-harness-static-contract.test.ts",
+			"scenario": "builds Radicale from the accepted immutable official Python base and exact version"
+		},
+		{
+			"id": "HARNESS-006",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "reports bounded sanitized unavailability and still permits teardown"
+		},
+		{
+			"id": "HARNESS-007",
+			"source": "test/unit/radicale-harness-static-contract.test.ts",
+			"scenario": "keeps Python, Radicale, and harness artifacts outside production dependencies and package files"
+		},
+		{
+			"id": "CONNECTION-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "discovers the generated current-user principal and calendar home from fresh storage"
+		},
+		{
+			"id": "AUTH-401-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "rejects an invalid password without invalidating the generated credential"
+		},
+		{
+			"id": "AUTH-403-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "retrieves one stored event identically by exact resource URL and UID with live missing and forbidden boundaries"
+		},
+		{
+			"id": "DISCOVERY-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "discovers the generated current-user principal and calendar home from fresh storage"
+		},
+		{
+			"id": "DISCOVERY-002",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "discovers real writable and read-only VEVENT calendars with accurate privileges"
+		},
+		{
+			"id": "CALENDAR-GET-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "discovers real writable and read-only VEVENT calendars with accurate privileges"
+		},
+		{
+			"id": "CALENDAR-MANY-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "executes Calendar Get Many for an empty home and filters/sorts writable, read-only, and non-event collections"
+		},
+		{
+			"id": "CALENDAR-MANY-002",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "loads duplicate, missing, empty, writable, and read-only VEVENT calendars while excluding VTODO-only collections"
+		},
+		{
+			"id": "EVENT-CREATE-STRUCTURED-UTC-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates and reads back Unicode data, then preserves it across a same-UID collision"
+		},
+		{
+			"id": "EVENT-CREATE-UUID-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "generates a canonical UUID for blank node UID and reads back one matching VEVENT identity"
+		},
+		{
+			"id": "EVENT-CREATE-ALLDAY-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "round-trips one-day leap and multi-day year-boundary values and enforces half-open queries"
+		},
+		{
+			"id": "EVENT-CREATE-IANA-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates, queries, updates bounds, changes zones, and reads generated finite fallback definitions"
+		},
+		{
+			"id": "EVENT-CREATE-RECURRENCE-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates, queries, updates, and reads one recurring master without expansion"
+		},
+		{
+			"id": "EVENT-CREATE-ALARMS-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "round-trips multiple alarms through targeted edit, remove, and add"
+		},
+		{
+			"id": "EVENT-CREATE-RAW-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates, fully replaces and upserts complex event objects with authoritative read-back and stale-ETag safety"
+		},
+		{
+			"id": "EVENT-GET-URL-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "retrieves one stored event identically by exact resource URL and UID with live missing and forbidden boundaries"
+		},
+		{
+			"id": "EVENT-GET-UID-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "retrieves one stored event identically by exact resource URL and UID with live missing and forbidden boundaries"
+		},
+		{
+			"id": "EVENT-GET-UNSUPPORTED-001",
+			"source": "test/unit/caldav-event-read-model.test.ts",
+			"scenario": "rejects zero and multiple masters deterministically"
+		},
+		{
+			"id": "EVENT-MANY-RANGE-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "enforces [start,end) overlap boundaries and returns one recurring resource"
+		},
+		{
+			"id": "EVENT-MANY-ALLDAY-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "round-trips one-day leap and multi-day year-boundary values and enforces half-open queries"
+		},
+		{
+			"id": "EVENT-MANY-RECURRENCE-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "enforces [start,end) overlap boundaries and returns one recurring resource"
+		},
+		{
+			"id": "EVENT-UPDATE-URL-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "updates a direct Resource URL with the exact fetched and authoritative ETags while preserving unknown data"
+		},
+		{
+			"id": "EVENT-UPDATE-UID-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "updates by UID with an exact caller ETag through REPORT -> PUT -> GET"
+		},
+		{
+			"id": "EVENT-UPDATE-METADATA-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "preserves, replaces, removes, and upserts metadata with authoritative URL and ETag values"
+		},
+		{
+			"id": "EVENT-UPDATE-TIME-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates, queries, updates bounds, changes zones, and reads generated finite fallback definitions"
+		},
+		{
+			"id": "EVENT-UPDATE-PRESERVE-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "updates a direct Resource URL with the exact fetched and authoritative ETags while preserving unknown data"
+		},
+		{
+			"id": "EVENT-UPDATE-RAW-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates, fully replaces and upserts complex event objects with authoritative read-back and stale-ETag safety"
+		},
+		{
+			"id": "EVENT-DELETE-URL-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "deletes an exact Resource URL with the resolved ETag and returns stable metadata"
+		},
+		{
+			"id": "EVENT-DELETE-UID-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "resolves and deletes by UID within only the selected calendar"
+		},
+		{
+			"id": "EVENT-DELETE-UNSUPPORTED-001",
+			"source": "test/unit/caldav-event-delete-resolution-regression.test.ts",
+			"scenario": "uses the non-empty caller ETag after real resource URL and UID resolution omit the remote ETag"
+		},
+		{
+			"id": "EVENT-UPSERT-UID-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates then updates one supplied UID with preservation-first conditional requests and no DELETE"
+		},
+		{
+			"id": "EVENT-UPSERT-OMITTED-UID-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates two omitted-UID resources through conditional PUTs for timed UTC and all-day input"
+		},
+		{
+			"id": "EVENT-UPSERT-TIME-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates then updates an IANA event with one finite fallback definition and no DELETE"
+		},
+		{
+			"id": "EVENT-UPSERT-RAW-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates, fully replaces and upserts complex event objects with authoritative read-back and stale-ETag safety"
+		},
+		{
+			"id": "NODE-ITEM-001",
+			"source": "test/unit/caldav-raw-ics-write-node.test.ts",
+			"scenario": "continues with only the fixed Raw error and does not leak body or attached causes"
+		},
+		{
+			"id": "UID-NOT-FOUND-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "retrieves one stored event identically by exact resource URL and UID with live missing and forbidden boundaries"
+		},
+		{
+			"id": "UID-AMBIGUOUS-SYNTHETIC-001",
+			"source": "test/unit/caldav-event-read-model.test.ts",
+			"scenario": "rejects zero and multiple masters deterministically"
+		},
+		{
+			"id": "UID-NO-CONFLICT-LIVE-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "retrieves one stored event identically by exact resource URL and UID with live missing and forbidden boundaries"
+		},
+		{
+			"id": "CREATE-COLLISION-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "creates and reads back Unicode data, then preserves it across a same-UID collision"
+		},
+		{
+			"id": "UPDATE-STALE-ETAG-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "maps a stale caller ETag to one terminal conflict with no read-back"
+		},
+		{
+			"id": "DELETE-STALE-ETAG-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "maps a supplied stale ETag to one terminal conflict and retains the newer resource"
+		},
+		{
+			"id": "UPSERT-STALE-RACE-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "maps a REPORT-to-PUT stale race to one conflict and leaves the winner intact"
+		},
+		{
+			"id": "MISSING-RESOURCE-URL-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "reports a missing event without issuing DELETE"
+		},
+		{
+			"id": "READONLY-CREATE-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "maps read-only denial and rejects invalid input before any live request"
+		},
+		{
+			"id": "READONLY-UPDATE-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "maps read-only denial, performs no read-back, and retains the event"
+		},
+		{
+			"id": "READONLY-DELETE-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "maps read-only denial and retains the resource while every DELETE stays conditional"
+		},
+		{
+			"id": "READONLY-UPSERT-001",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "uses one conditional Create attempt on a read-only calendar and never DELETEs"
+		},
+		{
+			"id": "RESPONSE-LIMIT-001",
+			"source": "test/unit/caldav-http.test.ts",
+			"scenario": "destroys the stream on the first nonempty byte over 10 MiB despite a misleading length"
+		},
+		{
+			"id": "RESOURCE-LIMIT-001",
+			"source": "test/unit/caldav-event-upsert.test.ts",
+			"scenario": "performs the long-UID resource limit only after the sole zero-match lookup"
+		},
+		{
+			"id": "MALFORMED-XML-001",
+			"source": "test/unit/caldav-current-user-principal.test.ts",
+			"scenario": "propagates the existing safe XML parse error unchanged"
+		},
+		{
+			"id": "INVALID-MULTISTATUS-001",
+			"source": "test/unit/caldav-current-user-principal.test.ts",
+			"scenario": "rejects a response-level status form"
+		},
+		{
+			"id": "FORBIDDEN-XML-DECLARATION-001",
+			"source": "test/unit/caldav-event-upsert.test.ts",
+			"scenario": "rejects forbidden XML declaration or structure %s without classifying a concurrency conflict"
+		},
+		{
+			"id": "MALFORMED-ICS-001",
+			"source": "test/unit/caldav-icalendar-parser.test.ts",
+			"scenario": "applies lexical/count failures before closure and semantic validation"
+		},
+		{
+			"id": "VALIDATION-URL-001",
+			"source": "test/unit/caldav-credentials.test.ts",
+			"scenario": "rejects the %s URL validation case before authentication"
+		},
+		{
+			"id": "VALIDATION-UID-001",
+			"source": "test/unit/caldav-event-upsert.test.ts",
+			"scenario": "performs the long-UID resource limit only after the sole zero-match lookup"
+		},
+		{
+			"id": "VALIDATION-TIME-001",
+			"source": "test/unit/caldav-time-zones.test.ts",
+			"scenario": "uses RFC 5545 first-occurrence and pre-gap-offset transition semantics"
+		},
+		{
+			"id": "VALIDATION-IANA-001",
+			"source": "test/unit/caldav-time-zones.test.ts",
+			"scenario": "resolves every checked-in 2026c Link chain and ASCII case variant to one primary spelling"
+		},
+		{
+			"id": "VALIDATION-METADATA-001",
+			"source": "test/unit/caldav-alarms-node-contract.test.ts",
+			"scenario": "rejects malformed wrappers, unknown fields and missing selectors with fixed errors"
+		},
+		{
+			"id": "VALIDATION-RECURRENCE-001",
+			"source": "test/unit/caldav-recurrence-authoring-contract.test.ts",
+			"scenario": "authors one canonical UTC master RRULE after DTEND and before SUMMARY"
+		},
+		{
+			"id": "VALIDATION-ALARM-001",
+			"source": "test/unit/caldav-alarms-node-contract.test.ts",
+			"scenario": "rejects malformed wrappers, unknown fields and missing selectors with fixed errors"
+		},
+		{
+			"id": "VALIDATION-RAW-001",
+			"source": "test/unit/caldav-raw-ics-write-services.test.ts",
+			"scenario": "rejects invalid Raw ICS %s before any event request without leaking Raw ICS"
+		},
+		{
+			"id": "QUALITY-001",
+			"source": "test/unit/radicale-harness-static-contract.test.ts",
+			"scenario": "uses separate, mutually exclusive Vitest discovery configurations"
+		},
+		{
+			"id": "QUALITY-002",
+			"source": "test/unit/radicale-harness-static-contract.test.ts",
+			"scenario": "keeps the production compiler boundary limited to credentials and node sources"
+		},
+		{
+			"id": "QUALITY-003",
+			"source": "test/integration/radicale-harness.integration.test.ts",
+			"scenario": "returns nonzero only after deliberate failure cleanup and redacts the run secret"
+		}
+	]
+}

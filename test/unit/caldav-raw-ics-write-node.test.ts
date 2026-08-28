@@ -1,6 +1,8 @@
 import type { IExecuteFunctions, INode } from 'n8n-workflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { issue53It } from '../support/issue-53-contract-oracle';
+
 const mocks = vi.hoisted(() => ({
 	createN8nCalDavTransport: vi.fn(),
 	createCalendarEvent: vi.fn(),
@@ -166,32 +168,36 @@ describe('Raw ICS node descriptor and active extraction', () => {
 		},
 	);
 
-	it('continues with only the fixed Raw error and does not leak body or attached causes', async () => {
-		mocks.createCalendarEvent.mockRejectedValue(
-			Object.assign(new CalDavRawCalendarEventError('INVALID_RESOURCE'), {
-				body: RAW,
-				cause: new Error(RAW),
-			}),
-		);
-		const [output] = await new CalDav().execute.call(
-			context(
+	issue53It(
+		['NODE-ITEM-001'],
+		'continues with only the fixed Raw error and does not leak body or attached causes',
+		async () => {
+			mocks.createCalendarEvent.mockRejectedValue(
+				Object.assign(new CalDavRawCalendarEventError('INVALID_RESOURCE'), {
+					body: RAW,
+					cause: new Error(RAW),
+				}),
+			);
+			const [output] = await new CalDav().execute.call(
+				context(
+					{
+						resource: 'event',
+						operation: 'create',
+						calendar: locator(CALENDAR_URL),
+						inputMode: 'rawIcs',
+						rawIcs: RAW,
+					},
+					new Set(),
+					true,
+				),
+			);
+			expect(output).toEqual([
 				{
-					resource: 'event',
-					operation: 'create',
-					calendar: locator(CALENDAR_URL),
-					inputMode: 'rawIcs',
-					rawIcs: RAW,
+					json: { error: 'Raw ICS must contain one valid VCALENDAR event resource.' },
+					pairedItem: { item: 0 },
 				},
-				new Set(),
-				true,
-			),
-		);
-		expect(output).toEqual([
-			{
-				json: { error: 'Raw ICS must contain one valid VCALENDAR event resource.' },
-				pairedItem: { item: 0 },
-			},
-		]);
-		expect(JSON.stringify(output)).not.toContain('sentinel');
-	});
+			]);
+			expect(JSON.stringify(output)).not.toContain('sentinel');
+		},
+	);
 });

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { issue53It } from '../support/issue-53-contract-oracle';
+
 vi.mock('n8n-workflow', () => {
 	throw new Error('The event read model must not import n8n-workflow');
 });
@@ -633,19 +635,23 @@ describe('VEVENT set identity, master selection, and singleton validation', () =
 		expectMapError(withCalendarEntries(resource, entries), 'INVALID_EVENT_IDENTITY');
 	});
 
-	it('rejects zero and multiple masters deterministically', () => {
-		const onlyExceptions = parseEventResource([
-			...event('recurring', ['RECURRENCE-ID:20260812T090000Z', 'DTSTART:20260812T090000Z']),
-			...event('recurring', ['RECURRENCE-ID:20260813T090000Z', 'DTSTART:20260813T090000Z']),
-		]);
-		const twoMasters = parseEventResource([
-			...event('duplicate-master', ['DTSTART:20260812T090000Z']),
-			...event('duplicate-master', ['DTSTART:20260813T090000Z']),
-		]);
+	issue53It(
+		['EVENT-GET-UNSUPPORTED-001', 'UID-AMBIGUOUS-SYNTHETIC-001'],
+		'rejects zero and multiple masters deterministically',
+		() => {
+			const onlyExceptions = parseEventResource([
+				...event('recurring', ['RECURRENCE-ID:20260812T090000Z', 'DTSTART:20260812T090000Z']),
+				...event('recurring', ['RECURRENCE-ID:20260813T090000Z', 'DTSTART:20260813T090000Z']),
+			]);
+			const twoMasters = parseEventResource([
+				...event('duplicate-master', ['DTSTART:20260812T090000Z']),
+				...event('duplicate-master', ['DTSTART:20260813T090000Z']),
+			]);
 
-		expectMapError(onlyExceptions, 'MISSING_MASTER_EVENT');
-		expectMapError(twoMasters, 'MULTIPLE_MASTER_EVENTS');
-	});
+			expectMapError(onlyExceptions, 'MISSING_MASTER_EVENT');
+			expectMapError(twoMasters, 'MULTIPLE_MASTER_EVENTS');
+		},
+	);
 
 	it('rejects duplicate RECURRENCE-ID before projected master validation', () => {
 		const resource = parseEventResource([

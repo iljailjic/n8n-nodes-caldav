@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 
+import { issue53It, issue53ItEach } from '../support/issue-53-contract-oracle';
+
 import * as upsertModule from '../../nodes/CalDav/events/upsert';
 import {
 	CalDavCalendarEventUpsertError,
@@ -30,6 +32,7 @@ import type {
 	CalDavTransportResponse,
 } from '../../nodes/CalDav/transport/http';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import { hasCalDavNoUidConflict } from '../../nodes/CalDav/xml/parser';
 import {
 	SUPPORTED_BARE_IANA_EVENT,
 	TZDIST_ZONE_RESPONSE,
@@ -768,17 +771,21 @@ describe('calendar-event Upsert branch guards and exact side effects', () => {
 		expect(methods(empty)).toEqual(['REPORT']);
 	});
 
-	it('performs the long-UID resource limit only after the sole zero-match lookup', async () => {
-		const uid = 'a'.repeat(189);
-		const requests = transport(async () => response(207, CALENDAR_URL, { body: multistatus() }));
-		const deps = dependencies();
+	issue53It(
+		['RESOURCE-LIMIT-001', 'VALIDATION-UID-001'],
+		'performs the long-UID resource limit only after the sole zero-match lookup',
+		async () => {
+			const uid = 'a'.repeat(189);
+			const requests = transport(async () => response(207, CALENDAR_URL, { body: multistatus() }));
+			const deps = dependencies();
 
-		await expect(upsertCalendarEvent(requests, timedInput({ uid }), deps)).rejects.toMatchObject({
-			message: 'UID is too long to create a safe event resource name.',
-		});
-		expect(methods(requests)).toEqual(['REPORT']);
-		expect(deps.clock).not.toHaveBeenCalled();
-	});
+			await expect(upsertCalendarEvent(requests, timedInput({ uid }), deps)).rejects.toMatchObject({
+				message: 'UID is too long to create a safe event resource name.',
+			});
+			expect(methods(requests)).toEqual(['REPORT']);
+			expect(deps.clock).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each([
 		['invalid UID', { uid: '' }, 'UID must be a non-empty valid iCalendar text value.'],
@@ -897,32 +904,39 @@ describe('calendar-event Upsert races, strict preconditions, and partial success
 		},
 	);
 
-	it.each([
-		['text mention', '<d:error xmlns:d="DAV:">no-uid-conflict</d:error>'],
+	issue53ItEach(
+		['FORBIDDEN-XML-DECLARATION-001'],
 		[
-			'arbitrary root',
-			'<x:response xmlns:x="urn:arbitrary" xmlns:c="urn:ietf:params:xml:ns:caldav"><c:no-uid-conflict/></x:response>',
-		],
-		[
-			'nested below DAV error',
-			'<d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:responsedescription><c:no-uid-conflict/></d:responsedescription></d:error>',
-		],
-		[
-			'wrong namespace',
-			'<d:error xmlns:d="DAV:" xmlns:x="urn:not-caldav"><x:no-uid-conflict/></d:error>',
-		],
-		['DTD', '<!DOCTYPE d:error [<!ENTITY x "private">]><d:error xmlns:d="DAV:">&x;</d:error>'],
-		['malformed', '<d:error xmlns:d="DAV:"><d:no-uid-conflict>'],
-	] as const)('does not guess concurrency from %s 403 content', async (_label, body) => {
-		const requests = transport(async (request) => response(403, request.url!, { body }));
-		const error = await captureError(
-			upsertCalendarEvent(requests, omittedUidInput(), dependencies()),
-		);
+			['text mention', '<d:error xmlns:d="DAV:">no-uid-conflict</d:error>'],
+			[
+				'arbitrary root',
+				'<x:response xmlns:x="urn:arbitrary" xmlns:c="urn:ietf:params:xml:ns:caldav"><c:no-uid-conflict/></x:response>',
+			],
+			[
+				'nested below DAV error',
+				'<d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:responsedescription><c:no-uid-conflict/></d:responsedescription></d:error>',
+			],
+			[
+				'wrong namespace',
+				'<d:error xmlns:d="DAV:" xmlns:x="urn:not-caldav"><x:no-uid-conflict/></d:error>',
+			],
+			['DTD', '<!DOCTYPE d:error [<!ENTITY x "private">]><d:error xmlns:d="DAV:">&x;</d:error>'],
+			['malformed', '<d:error xmlns:d="DAV:"><d:no-uid-conflict>'],
+		] as const,
+		'rejects forbidden XML declaration or structure %s without classifying a concurrency conflict',
+		async ([, body]) => {
+			const requests = transport(async (request) => response(403, request.url!, { body }));
+			const error = await captureError(
+				upsertCalendarEvent(requests, omittedUidInput(), dependencies()),
+			);
 
-		expect(error).not.toMatchObject({ code: 'UPSERT_CONCURRENCY_CONFLICT' });
-		expect(methods(requests)).toEqual(['PUT']);
-		expect(JSON.stringify(error)).not.toMatch(/private|DOCTYPE|ENTITY|no-uid-conflict|body/i);
-	});
+			expect(hasCalDavNoUidConflict(body)).toBe(false);
+			expect(error).toBeInstanceOf(CalDavAuthorizationError);
+			expect(error).not.toMatchObject({ code: 'UPSERT_CONCURRENCY_CONFLICT' });
+			expect(methods(requests)).toEqual(['PUT']);
+			expect(JSON.stringify(error)).not.toMatch(/private|DOCTYPE|ENTITY|no-uid-conflict|body/i);
+		},
+	);
 
 	it('does not classify generic 409 as concurrency', async () => {
 		const requests = transport(async (request) => response(409, request.url!, { body: 'private' }));
