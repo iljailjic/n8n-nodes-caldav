@@ -2,6 +2,7 @@ import type { INodeProperties } from 'n8n-workflow';
 import { describe, expect, it, vi } from 'vitest';
 
 import { CalDav } from '../../nodes/CalDav/CalDav.node';
+import { issue53It } from '../support/issue-53-contract-oracle';
 import { prepareCalendarEventCreate } from '../../nodes/CalDav/events/createPreparation';
 import {
 	CalDavCalendarEventTimeZoneAuthoringError,
@@ -247,29 +248,33 @@ describe('recurrence controls activate atomically in the n8n node', () => {
 });
 
 describe('recurrence authoring and preservation wire contract', () => {
-	it('authors one canonical UTC master RRULE after DTEND and before SUMMARY', () => {
-		const calendarData = serializeBasicUtcEvent({
-			uid: 'utc-recurrence@example.test',
-			dtstamp: CLOCK,
-			start: new Date('2040-01-02T10:00:00Z'),
-			end: new Date('2040-01-02T11:00:00Z'),
-			summary: 'Recurring UTC event',
-			recurrence: {
-				frequency: 'monthly',
-				interval: 2,
-				end: { kind: 'count', count: 4 },
-				byMonth: [1, 6],
-				byMonthDay: [2],
-			},
-		} as unknown as Parameters<typeof serializeBasicUtcEvent>[0]);
+	issue53It(
+		['VALIDATION-RECURRENCE-001'],
+		'authors one canonical UTC master RRULE after DTEND and before SUMMARY',
+		() => {
+			const calendarData = serializeBasicUtcEvent({
+				uid: 'utc-recurrence@example.test',
+				dtstamp: CLOCK,
+				start: new Date('2040-01-02T10:00:00Z'),
+				end: new Date('2040-01-02T11:00:00Z'),
+				summary: 'Recurring UTC event',
+				recurrence: {
+					frequency: 'monthly',
+					interval: 2,
+					end: { kind: 'count', count: 4 },
+					byMonth: [1, 6],
+					byMonthDay: [2],
+				},
+			} as unknown as Parameters<typeof serializeBasicUtcEvent>[0]);
 
-		const unfolded = calendarData.replace(/\r\n[ \t]/gu, '');
-		expect(unfolded.match(/^RRULE:/gmu) ?? []).toHaveLength(1);
-		expect(unfolded).toContain(
-			'\r\nDTEND:20400102T110000Z\r\nRRULE:FREQ=MONTHLY;INTERVAL=2;COUNT=4;BYMONTH=1,6;BYMONTHDAY=2\r\nSUMMARY:',
-		);
-		expect(unfolded).not.toMatch(/RECURRENCE-ID|EXDATE|RDATE/iu);
-	});
+			const unfolded = calendarData.replace(/\r\n[ \t]/gu, '');
+			expect(unfolded.match(/^RRULE:/gmu) ?? []).toHaveLength(1);
+			expect(unfolded).toContain(
+				'\r\nDTEND:20400102T110000Z\r\nRRULE:FREQ=MONTHLY;INTERVAL=2;COUNT=4;BYMONTH=1,6;BYMONTHDAY=2\r\nSUMMARY:',
+			);
+			expect(unfolded).not.toMatch(/RECURRENCE-ID|EXDATE|RDATE/iu);
+		},
+	);
 
 	it('authors an all-day DATE Until without a DATE-TIME recurrence value', () => {
 		const calendarData = serializeBasicUtcEvent({

@@ -15,6 +15,8 @@ import type {
 } from 'n8n-workflow';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { issue53It } from '../support/issue-53-contract-oracle';
+
 import { CalDavApi } from '../../credentials/CalDavApi.credentials';
 import * as httpTransport from '../../nodes/CalDav/transport/http';
 import {
@@ -933,28 +935,32 @@ describe('bounded bodies and one shared deadline', () => {
 		expect(result.body.at(-1)).toBe(0xa5);
 	});
 
-	it('destroys the stream on the first nonempty byte over 10 MiB despite a misleading length', async () => {
-		const body = Readable.from([
-			Buffer.alloc(CALDAV_MAX_RESPONSE_BYTES, 0x61),
-			Buffer.alloc(0),
-			Buffer.from('overflow-secret'),
-		]);
-		const error = await captureError(
-			createCalDavTransport(
-				'https://calendar.example.test/',
-				mockAdapter(async () => response(200, body, { 'Content-Length': '1' })),
-			).request({ method: CalDavMethod.GET }),
-		);
+	issue53It(
+		['RESPONSE-LIMIT-001'],
+		'destroys the stream on the first nonempty byte over 10 MiB despite a misleading length',
+		async () => {
+			const body = Readable.from([
+				Buffer.alloc(CALDAV_MAX_RESPONSE_BYTES, 0x61),
+				Buffer.alloc(0),
+				Buffer.from('overflow-secret'),
+			]);
+			const error = await captureError(
+				createCalDavTransport(
+					'https://calendar.example.test/',
+					mockAdapter(async () => response(200, body, { 'Content-Length': '1' })),
+				).request({ method: CalDavMethod.GET }),
+			);
 
-		expectStableError(
-			error,
-			CalDavResponseLimitError,
-			'RESPONSE_LIMIT_EXCEEDED',
-			'The CalDAV response exceeded the 10 MiB size limit.',
-		);
-		expect(body.destroyed).toBe(true);
-		expect(`${error.stack}${JSON.stringify(error)}`).not.toContain('overflow-secret');
-	});
+			expectStableError(
+				error,
+				CalDavResponseLimitError,
+				'RESPONSE_LIMIT_EXCEEDED',
+				'The CalDAV response exceeded the 10 MiB size limit.',
+			);
+			expect(body.destroyed).toBe(true);
+			expect(`${error.stack}${JSON.stringify(error)}`).not.toContain('overflow-secret');
+		},
+	);
 
 	it('rejects an oversized declared length before consuming the stream', async () => {
 		let reads = 0;

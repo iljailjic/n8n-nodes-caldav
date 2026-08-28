@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { issue53It } from '../support/issue-53-contract-oracle';
+
 vi.mock('n8n-workflow', () => {
 	throw new Error('The transport-independent iCalendar parser must not import n8n-workflow');
 });
@@ -824,20 +826,25 @@ describe('iCalendar defensive limits and precedence', () => {
 		expectParseError(withDepth(ICALENDAR_MAX_DEPTH + 1), 'MAX_DEPTH_EXCEEDED');
 	});
 
-	it('applies lexical/count failures before closure and semantic validation', () => {
-		const invalidContentBeforeTruncation =
-			'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:x\r\nBROKEN\r\n';
-		expectParseError(invalidContentBeforeTruncation, 'INVALID_CONTENT_LINE');
+	issue53It(
+		['MALFORMED-ICS-001'],
+		'applies lexical/count failures before closure and semantic validation',
+		() => {
+			const invalidContentBeforeTruncation =
+				'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:x\r\nBROKEN\r\n';
+			expectParseError(invalidContentBeforeTruncation, 'INVALID_CONTENT_LINE');
 
-		const tooManyPropertiesBeforeMismatch = calendar([
-			'VERSION:2.0',
-			'BEGIN:VEVENT',
-			'UID:precedence',
-			...Array.from({ length: ICALENDAR_MAX_PROPERTIES - 1 }, () => 'X-P:1'),
-			'END:VTODO',
-		]);
-		expectParseError(tooManyPropertiesBeforeMismatch, 'MAX_PROPERTY_COUNT_EXCEEDED');
-	}, 30_000);
+			const tooManyPropertiesBeforeMismatch = calendar([
+				'VERSION:2.0',
+				'BEGIN:VEVENT',
+				'UID:precedence',
+				...Array.from({ length: ICALENDAR_MAX_PROPERTIES - 1 }, () => 'X-P:1'),
+				'END:VTODO',
+			]);
+			expectParseError(tooManyPropertiesBeforeMismatch, 'MAX_PROPERTY_COUNT_EXCEEDED');
+		},
+		30_000,
+	);
 });
 
 describe('iCalendar security, UTF-8, and leakage behavior', () => {

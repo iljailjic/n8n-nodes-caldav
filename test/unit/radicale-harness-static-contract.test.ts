@@ -8,6 +8,8 @@ import { cwd } from 'node:process';
 
 import { describe, expect, it } from 'vitest';
 
+import { issue53It } from '../support/issue-53-contract-oracle';
+
 const EXPECTED_PYTHON_BASE =
 	'python:3.13.14-alpine3.24@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0';
 const EXPECTED_RADICALE_VERSION = '3.7.7';
@@ -52,13 +54,8 @@ describe('Radicale harness public commands and test discovery', () => {
 		const integrationTest = await readRepositoryFile(
 			'test/integration/radicale-harness.integration.test.ts',
 		);
-		const scenarioStart = integrationTest.indexOf(
-			"it('updates by UID with an exact caller ETag through REPORT -> PUT -> GET'",
-		);
-		const scenarioEnd = integrationTest.indexOf(
-			"it('maps a stale caller ETag to one terminal conflict with no read-back'",
-			scenarioStart,
-		);
+		const scenarioStart = integrationTest.indexOf("['EVENT-UPDATE-UID-001']");
+		const scenarioEnd = integrationTest.indexOf("['UPDATE-STALE-ETAG-001']", scenarioStart);
 		const scenario = integrationTest.slice(scenarioStart, scenarioEnd);
 		const seedPutIndex = scenario.indexOf("authenticatedFetch(run, eventUrl, 'PUT', seededBody)");
 		const etagCaptureIndex = scenario.indexOf("const suppliedEtag = before.headers.get('etag')");
@@ -73,31 +70,43 @@ describe('Radicale harness public commands and test discovery', () => {
 		expect(scenario).toContain("toEqual(['REPORT', 'PUT', 'GET'])");
 	});
 
-	it('keeps npm test as the aggregate unit-plus-integration CI entry point', async () => {
-		const scripts = (await readPackageManifest()).scripts ?? {};
+	issue53It(
+		['MATRIX-001'],
+		'keeps npm test as the aggregate unit-plus-integration CI entry point',
+		async () => {
+			const scripts = (await readPackageManifest()).scripts ?? {};
 
-		expect(scripts['test:integration']).toBe('vitest run --config vitest.integration.config.mts');
-		expect(scripts.test).toContain('vitest run --config vitest.config.mts');
-		expect(scripts.test).toContain('npm run test:integration');
-	});
+			expect(scripts['test:integration']).toBe('vitest run --config vitest.integration.config.mts');
+			expect(scripts.test).toContain('vitest run --config vitest.config.mts');
+			expect(scripts.test).toContain('npm run test:integration');
+		},
+	);
 
-	it('uses separate, mutually exclusive Vitest discovery configurations', async () => {
-		const unitConfig = await readRepositoryFile('vitest.config.mts');
-		const integrationConfig = await readRepositoryFile('vitest.integration.config.mts');
+	issue53It(
+		['QUALITY-001'],
+		'uses separate, mutually exclusive Vitest discovery configurations',
+		async () => {
+			const unitConfig = await readRepositoryFile('vitest.config.mts');
+			const integrationConfig = await readRepositoryFile('vitest.integration.config.mts');
 
-		expect(unitConfig).toContain("include: ['test/unit/**/*.test.ts']");
-		expect(unitConfig).toContain("exclude: ['test/integration/**', 'test/e2e/**']");
-		expect(integrationConfig).toContain("include: ['test/integration/**/*.integration.test.ts']");
-		expect(integrationConfig).toContain("exclude: ['test/unit/**'");
-	});
+			expect(unitConfig).toContain("include: ['test/unit/**/*.test.ts']");
+			expect(unitConfig).toContain("exclude: ['test/integration/**', 'test/e2e/**']");
+			expect(integrationConfig).toContain("include: ['test/integration/**/*.integration.test.ts']");
+			expect(integrationConfig).toContain("exclude: ['test/unit/**'");
+		},
+	);
 
-	it('keeps the unchanged Node.js matrix wired through npm test', async () => {
-		const ciWorkflow = await readRepositoryFile('.github/workflows/ci.yml');
+	issue53It(
+		['MATRIX-002'],
+		'keeps the unchanged Node.js matrix wired through npm test',
+		async () => {
+			const ciWorkflow = await readRepositoryFile('.github/workflows/ci.yml');
 
-		expect(ciWorkflow).toMatch(/node-version:\s*\n\s*- '22'\s*\n\s*- '24'/);
-		expect(ciWorkflow).toContain('run: npm test --if-present');
-		expect(ciWorkflow).not.toContain('test:integration');
-	});
+			expect(ciWorkflow).toMatch(/node-version:\s*\n\s*- '22'\s*\n\s*- '24'/);
+			expect(ciWorkflow).toContain('run: npm test --if-present');
+			expect(ciWorkflow).not.toContain('test:integration');
+		},
+	);
 
 	it('documents the direct command, Docker prerequisite, isolation, and mandatory cleanup', async () => {
 		const readme = await readRepositoryFile('README.md');
@@ -137,63 +146,82 @@ describe('Radicale image pinning and production separation', () => {
 		expect(integrationTest).not.toMatch(/spawn\(|execFile\(|docker/);
 	});
 
-	it('keeps host access race-free and loopback-only without publishing the internal network', async () => {
-		const harness = await readRepositoryFile(
-			'test/integration/support/radicale-harness-adapter.ts',
-		);
+	issue53It(
+		['HARNESS-004'],
+		'keeps host access race-free and loopback-only without publishing the internal network',
+		async () => {
+			const harness = await readRepositoryFile(
+				'test/integration/support/radicale-harness-adapter.ts',
+			);
 
-		expect(harness).toContain('server.listen({ host: LOOPBACK_HOST, port: 0, exclusive: true }');
-		expect(harness).toContain("'--internal'");
-		expect(harness).toContain("'exec'");
-		expect(harness).toContain('network.Internal === true');
-		expect(harness).toContain('attachedNetworkNames.length === 1');
-		expect(harness).not.toContain("'--publish'");
-	});
+			expect(harness).toContain('server.listen({ host: LOOPBACK_HOST, port: 0, exclusive: true }');
+			expect(harness).toContain("'--internal'");
+			expect(harness).toContain("'exec'");
+			expect(harness).toContain('network.Internal === true');
+			expect(harness).toContain('attachedNetworkNames.length === 1');
+			expect(harness).not.toContain("'--publish'");
+		},
+	);
 
-	it('builds Radicale from the accepted immutable official Python base and exact version', async () => {
-		const dockerfiles = await findFilesNamed(cwd(), 'Dockerfile');
-		const radicaleDockerfiles: Array<{ path: string; source: string }> = [];
+	issue53It(
+		['HARNESS-005'],
+		'builds Radicale from the accepted immutable official Python base and exact version',
+		async () => {
+			const dockerfiles = await findFilesNamed(cwd(), 'Dockerfile');
+			const radicaleDockerfiles: Array<{ path: string; source: string }> = [];
 
-		for (const path of dockerfiles) {
-			const source = await readRepositoryFile(path);
-			if (/\bRadicale\b/i.test(source)) {
-				radicaleDockerfiles.push({ path, source });
+			for (const path of dockerfiles) {
+				const source = await readRepositoryFile(path);
+				if (/\bRadicale\b/i.test(source)) {
+					radicaleDockerfiles.push({ path, source });
+				}
 			}
-		}
 
-		expect(radicaleDockerfiles, 'expected exactly one test-only Radicale Dockerfile').toHaveLength(
-			1,
-		);
-		const [{ path, source }] = radicaleDockerfiles;
-		expect(path).toMatch(/^test\/integration\//);
-		expect(source).toMatch(new RegExp(`^FROM ${EXPECTED_PYTHON_BASE}$`, 'm'));
-		expect(source).toMatch(new RegExp(`(?:^|\\s)Radicale==${EXPECTED_RADICALE_VERSION}(?:\\s|$)`));
-		expect(source).not.toMatch(/^FROM\s+[^\s@]+(?:\s|$)/m);
-	});
+			expect(
+				radicaleDockerfiles,
+				'expected exactly one test-only Radicale Dockerfile',
+			).toHaveLength(1);
+			const [{ path, source }] = radicaleDockerfiles;
+			expect(path).toMatch(/^test\/integration\//);
+			expect(source).toMatch(new RegExp(`^FROM ${EXPECTED_PYTHON_BASE}$`, 'm'));
+			expect(source).toMatch(
+				new RegExp(`(?:^|\\s)Radicale==${EXPECTED_RADICALE_VERSION}(?:\\s|$)`),
+			);
+			expect(source).not.toMatch(/^FROM\s+[^\s@]+(?:\s|$)/m);
+		},
+	);
 
-	it('keeps Python, Radicale, and harness artifacts outside production dependencies and package files', async () => {
-		const manifest = await readPackageManifest();
-		const productionDependencies = Object.keys(manifest.dependencies ?? {});
-		const developmentDependencies = Object.keys(manifest.devDependencies ?? {});
+	issue53It(
+		['HARNESS-007'],
+		'keeps Python, Radicale, and harness artifacts outside production dependencies and package files',
+		async () => {
+			const manifest = await readPackageManifest();
+			const productionDependencies = Object.keys(manifest.dependencies ?? {});
+			const developmentDependencies = Object.keys(manifest.devDependencies ?? {});
 
-		expect(productionDependencies).not.toContain('radicale');
-		expect(productionDependencies).not.toContain('python');
-		expect(developmentDependencies).not.toContain('radicale');
-		expect(developmentDependencies).not.toContain('python');
-		expect(manifest.files).toEqual(['dist']);
-	});
+			expect(productionDependencies).not.toContain('radicale');
+			expect(productionDependencies).not.toContain('python');
+			expect(developmentDependencies).not.toContain('radicale');
+			expect(developmentDependencies).not.toContain('python');
+			expect(manifest.files).toEqual(['dist']);
+		},
+	);
 
-	it('keeps the production compiler boundary limited to credentials and node sources', async () => {
-		const tsconfig = JSON.parse(await readRepositoryFile('tsconfig.json')) as {
-			readonly include?: readonly string[];
-		};
+	issue53It(
+		['QUALITY-002'],
+		'keeps the production compiler boundary limited to credentials and node sources',
+		async () => {
+			const tsconfig = JSON.parse(await readRepositoryFile('tsconfig.json')) as {
+				readonly include?: readonly string[];
+			};
 
-		expect(tsconfig.include).toEqual([
-			'credentials/**/*',
-			'nodes/**/*',
-			'nodes/**/*.json',
-			'package.json',
-		]);
-		expect(tsconfig.include).not.toContain('test/**/*');
-	});
+			expect(tsconfig.include).toEqual([
+				'credentials/**/*',
+				'nodes/**/*',
+				'nodes/**/*.json',
+				'package.json',
+			]);
+			expect(tsconfig.include).not.toContain('test/**/*');
+		},
+	);
 });
