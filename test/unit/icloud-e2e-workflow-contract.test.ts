@@ -1,0 +1,53 @@
+// Repository reads are required for deterministic workflow contract tests.
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
+import { readFile } from 'node:fs/promises';
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
+import { resolve } from 'node:path';
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
+import { cwd } from 'node:process';
+
+import { describe, expect, it } from 'vitest';
+
+const workflowPath = resolve(cwd(), '.github/workflows/icloud-e2e.yml');
+const packagePath = resolve(cwd(), 'package.json');
+
+describe('iCloud E2E workflow contract', () => {
+	it('forces the documented dry run out of live mode before the subsequent opt-in run', async () => {
+		const packageManifest = JSON.parse(await readFile(packagePath, 'utf8')) as {
+			scripts: Record<string, string>;
+		};
+		const dryRun = packageManifest.scripts['test:e2e:icloud:dry-run'];
+		const compositeRun = packageManifest.scripts['test:e2e:icloud'];
+
+		expect(dryRun).toBe('CALDAV_ICLOUD_E2E_OPT_IN=0 vitest run --config vitest.e2e.config.mts');
+		expect(compositeRun).toBe(
+			'npm run test:e2e:icloud:dry-run && CALDAV_ICLOUD_E2E_OPT_IN=1 vitest run --config vitest.e2e.config.mts',
+		);
+	});
+
+	it('is manually dispatched, explicitly confirmed, main-only, and cannot persist checkout credentials', async () => {
+		const workflow = await readFile(workflowPath, 'utf8');
+		expect(workflow).toMatch(/^on:\n\s+workflow_dispatch:/m);
+		expect(workflow).not.toMatch(/^\s*(push|pull_request|schedule):/m);
+		expect(workflow).toMatch(/required:\s*true/);
+		expect(workflow).toMatch(/type:\s*boolean/);
+		expect(workflow).toMatch(/github\.ref\s*==\s*'refs\/heads\/main'/);
+		expect(workflow).toMatch(/contents:\s*read/);
+		expect(workflow).toMatch(/persist-credentials:\s*false/);
+	});
+
+	it('uses immutable actions, no artifacts, and isolates a calendar without making CI required', async () => {
+		const workflow = await readFile(workflowPath, 'utf8');
+		const actions = [...workflow.matchAll(/^\s*uses:\s*[^\s@]+@([^\s#]+)(?:\s|#|$)/gm)];
+		expect(actions).not.toHaveLength(0);
+		for (const action of actions) {
+			expect(action[1]).toMatch(/^[0-9a-f]{40}$/i);
+		}
+		expect(workflow).not.toMatch(/actions\/(upload|download)-artifact@/);
+		expect(workflow).toMatch(
+			/concurrency:[\s\S]{0,240}group:[\s\S]{0,240}(hashFiles|sha256|hash)/i,
+		);
+		// A workflow_dispatch-only workflow cannot become a PR-required check.
+		expect(workflow).not.toMatch(/^\s*(push|pull_request):/m);
+	});
+});
