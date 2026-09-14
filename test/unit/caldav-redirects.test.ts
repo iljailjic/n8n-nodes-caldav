@@ -242,33 +242,36 @@ describe('secure redirect target handling', () => {
 		expect(adapter.request).not.toHaveBeenCalled();
 	});
 
-	it('authenticates an approved iCloud entry-to-partition redirect', async () => {
-		let call = 0;
-		const adapter = mockAdapter(async () => {
-			call += 1;
-			return call === 1
-				? response(302, Buffer.alloc(0), {
-						Location: 'https://p42-caldav.icloud.com/account/principal/',
-					})
-				: response(207);
-		});
-		const result = await createCalDavTransport(
-			'https://caldav.icloud.com/account/',
-			adapter,
-		).request({
-			method: CalDavMethod.PROPFIND,
-		});
+	it.each(['p42-caldav.icloud.com', 'p123-caldav.icloud.com'])(
+		'authenticates an approved iCloud entry-to-partition redirect: %s',
+		async (partitionHost) => {
+			let call = 0;
+			const adapter = mockAdapter(async () => {
+				call += 1;
+				return call === 1
+					? response(302, Buffer.alloc(0), {
+							Location: `https://${partitionHost}/account/principal/`,
+						})
+					: response(207);
+			});
+			const result = await createCalDavTransport(
+				'https://caldav.icloud.com/account/',
+				adapter,
+			).request({
+				method: CalDavMethod.PROPFIND,
+			});
 
-		expect(adapter.request).toHaveBeenCalledTimes(2);
-		expect(adapter.request.mock.calls[1][0].url).toBe(
-			'https://p42-caldav.icloud.com/account/principal/',
-		);
-		expect(result.effectiveUrl).toBe('https://p42-caldav.icloud.com/account/principal/');
-		for (const [options] of adapter.request.mock.calls) {
-			expect(options.disableFollowRedirect).toBe(true);
-			expect(options.sendCredentialsOnCrossOriginRedirect).toBe(false);
-		}
-	});
+			expect(adapter.request).toHaveBeenCalledTimes(2);
+			expect(adapter.request.mock.calls[1][0].url).toBe(
+				`https://${partitionHost}/account/principal/`,
+			);
+			expect(result.effectiveUrl).toBe(`https://${partitionHost}/account/principal/`);
+			for (const [options] of adapter.request.mock.calls) {
+				expect(options.disableFollowRedirect).toBe(true);
+				expect(options.sendCredentialsOnCrossOriginRedirect).toBe(false);
+			}
+		},
+	);
 
 	it.each([
 		'https://p4-caldav.icloud.com/private',

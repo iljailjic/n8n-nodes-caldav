@@ -227,6 +227,90 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution requirements and
 [complete Radicale matrix](docs/RADICALE-INTEGRATION.md) lists every accepted
 issue-53 contract ID, its oracle, and failure interpretation.
 
+### Opt-in iCloud end-to-end tests
+
+The iCloud suite is a manual interoperability check, not a pull-request or
+scheduled check. Use a dedicated Apple account and an empty, dedicated test
+calendar that contains no personal events. Do not use a production account or
+calendar. The suite never creates or deletes calendar collections and refuses
+to operate unless discovery finds exactly one calendar whose display name is
+an exact match for the configured selector; it does not fall back to another
+calendar.
+
+Use an Apple app-specific password, not the Apple Account password. Create it
+for the dedicated account, store it only in the ignored local E2E environment
+file or the repository's GitHub Actions secrets, and revoke it after testing
+or rotate it if it may have been exposed. The required names are:
+
+```text
+CALDAV_ICLOUD_E2E_SERVER_URL
+CALDAV_ICLOUD_E2E_USERNAME
+CALDAV_ICLOUD_E2E_APP_PASSWORD
+CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME
+```
+
+`CALDAV_ICLOUD_E2E_SERVER_URL` must be an absolute `https://` URL without
+userinfo (username or password) or a fragment. Cleartext `http://` URLs are
+rejected before credentials are used or any transport request is made.
+
+Create the ignored local configuration from the committed placeholder file and
+replace every value in `.env.icloud-e2e`:
+
+```bash
+cp .env.icloud-e2e.example .env.icloud-e2e
+```
+
+The npm scripts load `.env.icloud-e2e` automatically through Node.js. The real
+file is covered by `.gitignore`; never force-add it or put live values in the
+committed example. The scripts control `CALDAV_ICLOUD_E2E_OPT_IN` themselves:
+the dry run forces it to `0`, and the composite live command sets it to `1`
+only after the dry run succeeds.
+
+Run the fake transport dry run first:
+
+```bash
+npm run test:e2e:icloud:dry-run
+```
+
+Only after that succeeds, and after confirming the dedicated account and empty
+calendar, run locally without repeating the credentials:
+
+```bash
+npm run test:e2e:icloud
+```
+
+The GitHub Actions workflow is `iCloud E2E (manual)` in
+`.github/workflows/icloud-e2e.yml`. It can be started only with
+`workflow_dispatch` on `main`, with the required boolean
+`confirm_live_icloud_e2e` explicitly enabled. Configure
+`CALDAV_ICLOUD_E2E_SERVER_URL`, `CALDAV_ICLOUD_E2E_USERNAME`,
+`CALDAV_ICLOUD_E2E_APP_PASSWORD`, and
+`CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME` as repository **Secrets**. The exact
+display-name selector is sensitive; never put live values in workflow files, commands
+committed to the repository, issues, or pull requests. GitHub injects these
+values directly; the workflow does not create or consume the local env file.
+It runs the fake dry run before the live job, uses least-privilege read-only
+repository access, and serializes runs per calendar scope. It is not a required
+CI or pull-request check.
+
+Every event created by a run has a fresh UUID `runId` and a matching UID/title
+prefix. Cleanup is attempted in a `finally` path and is limited to resources
+whose calendar URL, direct-child resource URL, UID, title prefix, run ID, and
+ETag prove ownership by that run. Conditional deletion refreshes stale ETags
+within a bounded retry budget and verifies that the resource is absent. If
+verification cannot complete, the result is
+`manual-cleanup-required`: stop using the account, inspect only the dedicated
+calendar, and remove the clearly run-owned events using the same run ID and
+UID/title templates. Never delete an event based only on a title, a broad
+calendar query, or a resource manifest. Revoke or rotate the app-specific
+password after resolving the incident.
+
+Output is limited to aggregate, privacy-safe evidence such as scenario names,
+counts, cleanup status, and stable error codes. Do not copy live responses,
+manifests, server or partition URLs, calendar names, XML, iCalendar data,
+event titles, credentials, or other event content into issues, logs, artifacts,
+or chat. No live execution is implied by this documentation.
+
 ## Security
 
 Do not include credentials, account-specific URLs, captured calendar responses,

@@ -3,6 +3,13 @@
 Changes from published releases and declared project milestones will be
 documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- Accepted exact two- and three-digit iCloud CalDAV partition hosts while retaining strict HTTPS, port, and hostname trust checks.
+- Made the local iCloud E2E command execute its protected dry run directly before the live phase instead of spawning a nested npm command.
+
 ## [0.6.0] - 2026-08-21
 
 ### Development checkpoint

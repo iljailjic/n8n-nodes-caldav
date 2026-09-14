@@ -130,6 +130,45 @@ describe('calendar-event direct-resource Get public contract', () => {
 });
 
 describe('calendar-event direct-resource containment', () => {
+	it('accepts percent-escape hex casing differences in an otherwise identical calendar path', async () => {
+		const calendarUrl = validateAbsoluteHttpUrl(
+			'https://calendar.example.test/calendars/%7eselected/',
+		);
+		const requestedUrl = resourceUrl(
+			'https://calendar.example.test/calendars/%7Eselected/event.ics',
+		);
+		const transport = mockTransport(async () =>
+			response(eventResource('percent-escape-case@example.test'), { effectiveUrl: requestedUrl }),
+		);
+
+		await getCalendarEventByResourceUrl(transport, calendarUrl, requestedUrl);
+
+		expect(transport.request).toHaveBeenCalledTimes(1);
+		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: requestedUrl });
+	});
+
+	it('treats an encoded slash as one opaque child segment but rejects a literal nested path', async () => {
+		const opaqueChild = resourceUrl(
+			'https://calendar.example.test/calendars/selected/opaque%2Fchild.ics',
+		);
+		const transport = mockTransport(async () =>
+			response(eventResource('opaque-child@example.test')),
+		);
+
+		await getCalendarEventByResourceUrl(transport, CALENDAR_URL, opaqueChild);
+
+		expect(transport.request).toHaveBeenCalledTimes(1);
+		const nestedTransport = mockTransport();
+		await expect(
+			getCalendarEventByResourceUrl(
+				nestedTransport,
+				CALENDAR_URL,
+				resourceUrl('https://calendar.example.test/calendars/selected/nested/child.ics'),
+			),
+		).rejects.toMatchObject({ code: CalendarEventResourceGetFailureCode.OUTSIDE_CALENDAR });
+		expect(nestedTransport.request).not.toHaveBeenCalled();
+	});
+
 	it.each([
 		['arbitrary name', 'arbitrary-resource'],
 		['non-ICS name', 'meeting.data'],
@@ -184,7 +223,7 @@ describe('calendar-event direct-resource containment', () => {
 });
 
 describe('calendar-event direct-resource request and mapping', () => {
-	it('performs one bodyless GET and maps the normalized calendar, effective URL, exact ETag and ICS once', async () => {
+	it('performs one bodyless GET and retains the requested direct-child URL when the effective URL differs', async () => {
 		const requestedUrl = resourceUrl(
 			'https://calendar.example.test/calendars/selected/requested-name?opaque=1',
 		);
@@ -214,7 +253,7 @@ describe('calendar-event direct-resource request and mapping', () => {
 		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: requestedUrl });
 		expect(result.event).toEqual({
 			calendarUrl: 'https://calendar.example.test/calendars/selected/?calendar=opaque',
-			resourceUrl: effectiveUrl,
+			resourceUrl: requestedUrl,
 			etag,
 			uid: 'exact uid ',
 			summary: '',
@@ -232,6 +271,24 @@ describe('calendar-event direct-resource request and mapping', () => {
 		expect(result.context.resource.originalIcs).toBe(ics.toString('utf8'));
 		expect(result.context.exceptions).toEqual([]);
 		expect(JSON.stringify(result)).not.toContain('attacker.invalid');
+		expect(JSON.stringify(result)).not.toContain('effective%2Fname');
+	});
+
+	it('retains the requested direct child when the effective URL is outside the selected calendar', async () => {
+		const requestedUrl = resourceUrl(
+			'https://calendar.example.test/calendars/selected/requested-resource?opaque=1',
+		);
+		const redirectedUrl = 'https://redirect.example.test/private/redirected-resource?opaque=2';
+		const transport = mockTransport(async () =>
+			response(eventResource('redirected-resource@example.test'), { effectiveUrl: redirectedUrl }),
+		);
+
+		const result = await getCalendarEventByResourceUrl(transport, CALENDAR_URL, requestedUrl);
+
+		expect(transport.request).toHaveBeenCalledTimes(1);
+		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: requestedUrl });
+		expect(result.event.resourceUrl).toBe(requestedUrl);
+		expect(JSON.stringify(result.event)).not.toContain('redirect.example.test');
 	});
 
 	it.each([

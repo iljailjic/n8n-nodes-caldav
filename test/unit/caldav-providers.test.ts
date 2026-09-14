@@ -30,6 +30,7 @@ describe('CalDAV provider adapters', () => {
 		'https://p00-caldav.icloud.com/',
 		'https://p42-caldav.icloud.com/account/',
 		'https://p99-caldav.icloud.com/',
+		'https://p123-caldav.icloud.com/account/',
 	])('trusts the exact iCloud CalDAV HTTPS:443 grammar: %s', (input) => {
 		expect(isTrustedICloudCalDavUrl(absoluteUrl(input))).toBe(true);
 	});
@@ -44,7 +45,7 @@ describe('CalDAV provider adapters', () => {
 		'https://caldav.icloud.com.example.test/',
 		'https://caldav.icloud.com../',
 		'https://p0-caldav.icloud.com/',
-		'https://p000-caldav.icloud.com/',
+		'https://p0000-caldav.icloud.com/',
 		'https://pab-caldav.icloud.com/',
 		'https://127.0.0.1/',
 		'https://[::1]/',
