@@ -3,6 +3,7 @@
 import { Readable } from 'node:stream';
 /* eslint-disable @n8n/community-nodes/no-restricted-globals, @n8n/community-nodes/require-node-api-error -- The opt-in test suite reads only its own environment and reports stable public-safe codes. */
 
+import type { IExecuteFunctions, ILoadOptionsFunctions, INode } from 'n8n-workflow';
 import { describe, expect, it } from 'vitest';
 
 import { CalDav } from '../../nodes/CalDav/CalDav.node';
@@ -71,6 +72,39 @@ function liveRequestAdapter(
 			};
 		},
 	};
+}
+
+function liveNode(): INode {
+	return {
+		id: 'icloud-read-only-e2e',
+		name: 'iCloud read-only E2E',
+		type: 'CUSTOM.calDav',
+		typeVersion: 1,
+		position: [0, 0],
+		parameters: {},
+	};
+}
+
+function liveNodeContext(
+	input: ReturnType<typeof readIcloudE2eInput>,
+	adapter: CalDavRequestHelperAdapter,
+	parameters: Readonly<Record<string, unknown>>,
+): IExecuteFunctions & ILoadOptionsFunctions {
+	return {
+		getInputData: () => [{ json: {} }],
+		getNodeParameter: (name: string) => parameters[name],
+		getCredentials: async () => ({
+			serverUrl: input.serverUrl,
+			username: input.username,
+			password: input.appPassword,
+		}),
+		continueOnFail: () => false,
+		getNode: liveNode,
+		helpers: {
+			httpRequestWithAuthentication: async (_credentialType, options) =>
+				await adapter.request(options as N8nCalDavRequestOptions),
+		},
+	} as unknown as IExecuteFunctions & ILoadOptionsFunctions;
 }
 
 describe('iCloud E2E discovery contract (fictional synthetic regressions)', () => {
@@ -174,10 +208,8 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live read-only discovery', (
 	it('validates capability, redirect-safe principal/home discovery, and the selected calendar list', async () => {
 		const input = liveInput!;
 		const observedMethods: CalDavMethod[] = [];
-		const transport = createCalDavTransport(
-			input.serverUrl,
-			liveRequestAdapter(input, observedMethods),
-		);
+		const adapter = liveRequestAdapter(input, observedMethods);
+		const transport = createCalDavTransport(input.serverUrl, adapter);
 		const scenarios: string[] = [];
 		const errorCodes: IcloudE2eErrorCode[] = [];
 		let outcome: 'passed' | 'failed' = 'failed';
@@ -210,7 +242,44 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live read-only discovery', (
 			);
 			assertE2e(canonicalizeIcloudE2eUrl(selected.url) === selected.url);
 			scenarios.push('calendar-list');
-			scenarios.push('resource-locator-get-contract');
+
+			const node = new CalDav();
+			const [many] = await node.execute.call(
+				liveNodeContext(input, adapter, {
+					resource: 'calendar',
+					operation: 'getMany',
+					returnAll: true,
+				}),
+			);
+			assertE2e(many.filter((item) => item.json.url === selected.url).length === 1);
+			scenarios.push('calendar-get-many');
+
+			const [byUrl] = await node.execute.call(
+				liveNodeContext(input, adapter, {
+					resource: 'calendar',
+					operation: 'get',
+					calendar: { __rl: true, mode: 'url', value: selected.url },
+				}),
+			);
+			assertE2e(byUrl.length === 1 && byUrl[0]?.json.url === selected.url);
+			scenarios.push('calendar-get-url');
+
+			const searchCalendars = node.methods.listSearch.searchCalendars;
+			const search = await searchCalendars.call(
+				liveNodeContext(input, adapter, {}),
+				input.calendarDisplayName,
+			);
+			const locatorMatches = search.results.filter((result) => result.value === selected.url);
+			assertE2e(locatorMatches.length === 1);
+			const [byLocator] = await node.execute.call(
+				liveNodeContext(input, adapter, {
+					resource: 'calendar',
+					operation: 'get',
+					calendar: { __rl: true, mode: 'list', value: locatorMatches[0]!.value },
+				}),
+			);
+			assertE2e(byLocator.length === 1 && byLocator[0]?.json.url === selected.url);
+			scenarios.push('resource-locator-search-get');
 			outcome = 'passed';
 		} catch (error) {
 			errorCodes.push(
