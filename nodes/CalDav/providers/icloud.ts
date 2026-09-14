@@ -9,7 +9,7 @@ import {
 	type CalDavProviderCalendarCollectionMetadata,
 } from './types';
 
-const ICLOUD_CALDAV_HOSTNAME = /^(?:caldav|p[0-9]{2}-caldav)\.icloud\.com$/;
+const ICLOUD_CALDAV_HOSTNAME = /^(?:caldav|p[0-9]{2,3}-caldav)\.icloud\.com$/;
 const ICLOUD_CALENDAR_NAMESPACE = 'http://apple.com/ns/ical/';
 const ICLOUD_CALENDAR_COLOR = Object.freeze({
 	namespaceUri: ICLOUD_CALENDAR_NAMESPACE,

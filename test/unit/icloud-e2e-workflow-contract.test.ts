@@ -12,6 +12,7 @@ const workflowPath = resolve(cwd(), '.github/workflows/icloud-e2e.yml');
 const packagePath = resolve(cwd(), 'package.json');
 const gitignorePath = resolve(cwd(), '.gitignore');
 const envExamplePath = resolve(cwd(), '.env.icloud-e2e.example');
+const e2eConfigPath = resolve(cwd(), 'vitest.e2e.config.mts');
 
 describe('iCloud E2E workflow contract', () => {
 	it('forces the documented dry run out of live mode before the subsequent opt-in run', async () => {
@@ -25,8 +26,9 @@ describe('iCloud E2E workflow contract', () => {
 			'CALDAV_ICLOUD_E2E_OPT_IN=0 node --env-file-if-exists=.env.icloud-e2e ./node_modules/vitest/vitest.mjs run --config vitest.e2e.config.mts',
 		);
 		expect(compositeRun).toBe(
-			'npm run test:e2e:icloud:dry-run && CALDAV_ICLOUD_E2E_OPT_IN=1 node --env-file-if-exists=.env.icloud-e2e ./node_modules/vitest/vitest.mjs run --config vitest.e2e.config.mts',
+			'CALDAV_ICLOUD_E2E_OPT_IN=0 node --env-file-if-exists=.env.icloud-e2e ./node_modules/vitest/vitest.mjs run --config vitest.e2e.config.mts && CALDAV_ICLOUD_E2E_OPT_IN=1 node --env-file-if-exists=.env.icloud-e2e ./node_modules/vitest/vitest.mjs run --config vitest.e2e.config.mts',
 		);
+		expect(compositeRun).not.toContain('npm run test:e2e:icloud:dry-run');
 	});
 
 	it('loads an ignored local env file while committing only placeholder values', async () => {
@@ -45,6 +47,11 @@ describe('iCloud E2E workflow contract', () => {
 		expect(example).not.toContain('CALDAV_ICLOUD_E2E_OPT_IN=1');
 	});
 
+	it('keeps the local cleanup diagnostic outside the normal E2E suite', async () => {
+		const e2eConfig = await readFile(e2eConfigPath, 'utf8');
+		expect(e2eConfig).toContain("'test/e2e/tmp-icloud-cleanup.e2e.test.ts'");
+	});
+
 	it('is manually dispatched, explicitly confirmed, main-only, and cannot persist checkout credentials', async () => {
 		const workflow = await readFile(workflowPath, 'utf8');
 		expect(workflow).toMatch(/^on:\n\s+workflow_dispatch:/m);
@@ -58,8 +65,9 @@ describe('iCloud E2E workflow contract', () => {
 			/CALDAV_ICLOUD_E2E_SERVER_URL:\s*\$\{\{ secrets\.CALDAV_ICLOUD_E2E_SERVER_URL \}\}/,
 		);
 		expect(workflow).toMatch(
-			/CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME:\s*\$\{\{ vars\.CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME \}\}/,
+			/CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME:\s*\$\{\{ secrets\.CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME \}\}/,
 		);
+		expect(workflow).not.toContain('vars.CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME');
 	});
 
 	it('uses immutable actions, no artifacts, and isolates a calendar without making CI required', async () => {

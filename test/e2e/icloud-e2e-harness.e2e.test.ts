@@ -313,16 +313,26 @@ describe('iCloud E2E test harness contract (fake transport)', () => {
 		).resolves.toEqual({ status: 'verified', attempts: 1 });
 	});
 
-	it('requires recovery ownership proof when a create response lacks URL, direct-child, fresh UID/runId, title prefix, or ETag proof', async () => {
-		const unsafe = { ...owned, parentUrl: 'https://caldav.example.test/calendars/other/' };
-		await expect(
-			createOrRecoverOwnedEvent(
-				fakeTransport({ create: async () => unsafe, reportByUid: async () => [] }),
-				calendarUrl,
-				{ uid: unsafe.uid, title: unsafe.title, runId, parentUrl: calendarUrl },
-				titlePrefix,
-			),
-		).rejects.toMatchObject({ code: IcloudE2eErrorCode.CREATE_RECOVERY_UNVERIFIABLE });
+	it('requires recovery ownership proof for the exact resource, UID/run ID, title prefix, and ETag', async () => {
+		const unsafeEvents: IcloudE2eEvent[] = [
+			{ ...owned, parentUrl: 'https://caldav.example.test/calendars/other/' },
+			{ ...owned, url: `${calendarUrl}nested/owned.ics` },
+			{ ...owned, uid: `${runId}-other` },
+			{ ...owned, runId: '00000000-0000-4000-8000-000000000000' },
+			{ ...owned, title: 'unowned event' },
+			{ ...owned, etag: '' },
+		];
+
+		for (const unsafe of unsafeEvents) {
+			await expect(
+				createOrRecoverOwnedEvent(
+					fakeTransport({ create: async () => unsafe, reportByUid: async () => [] }),
+					calendarUrl,
+					{ uid: owned.uid, title: owned.title, runId, parentUrl: calendarUrl },
+					titlePrefix,
+				),
+			).rejects.toMatchObject({ code: IcloudE2eErrorCode.CREATE_RECOVERY_UNVERIFIABLE });
+		}
 	});
 
 	it('rejects a same-origin sibling and a non-collection calendar URL as ownership proof', async () => {
@@ -467,16 +477,18 @@ describe('iCloud E2E test harness contract (fake transport)', () => {
 	});
 
 	it('reports manual-cleanup-required after the bounded stale retry budget and emits private-safe evidence', async () => {
+		let gets = 0;
 		const result = await cleanupOwnedEvent(
 			fakeTransport({
 				delete: async () => 'stale',
-				get: async () => ({ ...owned, etag: '"new"' }),
+				get: async () => ({ ...owned, etag: `"${++gets}"` }),
 			}),
 			owned,
 			calendarUrl,
 			titlePrefix,
 		);
 		expect(result).toEqual({ status: 'manual-cleanup-required', attempts: 3 });
+		expect(gets).toBe(2);
 		const evidence = serializeEvidence({
 			schemaVersion: 'icloud-e2e-evidence/v1',
 			mode: 'fake',

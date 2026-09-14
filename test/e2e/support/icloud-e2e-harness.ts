@@ -238,6 +238,10 @@ export async function cleanupOwnedEvent(
 		if (outcome === 'notFound') return { status: 'verified', attempts };
 		if (outcome === 'deleted' && !(await transport.get(current.url)))
 			return { status: 'verified', attempts };
+		// A third conditional DELETE after two stale revalidations is the bounded
+		// final attempt. It must not trigger another GET or retry cycle.
+		if (outcome === 'stale' && attempts === 3)
+			return { status: 'manual-cleanup-required', attempts };
 		const refreshed = await transport.get(current.url);
 		if (!refreshed) return { status: 'verified', attempts };
 		if (attempts === 3) return { status: 'manual-cleanup-required', attempts };

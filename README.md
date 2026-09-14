@@ -283,10 +283,10 @@ The GitHub Actions workflow is `iCloud E2E (manual)` in
 `.github/workflows/icloud-e2e.yml`. It can be started only with
 `workflow_dispatch` on `main`, with the required boolean
 `confirm_live_icloud_e2e` explicitly enabled. Configure
-`CALDAV_ICLOUD_E2E_SERVER_URL`, `CALDAV_ICLOUD_E2E_USERNAME`, and
-`CALDAV_ICLOUD_E2E_APP_PASSWORD` as repository **Secrets**. Configure
-`CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME` as a repository **Variable**. Never
-put live values in workflow files, commands
+`CALDAV_ICLOUD_E2E_SERVER_URL`, `CALDAV_ICLOUD_E2E_USERNAME`,
+`CALDAV_ICLOUD_E2E_APP_PASSWORD`, and
+`CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME` as repository **Secrets**. The exact
+display-name selector is sensitive; never put live values in workflow files, commands
 committed to the repository, issues, or pull requests. GitHub injects these
 values directly; the workflow does not create or consume the local env file.
 It runs the fake dry run before the live job, uses least-privilege read-only

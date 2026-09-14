@@ -46,7 +46,7 @@ jobs:
       - name: Derive calendar scope digest
         id: calendar-scope
         env:
-          CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME: ${{ vars.CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME }}
+          CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME: ${{ secrets.CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME }}
         run: |
           set -euo pipefail
           if [ -z "${CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME}" ]; then
@@ -67,7 +67,7 @@ jobs:
       CALDAV_ICLOUD_E2E_SERVER_URL: ${{ secrets.CALDAV_ICLOUD_E2E_SERVER_URL }}
       CALDAV_ICLOUD_E2E_USERNAME: ${{ secrets.CALDAV_ICLOUD_E2E_USERNAME }}
       CALDAV_ICLOUD_E2E_APP_PASSWORD: ${{ secrets.CALDAV_ICLOUD_E2E_APP_PASSWORD }}
-      CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME: ${{ vars.CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME }}
+      CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME: ${{ secrets.CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME }}
 
     steps:
       - name: Check out repository
