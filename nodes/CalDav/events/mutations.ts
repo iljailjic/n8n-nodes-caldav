@@ -80,6 +80,10 @@ function asciiLowercase(value: string): string {
 	);
 }
 
+function canonicalPathForContainment(pathname: string): string {
+	return pathname.replace(/%[\dA-Fa-f]{2}/g, (escape) => escape.toUpperCase());
+}
+
 function isDirectCalendarChild(
 	calendarUrl: AbsoluteHttpUrl,
 	resourceUrl: AbsoluteHttpUrl,
@@ -90,11 +94,13 @@ function isDirectCalendarChild(
 		if (calendar.origin !== resource.origin || !calendar.pathname.endsWith('/')) {
 			return false;
 		}
-		if (!resource.pathname.startsWith(calendar.pathname)) {
+		const calendarPathname = canonicalPathForContainment(calendar.pathname);
+		const resourcePathname = canonicalPathForContainment(resource.pathname);
+		if (!resourcePathname.startsWith(calendarPathname)) {
 			return false;
 		}
 
-		const child = resource.pathname.slice(calendar.pathname.length);
+		const child = resourcePathname.slice(calendarPathname.length);
 		return child.length > 0 && !child.endsWith('/') && !child.includes('/');
 	} catch {
 		return false;
@@ -143,13 +149,6 @@ function assertDirectCalendarChild(
 	}
 
 	return resourceUrl;
-}
-
-function validateEffectiveResourceUrl(
-	calendarUrl: AbsoluteHttpUrl,
-	effectiveUrl: string,
-): AbsoluteHttpUrl {
-	return assertDirectCalendarChild(calendarUrl, canonicalizeEffectiveResourceUrl(effectiveUrl));
 }
 
 interface HeaderLookup {
@@ -260,16 +259,15 @@ export async function getCalendarEventMutationEtag(
 		return fail(CalendarEventMutationFailureCode.INVALID_RESPONSE);
 	}
 
-	const effectiveResourceUrl = validateEffectiveResourceUrl(
-		target.calendarUrl,
-		response.effectiveUrl,
-	);
+	canonicalizeEffectiveResourceUrl(response.effectiveUrl);
 	const etag = getResponseEtag(response);
 	if (etag === undefined) {
 		return fail(CalendarEventMutationFailureCode.MISSING_ETAG);
 	}
 
-	return { resourceUrl: effectiveResourceUrl, etag };
+	// A redirect target is a transport concern, not a calendar-resource
+	// identifier. Keep the requested direct child for any following mutation.
+	return { resourceUrl: target.resourceUrl, etag };
 }
 
 export async function createCalendarEventResource(

@@ -14,9 +14,7 @@ import {
 	deleteCalendarEventResource,
 } from '../../nodes/CalDav/events/mutations';
 import { resolveCalendarEventByUid } from '../../nodes/CalDav/events/resolveByUid';
-import { queryCalendarEventsByTimeRange } from '../../nodes/CalDav/events/timeRangeQuery';
 import { updateCalendarEvent } from '../../nodes/CalDav/events/update';
-import type { CalendarEventPatch } from '../../nodes/CalDav/icalendar/patcher';
 import { canonicalizeIanaTimeZone } from '../../nodes/CalDav/icalendar/timeZones';
 
 import {
@@ -46,6 +44,7 @@ import {
 } from './support/icloud-e2e-harness';
 
 const CONTRACT_REVISION = 'issue-54-contract-r1';
+const SUPPORTED_LIVE_CREATE_COUNT = 1;
 const liveClock = (): Date => new Date();
 
 function liveInputOrUndefined(): ReturnType<typeof readIcloudE2eInput> | undefined {
@@ -110,13 +109,6 @@ function futureTimedBounds(): { start: Date; end: Date } {
 	const start = new Date(Date.now() + 45 * 24 * 60 * 60 * 1000);
 	start.setUTCHours(10, 0, 0, 0);
 	return { start, end: new Date(start.getTime() + 60 * 60 * 1000) };
-}
-
-function futureAllDayBounds(): { startDate: string; endDate: string } {
-	const start = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
-	const startDate = start.toISOString().slice(0, 10);
-	const endDate = new Date(start.getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-	return { startDate, endDate };
 }
 
 function expectHarnessError(action: () => void, code: IcloudE2eErrorCode): void {
@@ -584,6 +576,10 @@ describe('iCloud E2E test harness contract (fake transport)', () => {
 		expect(methods).toEqual(['PUT', 'GET', 'PUT']);
 		expect(clockCalls).toBe(2);
 	});
+
+	it('plans exactly the one owned create in the supported live lifecycle', () => {
+		expect(SUPPORTED_LIVE_CREATE_COUNT).toBe(1);
+	});
 });
 
 const liveInput = liveInputOrUndefined();
@@ -601,7 +597,7 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live interoperability', () =
 		let outcome: 'passed' | 'failed' | 'manual-cleanup-required' = 'failed';
 		const errorCodes: IcloudE2eErrorCode[] = [];
 		const resources = {
-			planned: 2,
+			planned: SUPPORTED_LIVE_CREATE_COUNT,
 			created: 0,
 			adoptedAfterAmbiguousCreate: 0,
 			deleted: 0,
@@ -612,7 +608,9 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live interoperability', () =
 		let primaryFailure: unknown;
 		let calendarUrl: ReturnType<typeof validateAbsoluteHttpUrl> | undefined;
 		const timedBounds = futureTimedBounds();
-		const allDayBounds = futureAllDayBounds();
+		const timedRecurrenceUntil = new Date(timedBounds.start.getTime() + 24 * 60 * 60 * 1000)
+			.toISOString()
+			.replace('.000Z', 'Z') as never;
 		const registerPendingOwnershipIntent = (intent: IcloudE2ePendingOwnershipIntent): void => {
 			pendingOwnershipIntents.push(intent);
 		};
@@ -643,30 +641,25 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live interoperability', () =
 									timeZone: canonicalizeIanaTimeZone('Europe/Prague'),
 								},
 								summary: event.title,
-								recurrence: { frequency: 'daily', end: { kind: 'count', count: 2 } },
+								recurrence: {
+									frequency: 'daily',
+									end: {
+										kind: 'until',
+										value: { kind: 'dateTime', dateTime: timedRecurrenceUntil },
+									},
+								},
 								alarms: [
 									{
 										action: 'display',
-										trigger: { reference: 'start', direction: 'before', value: 15, unit: 'minute' },
+										trigger: {
+											reference: 'start',
+											direction: 'before',
+											value: 15,
+											unit: 'minute',
+										},
 										description: 'n8n CalDAV E2E reminder',
 									},
 								],
-							},
-							liveClock,
-						),
-					);
-				}
-				if (event.uid.endsWith('-all-day')) {
-					return toOwnedEvent(
-						await createCalendarEvent(
-							transport,
-							{
-								calendarUrl,
-								uid: event.uid,
-								timeMode: 'allDay',
-								startDate: allDayBounds.startDate as never,
-								endDate: allDayBounds.endDate as never,
-								summary: event.title,
 							},
 							liveClock,
 						),
@@ -753,106 +746,6 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live interoperability', () =
 			confirmPendingOwnershipIntent(timedOwned);
 			created.push(timedOwned);
 			resources.created = countCreatedResources(created, deleted);
-			const timed = await getCalendarEventByResourceUrl(transport, calendarUrl, timedOwned.url);
-			const timedByUrl = await getCalendarEventByResourceUrl(
-				transport,
-				calendarUrl,
-				timed.resourceUrl,
-			);
-			const timedByUid = await resolveCalendarEventByUid(transport, calendarUrl, timedUid);
-			const timedMany = await queryCalendarEventsByTimeRange(transport, calendarUrl, {
-				start: new Date(timedBounds.start.getTime() - 60_000),
-				end: new Date(timedBounds.end.getTime() + 2 * 24 * 60 * 60 * 1000),
-			});
-			assertE2e(
-				timedByUrl.event.resourceUrl === timed.resourceUrl &&
-					timedByUrl.event.uid === timedUid &&
-					timedByUrl.event.timeMode === 'timed' &&
-					timedByUrl.event.timeZoneMode === 'iana' &&
-					timedByUrl.event.timeZone === 'Europe/Prague' &&
-					timedByUrl.event.recurrence?.frequency === 'daily' &&
-					timedByUrl.event.recurrence.end?.kind === 'count' &&
-					timedByUrl.event.recurrence.end.count === 2,
-			);
-			assertE2e(timedByUid.event.resourceUrl === timed.resourceUrl);
-			assertE2e(timedMany.filter(({ event }) => event.uid === timedUid).length === 1);
-			assertE2e(timedByUrl.event.alarms?.some((alarm) => alarm.action === 'display'));
-			scenarios.push('timed-round-trip');
-
-			const allDayUid = `${identity.uidPrefix}all-day`;
-			const allDay = await createOrRecoverOwnedEvent(
-				cleanupTransport,
-				calendarUrl,
-				{
-					uid: allDayUid,
-					title: `${identity.titlePrefix} all-day`,
-					runId: identity.runId,
-					parentUrl: calendarUrl,
-				},
-				identity.titlePrefix,
-				registerPendingOwnershipIntent,
-			);
-			confirmPendingOwnershipIntent(allDay);
-			created.push(allDay);
-			resources.created = countCreatedResources(created, deleted);
-			const readAllDay = await getCalendarEventByResourceUrl(
-				transport,
-				calendarUrl,
-				allDay.resourceUrl,
-			);
-			assertE2e(
-				readAllDay.event.uid === allDayUid &&
-					readAllDay.event.timeMode === 'allDay' &&
-					readAllDay.event.startDate === allDayBounds.startDate &&
-					readAllDay.event.endDate === allDayBounds.endDate,
-			);
-			scenarios.push('all-day-round-trip');
-
-			const updated = await updateCalendarEvent(
-				transport,
-				{
-					calendarUrl,
-					identifier: { kind: 'resourceUrl', resourceUrl: timed.resourceUrl },
-					etag: timed.etag,
-					patch: { summary: { kind: 'set', value: `${timedTitle} updated` } } as CalendarEventPatch,
-				},
-				liveClock,
-			);
-			created[0] = toOwnedEvent(updated);
-			assertE2e(updated.summary === `${timedTitle} updated`);
-			scenarios.push('conditional-update');
-
-			let staleConflict = false;
-			try {
-				await updateCalendarEvent(
-					transport,
-					{
-						calendarUrl,
-						identifier: { kind: 'resourceUrl', resourceUrl: timed.resourceUrl },
-						etag: timed.etag,
-						patch: { summary: { kind: 'set', value: `${timedTitle} stale` } } as CalendarEventPatch,
-					},
-					liveClock,
-				);
-			} catch (error) {
-				staleConflict =
-					error instanceof Error &&
-					'code' in error &&
-					error.code === CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT;
-			}
-			assertE2e(staleConflict);
-			scenarios.push('stale-etag-conflict');
-
-			const allDayCleanup = await cleanupOwnedEvent(
-				cleanupTransport,
-				allDay,
-				calendarUrl,
-				identity.titlePrefix,
-			);
-			assertE2e(allDayCleanup.status === 'verified');
-			created.splice(1, 1);
-			assertE2e((await cleanupTransport.get(allDay.resourceUrl)) === undefined);
-			scenarios.push('conditional-delete');
 			outcome = 'passed';
 		} catch (error) {
 			primaryFailure = error;

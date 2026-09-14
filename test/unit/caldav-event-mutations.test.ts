@@ -204,7 +204,7 @@ describe('calendar-event mutation containment', () => {
 		['sibling collection', 'https://calendar.example.test/calendars/sibling/event.ics'],
 		['calendar itself', 'https://calendar.example.test/calendars/selected/'],
 		['ancestor', 'https://calendar.example.test/calendars/event.ics'],
-		['nested child', 'https://calendar.example.test/calendars/selected/nested/event.ics'],
+		['nested literal child', 'https://calendar.example.test/calendars/selected/nested/event.ics'],
 		['case mismatch', 'https://calendar.example.test/calendars/Selected/event.ics'],
 		['query-only child', 'https://calendar.example.test/calendars/selected/?event.ics'],
 	] as const)('rejects %s before a credential-bearing request', async (_label, value) => {
@@ -229,10 +229,39 @@ describe('calendar-event mutation containment', () => {
 			expect(transport.request).not.toHaveBeenCalled();
 		}
 	});
+
+	it('accepts equivalent percent-escape hex casing without decoding opaque encoded slashes', async () => {
+		const encodedCalendarUrl = resourceUrl(
+			'https://calendar.example.test/calendars/%7eowned-calendar/',
+		);
+		const opaqueDirectChild = resourceUrl(
+			'https://calendar.example.test/calendars/%7Eowned-calendar/opaque%2Fresource.ics',
+		);
+		const transport = mockTransport(async () =>
+			response({ statusCode: 201, effectiveUrl: opaqueDirectChild }),
+		);
+
+		await expect(
+			createCalendarEventResource(transport, encodedCalendarUrl, opaqueDirectChild, CALENDAR_DATA),
+		).resolves.toEqual({
+			statusCode: 201,
+			resourceUrl: opaqueDirectChild,
+			etag: ' W/"response-etag" ',
+		});
+		expect(transport.request).toHaveBeenCalledWith({
+			method: CalDavMethod.PUT,
+			url: opaqueDirectChild,
+			headers: {
+				'Content-Type': 'text/calendar; charset=utf-8',
+				'If-None-Match': '*',
+			},
+			body: CALENDAR_DATA,
+		});
+	});
 });
 
 describe('calendar-event ETag lookup', () => {
-	it('performs one bodyless GET and returns its canonical effective URL and exact ETag', async () => {
+	it('performs one bodyless GET and retains the requested direct-child URL with its exact ETag', async () => {
 		const effectiveUrl = 'https://CALENDAR.example.test:443/calendars/selected/opaque%2Fname?x=%2F';
 		const etag = ' W/"opaque value" ';
 		const transport = mockTransport(async () =>
@@ -246,7 +275,7 @@ describe('calendar-event ETag lookup', () => {
 		await expect(
 			getCalendarEventMutationEtag(transport, CALENDAR_URL, RESOURCE_URL),
 		).resolves.toEqual({
-			resourceUrl: 'https://calendar.example.test/calendars/selected/opaque%2Fname?x=%2F',
+			resourceUrl: RESOURCE_URL,
 			etag,
 		});
 		expect(transport.request).toHaveBeenCalledTimes(1);
@@ -264,23 +293,31 @@ describe('calendar-event ETag lookup', () => {
 		).resolves.toEqual({ resourceUrl: RESOURCE_URL, etag: '' });
 	});
 
-	it('checks status and effective URL before ETag presence', async () => {
+	it('checks status before ETag presence', async () => {
 		const invalidStatus = mockTransport(async () =>
 			response({ statusCode: 207, includeEtag: false }),
 		);
-		const outside = mockTransport(async () =>
+		await expect(
+			getCalendarEventMutationEtag(invalidStatus, CALENDAR_URL, RESOURCE_URL),
+		).rejects.toMatchObject({ code: CalendarEventMutationFailureCode.INVALID_RESPONSE });
+	});
+
+	it('retains the requested direct child when an ETag lookup has an out-of-calendar effective URL', async () => {
+		const transport = mockTransport(async () =>
 			response({
 				effectiveUrl: 'https://other.example.test/private-sentinel',
-				includeEtag: false,
+				etag: ' W/"redirected response validator" ',
 			}),
 		);
 
 		await expect(
-			getCalendarEventMutationEtag(invalidStatus, CALENDAR_URL, RESOURCE_URL),
-		).rejects.toMatchObject({ code: CalendarEventMutationFailureCode.INVALID_RESPONSE });
-		await expect(
-			getCalendarEventMutationEtag(outside, CALENDAR_URL, RESOURCE_URL),
-		).rejects.toMatchObject({ code: CalendarEventMutationFailureCode.OUTSIDE_CALENDAR });
+			getCalendarEventMutationEtag(transport, CALENDAR_URL, RESOURCE_URL),
+		).resolves.toEqual({
+			resourceUrl: RESOURCE_URL,
+			etag: ' W/"redirected response validator" ',
+		});
+		expect(transport.request).toHaveBeenCalledTimes(1);
+		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: RESOURCE_URL });
 	});
 
 	it('maps a malformed effective URL to INVALID_RESPONSE before ETag inspection', async () => {
@@ -467,7 +504,7 @@ describe('calendar-event conditional update', () => {
 			{ method: CalDavMethod.GET, url: RESOURCE_URL },
 			{
 				method: CalDavMethod.PUT,
-				url: effectiveUrl,
+				url: RESOURCE_URL,
 				headers: {
 					'If-Match': fetchedEtag,
 					'Content-Type': 'text/calendar; charset=utf-8',
@@ -572,7 +609,7 @@ describe('calendar-event conditional delete', () => {
 			{ method: CalDavMethod.GET, url: RESOURCE_URL },
 			{
 				method: CalDavMethod.DELETE,
-				url: effectiveUrl,
+				url: RESOURCE_URL,
 				headers: { 'If-Match': '"fresh-delete"' },
 			},
 		]);

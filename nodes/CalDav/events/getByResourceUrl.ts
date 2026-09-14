@@ -42,6 +42,10 @@ function fail(code: CalendarEventResourceGetFailureCode): never {
 	throw new CalDavCalendarEventResourceGetError(code);
 }
 
+function canonicalPathForContainment(pathname: string): string {
+	return pathname.replace(/%[\dA-Fa-f]{2}/g, (escape) => escape.toUpperCase());
+}
+
 function isDirectCalendarChild(
 	calendarUrl: AbsoluteHttpUrl,
 	resourceUrl: AbsoluteHttpUrl,
@@ -49,14 +53,12 @@ function isDirectCalendarChild(
 	try {
 		const calendar = new URL(calendarUrl);
 		const resource = new URL(resourceUrl);
-		if (calendar.origin !== resource.origin || !calendar.pathname.endsWith('/')) {
-			return false;
-		}
-		if (!resource.pathname.startsWith(calendar.pathname)) {
-			return false;
-		}
+		if (calendar.origin !== resource.origin || !calendar.pathname.endsWith('/')) return false;
+		const calendarPathname = canonicalPathForContainment(calendar.pathname);
+		const resourcePathname = canonicalPathForContainment(resource.pathname);
+		if (!resourcePathname.startsWith(calendarPathname)) return false;
 
-		const child = resource.pathname.slice(calendar.pathname.length);
+		const child = resourcePathname.slice(calendarPathname.length);
 		return child.length > 0 && !child.endsWith('/') && !child.includes('/');
 	} catch {
 		return false;
@@ -95,9 +97,8 @@ export async function getCalendarEventByResourceUrl(
 		return fail(CalendarEventResourceGetFailureCode.INVALID_RESPONSE);
 	}
 
-	let effectiveResourceUrl: AbsoluteHttpUrl;
 	try {
-		effectiveResourceUrl = validateAbsoluteHttpUrl(response.effectiveUrl);
+		validateAbsoluteHttpUrl(response.effectiveUrl);
 	} catch {
 		return fail(CalendarEventResourceGetFailureCode.INVALID_RESPONSE);
 	}
@@ -115,7 +116,10 @@ export async function getCalendarEventByResourceUrl(
 	return await mapCalendarEventResourceWithTimeZoneContext(
 		{
 			calendarUrl: normalizedCalendarUrl,
-			resourceUrl: effectiveResourceUrl,
+			// A redirect target is a transport concern, not a calendar-resource
+			// identifier. The requested URL was validated as a direct child before
+			// the credential-bearing GET, so retain it as the event identity.
+			resourceUrl: canonicalResourceUrl,
 			...(response.etag === undefined ? {} : { etag: response.etag }),
 			resource,
 		},
