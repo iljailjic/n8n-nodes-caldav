@@ -261,7 +261,7 @@ describe('calendar-event mutation containment', () => {
 });
 
 describe('calendar-event ETag lookup', () => {
-	it('performs one bodyless GET and retains the requested direct-child URL with its exact ETag', async () => {
+	it('performs one bodyless GET and returns its canonical direct-child URL with its exact ETag', async () => {
 		const effectiveUrl = 'https://CALENDAR.example.test:443/calendars/selected/opaque%2Fname?x=%2F';
 		const etag = ' W/"opaque value" ';
 		const transport = mockTransport(async () =>
@@ -275,7 +275,7 @@ describe('calendar-event ETag lookup', () => {
 		await expect(
 			getCalendarEventMutationEtag(transport, CALENDAR_URL, RESOURCE_URL),
 		).resolves.toEqual({
-			resourceUrl: RESOURCE_URL,
+			resourceUrl: resourceUrl(effectiveUrl),
 			etag,
 		});
 		expect(transport.request).toHaveBeenCalledTimes(1);
@@ -302,7 +302,7 @@ describe('calendar-event ETag lookup', () => {
 		).rejects.toMatchObject({ code: CalendarEventMutationFailureCode.INVALID_RESPONSE });
 	});
 
-	it('retains the requested direct child when an ETag lookup has an out-of-calendar effective URL', async () => {
+	it('rejects an ETag lookup with an out-of-calendar effective URL', async () => {
 		const transport = mockTransport(async () =>
 			response({
 				effectiveUrl: 'https://other.example.test/private-sentinel',
@@ -312,10 +312,7 @@ describe('calendar-event ETag lookup', () => {
 
 		await expect(
 			getCalendarEventMutationEtag(transport, CALENDAR_URL, RESOURCE_URL),
-		).resolves.toEqual({
-			resourceUrl: RESOURCE_URL,
-			etag: ' W/"redirected response validator" ',
-		});
+		).rejects.toMatchObject({ code: CalendarEventMutationFailureCode.OUTSIDE_CALENDAR });
 		expect(transport.request).toHaveBeenCalledTimes(1);
 		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: RESOURCE_URL });
 	});
@@ -504,7 +501,7 @@ describe('calendar-event conditional update', () => {
 			{ method: CalDavMethod.GET, url: RESOURCE_URL },
 			{
 				method: CalDavMethod.PUT,
-				url: RESOURCE_URL,
+				url: effectiveUrl,
 				headers: {
 					'If-Match': fetchedEtag,
 					'Content-Type': 'text/calendar; charset=utf-8',
@@ -609,7 +606,7 @@ describe('calendar-event conditional delete', () => {
 			{ method: CalDavMethod.GET, url: RESOURCE_URL },
 			{
 				method: CalDavMethod.DELETE,
-				url: RESOURCE_URL,
+				url: effectiveUrl,
 				headers: { 'If-Match': '"fresh-delete"' },
 			},
 		]);

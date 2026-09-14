@@ -259,15 +259,16 @@ export async function getCalendarEventMutationEtag(
 		return fail(CalendarEventMutationFailureCode.INVALID_RESPONSE);
 	}
 
-	canonicalizeEffectiveResourceUrl(response.effectiveUrl);
+	const effectiveResourceUrl = assertDirectCalendarChild(
+		target.calendarUrl,
+		canonicalizeEffectiveResourceUrl(response.effectiveUrl),
+	);
 	const etag = getResponseEtag(response);
 	if (etag === undefined) {
 		return fail(CalendarEventMutationFailureCode.MISSING_ETAG);
 	}
 
-	// A redirect target is a transport concern, not a calendar-resource
-	// identifier. Keep the requested direct child for any following mutation.
-	return { resourceUrl: target.resourceUrl, etag };
+	return { resourceUrl: effectiveResourceUrl, etag };
 }
 
 export async function createCalendarEventResource(
