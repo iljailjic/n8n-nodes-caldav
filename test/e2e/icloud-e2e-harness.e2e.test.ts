@@ -1,24 +1,25 @@
-// The live adapter intentionally adapts real HTTP streams to the production transport.
+// The live adapter intentionally adapts iCloud HTTP streams to the production transport.
 // eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { Readable } from 'node:stream';
-import { randomUUID } from 'node:crypto';
-/* eslint-disable @n8n/community-nodes/no-restricted-globals, @n8n/community-nodes/require-node-api-error -- The opt-in test suite reads its own live-run environment and models transport failures without an n8n execution context. */
+/* eslint-disable @n8n/community-nodes/no-restricted-globals, @n8n/community-nodes/require-node-api-error -- The opt-in test suite reads only its own environment and reports stable public-safe codes. */
 
+import type { IExecuteFunctions, ILoadOptionsFunctions, INode } from 'n8n-workflow';
 import { describe, expect, it } from 'vitest';
 
-import { discoverCalendarsForCurrentUser } from '../../nodes/CalDav/discovery/calendarDiscovery';
-import { createCalendarEvent } from '../../nodes/CalDav/events/create';
-import { getCalendarEventByResourceUrl } from '../../nodes/CalDav/events/getByResourceUrl';
+import { CalDav } from '../../nodes/CalDav/CalDav.node';
+import { discoverCalendarCollections } from '../../nodes/CalDav/discovery/calendarCollections';
+import { discoverCalendarHome } from '../../nodes/CalDav/discovery/calendarHome';
 import {
-	CalendarEventMutationFailureCode,
-	deleteCalendarEventResource,
-} from '../../nodes/CalDav/events/mutations';
-import { resolveCalendarEventByUid } from '../../nodes/CalDav/events/resolveByUid';
-import { updateCalendarEvent } from '../../nodes/CalDav/events/update';
-import { canonicalizeIanaTimeZone } from '../../nodes/CalDav/icalendar/timeZones';
-
+	CalDavCapabilityValidationError,
+	validateCalDavCapability,
+} from '../../nodes/CalDav/discovery/capabilities';
 import {
-	CalDavNotFoundError,
+	discoverCurrentUserPrincipal,
+	CurrentUserPrincipalDiscoveryKind,
+} from '../../nodes/CalDav/discovery/currentUserPrincipal';
+import { defaultCalDavProviderRegistry } from '../../nodes/CalDav/providers/registry';
+import {
+	CalDavMethod,
 	createCalDavTransport,
 	type CalDavRequestHelperAdapter,
 	type N8nCalDavRequestOptions,
@@ -27,49 +28,36 @@ import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 
 import {
 	assertE2e,
-	cleanupOwnedEvents,
-	countCreatedResources,
-	createOrRecoverOwnedEvent,
-	createRunIdentity,
-	cleanupOwnedEvent,
+	canonicalizeIcloudE2eUrl,
 	IcloudE2eErrorCode,
 	IcloudE2eHarnessError,
-	type IcloudE2ePendingOwnershipIntent,
 	readIcloudE2eInput,
 	selectExactCalendar,
 	serializeEvidence,
-	throwIfCleanupEscalated,
-	type IcloudE2eEvent,
-	type IcloudE2eTransport,
 } from './support/icloud-e2e-harness';
 
-const CONTRACT_REVISION = 'issue-54-contract-r1';
-const SUPPORTED_LIVE_CREATE_COUNT = 1;
-const liveClock = (): Date => new Date();
+const CONTRACT_REVISION = 'issue-55-contract-r1' as const;
+const READ_ONLY_METHODS = new Set<CalDavMethod>([CalDavMethod.OPTIONS, CalDavMethod.PROPFIND]);
 
 function liveInputOrUndefined(): ReturnType<typeof readIcloudE2eInput> | undefined {
-	if (process.env.CALDAV_ICLOUD_E2E_OPT_IN !== '1') return undefined;
-	return readIcloudE2eInput(process.env);
+	return process.env.CALDAV_ICLOUD_E2E_OPT_IN === '1' ? readIcloudE2eInput(process.env) : undefined;
 }
 
 function liveRequestAdapter(
 	input: ReturnType<typeof readIcloudE2eInput>,
+	observedMethods: CalDavMethod[],
 ): CalDavRequestHelperAdapter {
 	return {
 		async request(options: N8nCalDavRequestOptions) {
-			const body =
-				typeof options.body === 'string'
-					? options.body
-					: Buffer.isBuffer(options.body)
-						? options.body.toString('utf8')
-						: undefined;
+			assertE2e(READ_ONLY_METHODS.has(options.method));
+			observedMethods.push(options.method);
 			const response = await fetch(options.url, {
 				method: options.method,
 				headers: {
 					...options.headers,
 					Authorization: `Basic ${Buffer.from(`${input.username}:${input.appPassword}`, 'utf8').toString('base64')}`,
 				},
-				...(body === undefined ? {} : { body }),
+				...(options.body === undefined ? {} : { body: options.body }),
 				redirect: 'manual',
 				signal: AbortSignal.timeout(30_000),
 			});
@@ -86,710 +74,236 @@ function liveRequestAdapter(
 	};
 }
 
-function toOwnedEvent(
-	event: Awaited<ReturnType<typeof getCalendarEventByResourceUrl>>['event'],
-): IcloudE2eEvent {
-	if (event.etag === undefined || event.summary === undefined) {
-		throw new IcloudE2eHarnessError(IcloudE2eErrorCode.OWNERSHIP_PROOF_FAILED);
-	}
-	const runId = /^\[n8n-caldav-e2e ([0-9a-f-]{36})\]/i.exec(event.summary)?.[1];
-	if (runId === undefined)
-		throw new IcloudE2eHarnessError(IcloudE2eErrorCode.OWNERSHIP_PROOF_FAILED);
+function liveNode(): INode {
 	return {
-		url: event.resourceUrl,
-		etag: event.etag,
-		uid: event.uid,
-		title: event.summary,
-		runId,
-		parentUrl: event.calendarUrl,
+		id: 'icloud-read-only-e2e',
+		name: 'iCloud read-only E2E',
+		type: 'CUSTOM.calDav',
+		typeVersion: 1,
+		position: [0, 0],
+		parameters: {},
 	};
 }
 
-function futureTimedBounds(): { start: Date; end: Date } {
-	const start = new Date(Date.now() + 45 * 24 * 60 * 60 * 1000);
-	start.setUTCHours(10, 0, 0, 0);
-	return { start, end: new Date(start.getTime() + 60 * 60 * 1000) };
-}
-
-function expectHarnessError(action: () => void, code: IcloudE2eErrorCode): void {
-	try {
-		action();
-	} catch (error) {
-		expect(error).toMatchObject({ code });
-		return;
-	}
-	throw new Error('The E2E harness did not reject the invalid input.');
-}
-
-const calendarUrl = 'https://caldav.example.test/calendars/dedicated/';
-const runId = 'f0b1c2d3-e4f5-4a67-8b9c-0d1e2f3a4b5c';
-const titlePrefix = `[n8n-caldav-e2e ${runId}]`;
-const owned: IcloudE2eEvent = {
-	url: `${calendarUrl}owned.ics`,
-	etag: '"one"',
-	uid: `${runId}-timed`,
-	title: `${titlePrefix} timed`,
-	runId,
-	parentUrl: calendarUrl,
-};
-
-function fakeTransport(overrides: Partial<IcloudE2eTransport> = {}): IcloudE2eTransport {
+function liveNodeContext(
+	input: ReturnType<typeof readIcloudE2eInput>,
+	adapter: CalDavRequestHelperAdapter,
+	parameters: Readonly<Record<string, unknown>>,
+): IExecuteFunctions & ILoadOptionsFunctions {
 	return {
-		listCalendars: async () => [{ displayName: 'Dedicated', url: calendarUrl }],
-		create: async (input) => ({ ...owned, ...input }),
-		reportByUid: async () => [owned],
-		get: async () => undefined,
-		delete: async () => 'deleted',
-		...overrides,
-	};
+		getInputData: () => [{ json: {} }],
+		getNodeParameter: (name: string) => parameters[name],
+		getCredentials: async () => ({
+			serverUrl: input.serverUrl,
+			username: input.username,
+			password: input.appPassword,
+		}),
+		continueOnFail: () => false,
+		getNode: liveNode,
+		helpers: {
+			httpRequestWithAuthentication: async (_credentialType, options) =>
+				await adapter.request(options as N8nCalDavRequestOptions),
+		},
+	} as unknown as IExecuteFunctions & ILoadOptionsFunctions;
 }
 
-describe('iCloud E2E test harness contract (fake transport)', () => {
-	it('requires explicit opt-in and exact, credential-free input boundaries', () => {
+describe('iCloud E2E discovery contract (fictional synthetic regressions)', () => {
+	it('requires opt-in HTTPS input and canonicalizes identity without retaining secrets', () => {
 		expect(() => readIcloudE2eInput({})).toThrow(IcloudE2eHarnessError);
-		expect(() => readIcloudE2eInput({ CALDAV_ICLOUD_E2E_OPT_IN: 'true' })).toThrow(
-			IcloudE2eHarnessError,
-		);
 		expect(() =>
 			readIcloudE2eInput({
 				CALDAV_ICLOUD_E2E_OPT_IN: '1',
-				CALDAV_ICLOUD_E2E_SERVER_URL: 'https://user:secret@example.test/',
-				CALDAV_ICLOUD_E2E_USERNAME: 'user',
-				CALDAV_ICLOUD_E2E_APP_PASSWORD: 'secret',
-				CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME: 'Dedicated',
+				CALDAV_ICLOUD_E2E_SERVER_URL: 'https://user:secret@calendar.example.test/',
+				CALDAV_ICLOUD_E2E_USERNAME: 'fictional-user',
+				CALDAV_ICLOUD_E2E_APP_PASSWORD: 'fictional-password',
+				CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME: 'Fictional Calendar',
 			}),
 		).toThrow(IcloudE2eHarnessError);
-		expect(() =>
-			readIcloudE2eInput({
-				CALDAV_ICLOUD_E2E_OPT_IN: '1',
-				CALDAV_ICLOUD_E2E_SERVER_URL: 'http://caldav.example.test/',
-				CALDAV_ICLOUD_E2E_USERNAME: 'user',
-				CALDAV_ICLOUD_E2E_APP_PASSWORD: 'secret',
-				CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME: 'Dedicated',
-			}),
-		).toThrow(IcloudE2eHarnessError);
-		expect(() =>
-			readIcloudE2eInput({
-				CALDAV_ICLOUD_E2E_OPT_IN: '1',
-				CALDAV_ICLOUD_E2E_SERVER_URL: 'https://caldav.example.test/account#private-fragment',
-				CALDAV_ICLOUD_E2E_USERNAME: 'user',
-				CALDAV_ICLOUD_E2E_APP_PASSWORD: 'secret',
-				CALDAV_ICLOUD_E2E_CALENDAR_DISPLAY_NAME: 'Dedicated',
-			}),
-		).toThrow(IcloudE2eHarnessError);
-		expectHarnessError(
-			() =>
-				readIcloudE2eInput({
-					CALDAV_ICLOUD_E2E_OPT_IN: '1',
-					CALDAV_ICLOUD_E2E_SERVER_URL:
-						'https://caldav.example.test/account#private-fragment-before-credentials',
-				}),
-			IcloudE2eErrorCode.INPUT_INVALID,
+		expect(canonicalizeIcloudE2eUrl('https://CALENDAR.example.test:443/discovery/../dav/')).toBe(
+			'https://calendar.example.test/dav/',
 		);
 	});
 
-	it('selects a calendar only by exact display name and canonical URL identity', () => {
+	it('selects exactly one fictional calendar by canonical URL identity', () => {
 		expect(
-			selectExactCalendar([{ displayName: 'Dedicated', url: calendarUrl }], 'Dedicated').url,
-		).toBe(calendarUrl);
-		expectHarnessError(
-			() => selectExactCalendar([{ displayName: 'dedicated', url: calendarUrl }], 'Dedicated'),
-			IcloudE2eErrorCode.CALENDAR_NOT_FOUND,
-		);
-		expectHarnessError(
-			() =>
-				selectExactCalendar(
-					[
-						{ displayName: 'Dedicated', url: calendarUrl },
-						{ displayName: 'Dedicated', url: `${calendarUrl}other/` },
-					],
-					'Dedicated',
-				),
-			IcloudE2eErrorCode.CALENDAR_AMBIGUOUS,
-		);
-	});
-
-	it('uses UUIDv4 run identities and adopts exactly one ownership-proven ambiguous create result', async () => {
-		expect(createRunIdentity(() => runId)).toMatchObject({ runId, titlePrefix });
-		const pending: IcloudE2ePendingOwnershipIntent[] = [];
-		const calls: string[] = [];
-		const adopted = await createOrRecoverOwnedEvent(
-			fakeTransport({
-				create: async () => {
-					calls.push('put');
-					throw new Error('response lost');
-				},
-				reportByUid: async () => {
-					calls.push('report');
-					return [owned];
-				},
-			}),
-			calendarUrl,
-			{ uid: owned.uid, title: owned.title, runId, parentUrl: calendarUrl },
-			titlePrefix,
-			(intent) => {
-				calls.push('intent');
-				pending.push(intent);
-			},
-		);
-		expect(adopted).toEqual(owned);
-		expect(pending).toEqual([
-			{ uid: owned.uid, title: owned.title, runId, parentUrl: calendarUrl },
-		]);
-		expect(calls).toEqual(['intent', 'put', 'report']);
-		await expect(
-			createOrRecoverOwnedEvent(
-				fakeTransport({
-					create: async () => {
-						throw new Error('response lost');
+			selectExactCalendar(
+				[
+					{
+						displayName: 'Fictional Calendar',
+						url: 'https://CALENDAR.example.test:443/dav/calendars/',
 					},
-					reportByUid: async () => [owned, owned],
-				}),
-				calendarUrl,
-				{ uid: owned.uid, title: owned.title, runId, parentUrl: calendarUrl },
-				titlePrefix,
+				],
+				'Fictional Calendar',
 			),
-		).rejects.toMatchObject({ code: IcloudE2eErrorCode.CREATE_RECOVERY_UNVERIFIABLE });
-	});
-
-	it('recovers an ownership-unproven create response once, then leaves an unresolved intent for manual cleanup', async () => {
-		let reports = 0;
-		const pending: IcloudE2ePendingOwnershipIntent[] = [];
-		await expect(
-			createOrRecoverOwnedEvent(
-				fakeTransport({
-					create: async () => ({ ...owned, parentUrl: 'https://caldav.example.test/other/' }),
-					reportByUid: async () => {
-						reports += 1;
-						return [];
-					},
-				}),
-				calendarUrl,
-				{ uid: owned.uid, title: owned.title, runId, parentUrl: calendarUrl },
-				titlePrefix,
-				(intent) => pending.push(intent),
-			),
-		).rejects.toMatchObject({ code: IcloudE2eErrorCode.CREATE_RECOVERY_UNVERIFIABLE });
-		expect(reports).toBe(1);
-		expect(pending).toEqual([
-			{ uid: owned.uid, title: owned.title, runId, parentUrl: calendarUrl },
-		]);
-	});
-
-	it('registers a recovered all-day create for ownership-checked cleanup', async () => {
-		const cleanupLedger: IcloudE2eEvent[] = [];
-		const allDay = { ...owned, uid: `${runId}-all-day`, title: `${titlePrefix} all-day` };
-		const recovered = await createOrRecoverOwnedEvent(
-			fakeTransport({
-				create: async () => {
-					throw new Error('post-PUT response lost');
-				},
-				reportByUid: async (_selectedCalendarUrl, uid) => (uid === allDay.uid ? [allDay] : []),
-			}),
-			calendarUrl,
-			{ uid: allDay.uid, title: allDay.title, runId, parentUrl: calendarUrl },
-			titlePrefix,
-		);
-		cleanupLedger.push(recovered);
-		expect(cleanupLedger).toEqual([allDay]);
-		expect(countCreatedResources([], 0)).toBe(0);
-		expect(countCreatedResources(cleanupLedger, 0)).toBe(1);
-		expect(countCreatedResources(cleanupLedger, 1)).toBe(2);
-		await expect(
-			cleanupOwnedEvent(
-				fakeTransport({ delete: async () => 'deleted', get: async () => undefined }),
-				cleanupLedger[0]!,
-				calendarUrl,
-				titlePrefix,
-			),
-		).resolves.toEqual({ status: 'verified', attempts: 1 });
-	});
-
-	it('requires recovery ownership proof for the exact resource, UID/run ID, title prefix, and ETag', async () => {
-		const unsafeEvents: IcloudE2eEvent[] = [
-			{ ...owned, parentUrl: 'https://caldav.example.test/calendars/other/' },
-			{ ...owned, url: `${calendarUrl}nested/owned.ics` },
-			{ ...owned, uid: `${runId}-other` },
-			{ ...owned, runId: '00000000-0000-4000-8000-000000000000' },
-			{ ...owned, title: 'unowned event' },
-			{ ...owned, etag: '' },
-		];
-
-		for (const unsafe of unsafeEvents) {
-			await expect(
-				createOrRecoverOwnedEvent(
-					fakeTransport({ create: async () => unsafe, reportByUid: async () => [] }),
-					calendarUrl,
-					{ uid: owned.uid, title: owned.title, runId, parentUrl: calendarUrl },
-					titlePrefix,
-				),
-			).rejects.toMatchObject({ code: IcloudE2eErrorCode.CREATE_RECOVERY_UNVERIFIABLE });
+		).toEqual({
+			displayName: 'Fictional Calendar',
+			url: 'https://calendar.example.test/dav/calendars/',
+		});
+		let notFound: unknown;
+		try {
+			selectExactCalendar([], 'Fictional Calendar');
+		} catch (error) {
+			notFound = error;
 		}
+		expect(notFound).toMatchObject({ code: IcloudE2eErrorCode.CALENDAR_NOT_FOUND });
+		let ambiguous: unknown;
+		try {
+			selectExactCalendar(
+				[
+					{ displayName: 'Fictional Calendar', url: 'https://calendar.example.test/a/' },
+					{ displayName: 'Fictional Calendar', url: 'https://calendar.example.test/b/' },
+				],
+				'Fictional Calendar',
+			);
+		} catch (error) {
+			ambiguous = error;
+		}
+		expect(ambiguous).toMatchObject({ code: IcloudE2eErrorCode.CALENDAR_AMBIGUOUS });
 	});
 
-	it('rejects a same-origin sibling and a non-collection calendar URL as ownership proof', async () => {
-		const sibling = {
-			...owned,
-			url: 'https://caldav.example.test/calendars/dedicated-sibling.ics',
-		};
-		await expect(
-			createOrRecoverOwnedEvent(
-				fakeTransport({ create: async () => sibling, reportByUid: async () => [] }),
-				calendarUrl,
-				{ uid: sibling.uid, title: sibling.title, runId, parentUrl: calendarUrl },
-				titlePrefix,
-			),
-		).rejects.toMatchObject({ code: IcloudE2eErrorCode.CREATE_RECOVERY_UNVERIFIABLE });
-		await expect(
-			createOrRecoverOwnedEvent(
-				fakeTransport({
-					create: async (input) => ({
-						...owned,
-						...input,
-						url: `${calendarUrl}owned.ics`,
-					}),
-				}),
-				calendarUrl.slice(0, -1),
-				{ uid: owned.uid, title: owned.title, runId, parentUrl: calendarUrl.slice(0, -1) },
-				titlePrefix,
-			),
-		).rejects.toMatchObject({ code: IcloudE2eErrorCode.CREATE_RECOVERY_UNVERIFIABLE });
-	});
-
-	it('makes manual cleanup fail after evidence unless an earlier primary failure is in flight', async () => {
-		expect(() => throwIfCleanupEscalated('manual-cleanup-required', undefined)).toThrow(
-			IcloudE2eHarnessError,
-		);
-		const primaryFailure = new Error('primary failure');
-		const runWithPrimaryFailure = async (): Promise<void> => {
-			let capturedPrimaryFailure: unknown;
-			try {
-				throw primaryFailure;
-			} catch (error) {
-				capturedPrimaryFailure = error;
-				throw error;
-			} finally {
-				throwIfCleanupEscalated('manual-cleanup-required', capturedPrimaryFailure);
-			}
-		};
-		await expect(runWithPrimaryFailure()).rejects.toBe(primaryFailure);
-	});
-
-	it('keeps manual cleanup required when a later owned event is verified', async () => {
-		const cleaned: string[] = [];
-		const summary = await cleanupOwnedEvents(
-			[owned, { ...owned, uid: `${runId}-second`, url: `${calendarUrl}second.ics` }],
-			async (event) => {
-				cleaned.push(event.uid);
-				return {
-					status: event.uid === owned.uid ? 'manual-cleanup-required' : 'verified',
-					attempts: 1,
-				};
-			},
-		);
-		expect(cleaned).toEqual([owned.uid, `${runId}-second`]);
-		expect(summary).toEqual({
-			cleanup: 'manual-cleanup-required',
-			manualCleanupRequired: 1,
-			errorCodes: [IcloudE2eErrorCode.CLEANUP_INCOMPLETE],
-		});
-		expect(() => throwIfCleanupEscalated(summary.cleanup, undefined)).toThrow(
-			IcloudE2eHarnessError,
-		);
-	});
-
-	it('continues cleanup after a transport failure and preserves privacy-safe failure evidence', async () => {
-		const second = { ...owned, uid: `${runId}-second`, url: `${calendarUrl}second.ics` };
-		const cleaned: string[] = [];
-		const summary = await cleanupOwnedEvents([owned, second], async (event) => {
-			cleaned.push(event.uid);
-			if (event.uid === owned.uid) throw new Error('transport response contained private data');
-			return { status: 'verified', attempts: 1 };
-		});
+	it('emits only privacy-safe, discovery-only evidence', () => {
 		const evidence = serializeEvidence({
-			schemaVersion: 'icloud-e2e-evidence/v1',
+			schemaVersion: 'icloud-e2e-evidence/v2',
 			mode: 'fake',
-			runId,
 			sourceRevision: CONTRACT_REVISION,
-			outcome: 'manual-cleanup-required',
-			scenarios: ['cleanup'],
-			counts: { created: 2, deleted: 1, deleteAttempts: 2 },
-			resources: {
-				planned: 2,
-				created: 2,
-				adoptedAfterAmbiguousCreate: 0,
-				deleted: 1,
-				alreadyAbsent: 0,
-				manualCleanupRequired: summary.manualCleanupRequired,
-			},
-			cleanup: summary.cleanup,
-			errorCodes: summary.errorCodes,
-		});
-		expect(cleaned).toEqual([owned.uid, second.uid]);
-		expect(summary).toEqual({
-			cleanup: 'manual-cleanup-required',
-			manualCleanupRequired: 1,
-			errorCodes: [IcloudE2eErrorCode.TRANSPORT_FAILED],
+			outcome: 'passed',
+			scenarios: [
+				'capability',
+				'redirect-principal-home',
+				'calendar-list',
+				'resource-locator-get-contract',
+			],
+			requestMethods: ['OPTIONS', 'PROPFIND'],
+			errorCodes: [],
 		});
 		expect(evidence).toMatch(/^ICLOUD_E2E_EVIDENCE /);
-		expect(evidence).not.toContain('private data');
-		expect(evidence).not.toContain(calendarUrl);
-		expect(() => throwIfCleanupEscalated(summary.cleanup, undefined)).toThrow(
-			IcloudE2eHarnessError,
-		);
+		expect(evidence).not.toContain('fictional-password');
+		expect(evidence).not.toContain('calendar.example.test');
+		expect(evidence).not.toContain('GET');
+		expect(evidence).not.toContain('PUT');
+		expect(evidence).not.toContain('DELETE');
 	});
 
-	it('maps a failed harness assertion to its stable public-safe error code', () => {
-		expectHarnessError(() => assertE2e(false), IcloudE2eErrorCode.ASSERTION_FAILED);
-	});
-
-	it('retries stale conditional cleanup at most twice and verifies a deleted resource as absent', async () => {
-		let deletes = 0;
-		const result = await cleanupOwnedEvent(
-			fakeTransport({
-				delete: async () => (++deletes < 3 ? 'stale' : 'notFound'),
-				get: async () => ({ ...owned, etag: `"${deletes}"` }),
-			}),
-			owned,
-			calendarUrl,
-			titlePrefix,
+	it('keeps the established event Get resource-locator contract synthetic and out of live I/O', () => {
+		const properties = new CalDav().description.properties;
+		const calendar = properties.find((property) => property.name === 'calendar');
+		const eventGet = properties.find(
+			(property) =>
+				property.name === 'operation' && property.displayOptions?.show?.resource?.includes('event'),
 		);
-		expect(result).toEqual({ status: 'verified', attempts: 3 });
-		expect(deletes).toBe(3);
-	});
-
-	it('verifies cleanup when a stale delete is followed by a fresh absent GET', async () => {
-		const result = await cleanupOwnedEvent(
-			fakeTransport({ delete: async () => 'stale', get: async () => undefined }),
-			owned,
-			calendarUrl,
-			titlePrefix,
-		);
-		expect(result).toEqual({ status: 'verified', attempts: 1 });
-	});
-
-	it('reports manual-cleanup-required after the bounded stale retry budget and emits private-safe evidence', async () => {
-		let gets = 0;
-		const result = await cleanupOwnedEvent(
-			fakeTransport({
-				delete: async () => 'stale',
-				get: async () => ({ ...owned, etag: `"${++gets}"` }),
-			}),
-			owned,
-			calendarUrl,
-			titlePrefix,
-		);
-		expect(result).toEqual({ status: 'manual-cleanup-required', attempts: 3 });
-		expect(gets).toBe(2);
-		const evidence = serializeEvidence({
-			schemaVersion: 'icloud-e2e-evidence/v1',
-			mode: 'fake',
-			runId,
-			sourceRevision: 'issue-54-contract-r1',
-			outcome: 'manual-cleanup-required',
-			scenarios: ['cleanup'],
-			counts: { created: 1, deleted: 0, deleteAttempts: 3 },
-			resources: {
-				planned: 1,
-				created: 1,
-				adoptedAfterAmbiguousCreate: 0,
-				deleted: 0,
-				alreadyAbsent: 0,
-				manualCleanupRequired: 1,
-			},
-			cleanup: result.status,
-			errorCodes: [IcloudE2eErrorCode.CLEANUP_INCOMPLETE],
+		expect(calendar).toMatchObject({
+			type: 'resourceLocator',
+			default: { mode: 'url', value: '' },
 		});
-		expect(evidence).toMatch(/^ICLOUD_E2E_EVIDENCE /);
-		expect(evidence).not.toContain('CALDAV_ICLOUD_E2E_APP_PASSWORD');
-		expect(evidence).not.toContain(calendarUrl);
-		expect(evidence).not.toContain(owned.title);
-	});
-
-	it('uses a clocked production mutation signature with an offline request adapter', async () => {
-		const methods: string[] = [];
-		let clockCalls = 0;
-		const adapter: CalDavRequestHelperAdapter = {
-			request: async (options) => {
-				methods.push(options.method);
-				if (options.method === 'GET') {
-					return {
-						statusCode: 200,
-						headers: { etag: '"clocked"' },
-						body: Readable.from(
-							Buffer.from(
-								[
-									'BEGIN:VCALENDAR',
-									'VERSION:2.0',
-									'BEGIN:VEVENT',
-									`UID:${runId}-clocked-update`,
-									'DTSTAMP:20400101T000000Z',
-									'DTSTART:20400201T100000Z',
-									'DTEND:20400201T110000Z',
-									'SUMMARY:Before offline update',
-									'END:VEVENT',
-									'END:VCALENDAR',
-									'',
-								].join('\r\n'),
-							),
-						),
-					};
-				}
-				throw new Error('offline adapter');
-			},
-		};
-		const transport = createCalDavTransport('https://caldav.example.test/', adapter);
-		const clock = () => {
-			clockCalls += 1;
-			return new Date('2040-01-01T00:00:00.000Z');
-		};
-		const calendar = validateAbsoluteHttpUrl(calendarUrl);
-		await expect(
-			createCalendarEvent(
-				transport,
-				{
-					calendarUrl: calendar,
-					uid: `${runId}-clocked-create`,
-					timeMode: 'timed',
-					start: new Date('2040-02-01T10:00:00.000Z'),
-					end: new Date('2040-02-01T11:00:00.000Z'),
-					summary: `${titlePrefix} clocked create`,
-				},
-				clock,
-			),
-		).rejects.toBeInstanceOf(Error);
-		await expect(
-			updateCalendarEvent(
-				transport,
-				{
-					calendarUrl: calendar,
-					identifier: {
-						kind: 'resourceUrl',
-						resourceUrl: `${calendarUrl}clocked-update.ics`,
-					},
-					etag: '"clocked"',
-					patch: { summary: { kind: 'set', value: `${titlePrefix} clocked update` } },
-				},
-				clock,
-			),
-		).rejects.toBeInstanceOf(Error);
-		expect(methods).toEqual(['PUT', 'GET', 'PUT']);
-		expect(clockCalls).toBe(2);
-	});
-
-	it('plans exactly the one owned create in the supported live lifecycle', () => {
-		expect(SUPPORTED_LIVE_CREATE_COUNT).toBe(1);
+		expect(eventGet?.options).toContainEqual(
+			expect.objectContaining({ name: 'Get', value: 'get' }),
+		);
+		expect(READ_ONLY_METHODS.has(CalDavMethod.GET)).toBe(false);
 	});
 });
 
 const liveInput = liveInputOrUndefined();
 
-describe.runIf(liveInput !== undefined)('iCloud E2E live interoperability', () => {
-	it('uses production discovery and event services without touching resources outside this run', async () => {
+describe.runIf(liveInput !== undefined)('iCloud E2E live read-only discovery', () => {
+	it('validates capability, redirect-safe principal/home discovery, and the selected calendar list', async () => {
 		const input = liveInput!;
-		const identity = createRunIdentity(randomUUID);
+		const observedMethods: CalDavMethod[] = [];
+		const adapter = liveRequestAdapter(input, observedMethods);
+		const transport = createCalDavTransport(input.serverUrl, adapter);
 		const scenarios: string[] = [];
-		const created: IcloudE2eEvent[] = [];
-		const pendingOwnershipIntents: IcloudE2ePendingOwnershipIntent[] = [];
-		let deleted = 0;
-		let deleteAttempts = 0;
-		let cleanup: 'verified' | 'manual-cleanup-required' | 'not-needed' = 'not-needed';
-		let outcome: 'passed' | 'failed' | 'manual-cleanup-required' = 'failed';
 		const errorCodes: IcloudE2eErrorCode[] = [];
-		const resources = {
-			planned: SUPPORTED_LIVE_CREATE_COUNT,
-			created: 0,
-			adoptedAfterAmbiguousCreate: 0,
-			deleted: 0,
-			alreadyAbsent: 0,
-			manualCleanupRequired: 0,
-		};
-		const transport = createCalDavTransport(input.serverUrl, liveRequestAdapter(input));
-		let primaryFailure: unknown;
-		let calendarUrl: ReturnType<typeof validateAbsoluteHttpUrl> | undefined;
-		const timedBounds = futureTimedBounds();
-		const timedRecurrenceUntil = new Date(timedBounds.start.getTime() + 24 * 60 * 60 * 1000)
-			.toISOString()
-			.replace('.000Z', 'Z') as never;
-		const registerPendingOwnershipIntent = (intent: IcloudE2ePendingOwnershipIntent): void => {
-			pendingOwnershipIntents.push(intent);
-		};
-		const confirmPendingOwnershipIntent = (event: IcloudE2eEvent): void => {
-			const index = pendingOwnershipIntents.findIndex((intent) => intent.uid === event.uid);
-			assertE2e(index !== -1);
-			pendingOwnershipIntents.splice(index, 1);
-		};
-
-		const cleanupTransport: IcloudE2eTransport = {
-			listCalendars: async () => [],
-			create: async (event) => {
-				if (calendarUrl === undefined) {
-					throw new IcloudE2eHarnessError(IcloudE2eErrorCode.OWNERSHIP_PROOF_FAILED);
-				}
-				if (event.uid.endsWith('-timed')) {
-					return toOwnedEvent(
-						await createCalendarEvent(
-							transport,
-							{
-								calendarUrl,
-								uid: event.uid,
-								timeMode: 'timed',
-								start: timedBounds.start,
-								end: timedBounds.end,
-								timeZone: {
-									timeZoneMode: 'iana',
-									timeZone: canonicalizeIanaTimeZone('Europe/Prague'),
-								},
-								summary: event.title,
-								recurrence: {
-									frequency: 'daily',
-									end: {
-										kind: 'until',
-										value: { kind: 'dateTime', dateTime: timedRecurrenceUntil },
-									},
-								},
-								alarms: [
-									{
-										action: 'display',
-										trigger: {
-											reference: 'start',
-											direction: 'before',
-											value: 15,
-											unit: 'minute',
-										},
-										description: 'n8n CalDAV E2E reminder',
-									},
-								],
-							},
-							liveClock,
-						),
-					);
-				}
-				throw new IcloudE2eHarnessError(IcloudE2eErrorCode.OWNERSHIP_PROOF_FAILED);
-			},
-			reportByUid: async (selectedCalendarUrl, uid) => {
-				const resolved = await resolveCalendarEventByUid(
-					transport,
-					validateAbsoluteHttpUrl(selectedCalendarUrl),
-					uid,
-				);
-				resources.adoptedAfterAmbiguousCreate += 1;
-				return [toOwnedEvent(resolved.event)];
-			},
-			get: async (url) => {
-				if (calendarUrl === undefined) return undefined;
-				try {
-					return toOwnedEvent(
-						(
-							await getCalendarEventByResourceUrl(
-								transport,
-								calendarUrl,
-								validateAbsoluteHttpUrl(url),
-							)
-						).event,
-					);
-				} catch (error) {
-					if (error instanceof CalDavNotFoundError) return undefined;
-					throw error;
-				}
-			},
-			delete: async (url, etag) => {
-				if (calendarUrl === undefined) return 'notFound';
-				deleteAttempts += 1;
-				try {
-					await deleteCalendarEventResource(
-						transport,
-						calendarUrl,
-						validateAbsoluteHttpUrl(url),
-						etag,
-					);
-					deleted += 1;
-					resources.deleted += 1;
-					return 'deleted';
-				} catch (error) {
-					if (
-						error instanceof Error &&
-						'code' in error &&
-						error.code === CalendarEventMutationFailureCode.CONCURRENCY_CONFLICT
-					) {
-						return 'stale';
-					}
-					if (error instanceof CalDavNotFoundError) {
-						resources.alreadyAbsent += 1;
-						return 'notFound';
-					}
-					throw error;
-				}
-			},
-		};
+		let outcome: 'passed' | 'failed' = 'failed';
 
 		try {
+			await validateCalDavCapability(transport);
+			scenarios.push('capability');
+
+			const principal = await discoverCurrentUserPrincipal(transport);
+			assertE2e(principal.kind === CurrentUserPrincipalDiscoveryKind.AUTHENTICATED);
+			assertE2e(canonicalizeIcloudE2eUrl(principal.principalUrl) === principal.principalUrl);
+			const home = await discoverCalendarHome(transport, principal.principalUrl);
+			assertE2e(canonicalizeIcloudE2eUrl(home.calendarHomeUrl) === home.calendarHomeUrl);
+			scenarios.push('redirect-principal-home');
+
+			const provider = defaultCalDavProviderRegistry.select(
+				validateAbsoluteHttpUrl(transport.serverUrl),
+			);
+			const calendars = await discoverCalendarCollections(
+				transport,
+				home.calendarHomeUrl,
+				provider,
+			);
 			const selected = selectExactCalendar(
-				(await discoverCalendarsForCurrentUser(transport)).map((calendar) => ({
+				calendars.map((calendar) => ({
 					displayName: calendar.displayName ?? '',
 					url: calendar.url,
 				})),
 				input.calendarDisplayName,
 			);
-			calendarUrl = validateAbsoluteHttpUrl(selected.url);
-			scenarios.push('discover-calendar');
+			assertE2e(canonicalizeIcloudE2eUrl(selected.url) === selected.url);
+			scenarios.push('calendar-list');
 
-			const timedUid = `${identity.uidPrefix}timed`;
-			const timedTitle = `${identity.titlePrefix} timed`;
-			const timedOwned = await createOrRecoverOwnedEvent(
-				cleanupTransport,
-				calendarUrl,
-				{ uid: timedUid, title: timedTitle, runId: identity.runId, parentUrl: calendarUrl },
-				identity.titlePrefix,
-				registerPendingOwnershipIntent,
+			const node = new CalDav();
+			const [many] = await node.execute.call(
+				liveNodeContext(input, adapter, {
+					resource: 'calendar',
+					operation: 'getMany',
+					returnAll: true,
+				}),
 			);
-			confirmPendingOwnershipIntent(timedOwned);
-			created.push(timedOwned);
-			resources.created = countCreatedResources(created, deleted);
+			assertE2e(many.filter((item) => item.json.url === selected.url).length === 1);
+			scenarios.push('calendar-get-many');
+
+			const [byUrl] = await node.execute.call(
+				liveNodeContext(input, adapter, {
+					resource: 'calendar',
+					operation: 'get',
+					calendar: { __rl: true, mode: 'url', value: selected.url },
+				}),
+			);
+			assertE2e(byUrl.length === 1 && byUrl[0]?.json.url === selected.url);
+			scenarios.push('calendar-get-url');
+
+			const searchCalendars = node.methods.listSearch.searchCalendars;
+			const search = await searchCalendars.call(
+				liveNodeContext(input, adapter, {}),
+				input.calendarDisplayName,
+			);
+			const locatorMatches = search.results.filter((result) => result.value === selected.url);
+			assertE2e(locatorMatches.length === 1);
+			const [byLocator] = await node.execute.call(
+				liveNodeContext(input, adapter, {
+					resource: 'calendar',
+					operation: 'get',
+					calendar: { __rl: true, mode: 'list', value: locatorMatches[0]!.value },
+				}),
+			);
+			assertE2e(byLocator.length === 1 && byLocator[0]?.json.url === selected.url);
+			scenarios.push('resource-locator-search-get');
 			outcome = 'passed';
 		} catch (error) {
-			primaryFailure = error;
-			if (error instanceof IcloudE2eHarnessError) errorCodes.push(error.code);
+			errorCodes.push(
+				error instanceof IcloudE2eHarnessError
+					? error.code
+					: error instanceof CalDavCapabilityValidationError
+						? IcloudE2eErrorCode.CAPABILITY_FAILED
+						: IcloudE2eErrorCode.DISCOVERY_FAILED,
+			);
 			throw error;
 		} finally {
-			const cleanupSummary = await cleanupOwnedEvents([...created], (event) =>
-				cleanupOwnedEvent(
-					cleanupTransport,
-					event,
-					calendarUrl ?? event.parentUrl,
-					identity.titlePrefix,
-				),
-			);
-			cleanup = cleanupSummary.cleanup;
-			resources.manualCleanupRequired += cleanupSummary.manualCleanupRequired;
-			errorCodes.push(...cleanupSummary.errorCodes);
-			if (pendingOwnershipIntents.length > 0) {
-				// These intents never enter the deletion ledger: their recovery did
-				// not prove a unique, owned resource URL, so deleting would be a guess.
-				cleanup = 'manual-cleanup-required';
-				resources.manualCleanupRequired += pendingOwnershipIntents.length;
-				errorCodes.push(
-					...pendingOwnershipIntents.map(() => IcloudE2eErrorCode.CREATE_RECOVERY_UNVERIFIABLE),
-				);
-			}
-			if (cleanup === 'manual-cleanup-required') outcome = 'manual-cleanup-required';
-			scenarios.push('cleanup');
-			// eslint-disable-next-line no-console -- Live evidence is deliberately emitted to the manually dispatched job log.
+			assertE2e(observedMethods.every((method) => READ_ONLY_METHODS.has(method)));
+			// eslint-disable-next-line no-console -- The manual workflow log receives only aggregate, privacy-safe evidence.
 			console.info(
 				serializeEvidence({
-					schemaVersion: 'icloud-e2e-evidence/v1',
+					schemaVersion: 'icloud-e2e-evidence/v2',
 					mode: 'live',
-					runId: identity.runId,
 					sourceRevision: CONTRACT_REVISION,
 					outcome,
 					scenarios,
-					counts: { created: resources.created, deleted, deleteAttempts },
-					resources,
-					cleanup,
+					requestMethods: [...new Set(observedMethods)],
 					errorCodes,
 				}),
 			);
-			throwIfCleanupEscalated(cleanup, primaryFailure);
 		}
 	});
 });

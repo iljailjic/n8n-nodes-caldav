@@ -229,12 +229,13 @@ issue-53 contract ID, its oracle, and failure interpretation.
 
 ### Opt-in iCloud end-to-end tests
 
-The iCloud suite is a manual interoperability check, not a pull-request or
-scheduled check. Use a dedicated Apple account and an empty, dedicated test
-calendar that contains no personal events. Do not use a production account or
-calendar. The suite never creates or deletes calendar collections and refuses
-to operate unless discovery finds exactly one calendar whose display name is
-an exact match for the configured selector; it does not fall back to another
+The iCloud suite is an opt-in, discovery-only interoperability check, not a
+pull-request or scheduled check. Use a dedicated Apple account and calendar;
+do not use a production account or calendar. The suite validates capability,
+principal and calendar-home discovery, and exact calendar selection. It does
+not read events or mutate calendars, events, or collections, and it refuses to
+operate unless discovery finds exactly one calendar whose display name is an
+exact match for the configured selector; it does not fall back to another
 calendar.
 
 Use an Apple app-specific password, not the Apple Account password. Create it
@@ -293,23 +294,13 @@ It runs the fake dry run before the live job, uses least-privilege read-only
 repository access, and serializes runs per calendar scope. It is not a required
 CI or pull-request check.
 
-Every event created by a run has a fresh UUID `runId` and a matching UID/title
-prefix. Cleanup is attempted in a `finally` path and is limited to resources
-whose calendar URL, direct-child resource URL, UID, title prefix, run ID, and
-ETag prove ownership by that run. Conditional deletion refreshes stale ETags
-within a bounded retry budget and verifies that the resource is absent. If
-verification cannot complete, the result is
-`manual-cleanup-required`: stop using the account, inspect only the dedicated
-calendar, and remove the clearly run-owned events using the same run ID and
-UID/title templates. Never delete an event based only on a title, a broad
-calendar query, or a resource manifest. Revoke or rotate the app-specific
-password after resolving the incident.
-
-Output is limited to aggregate, privacy-safe evidence such as scenario names,
-counts, cleanup status, and stable error codes. Do not copy live responses,
-manifests, server or partition URLs, calendar names, XML, iCalendar data,
-event titles, credentials, or other event content into issues, logs, artifacts,
-or chat. No live execution is implied by this documentation.
+The live run permits only `OPTIONS` and `PROPFIND` requests. Output is limited
+to aggregate, privacy-safe evidence: the evidence schema revision, mode and
+outcome, scenario names, observed request methods, and stable error codes. Do
+not copy live responses, server or partition URLs, calendar names, XML,
+iCalendar data, event content, credentials, or other live values into issues,
+logs, artifacts, or chat. No event read or mutation is implied by this
+documentation.
 
 ## Security
 
