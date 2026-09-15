@@ -2,7 +2,7 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- Stable test-harness errors are deliberately independent of n8n execution. */
 
 export const ICLOUD_E2E_EVIDENCE_PREFIX = 'ICLOUD_E2E_EVIDENCE';
-export const ICLOUD_E2E_SCHEMA_VERSION = 'icloud-e2e-evidence/v2';
+export const ICLOUD_E2E_SCHEMA_VERSION = 'icloud-e2e-evidence/v3';
 
 export const IcloudE2eErrorCode = Object.freeze({
 	OPT_IN_REQUIRED: 'E2E_OPT_IN_REQUIRED',
@@ -10,6 +10,8 @@ export const IcloudE2eErrorCode = Object.freeze({
 	INPUT_INVALID: 'E2E_INPUT_INVALID',
 	CAPABILITY_FAILED: 'E2E_CAPABILITY_FAILED',
 	DISCOVERY_FAILED: 'E2E_DISCOVERY_FAILED',
+	EVENT_SEED_FAILED: 'E2E_EVENT_SEED_FAILED',
+	EVENT_CLEANUP_FAILED: 'E2E_EVENT_CLEANUP_FAILED',
 	CALENDAR_NOT_FOUND: 'E2E_CALENDAR_NOT_FOUND',
 	CALENDAR_AMBIGUOUS: 'E2E_CALENDAR_AMBIGUOUS',
 	ASSERTION_FAILED: 'E2E_ASSERTION_FAILED',
@@ -34,10 +36,12 @@ export interface IcloudE2eInput {
 export interface IcloudE2eEvidence {
 	readonly schemaVersion: typeof ICLOUD_E2E_SCHEMA_VERSION;
 	readonly mode: 'fake' | 'live';
-	readonly sourceRevision: 'issue-55-contract-r1';
+	readonly sourceRevision: 'issue-56-contract-r1';
 	readonly outcome: 'passed' | 'failed';
 	readonly scenarios: readonly string[];
-	readonly requestMethods: readonly ('OPTIONS' | 'PROPFIND')[];
+	readonly requestMethods: readonly (
+		'OPTIONS' | 'PROPFIND' | 'REPORT' | 'GET' | 'PUT' | 'DELETE'
+	)[];
 	readonly errorCodes: readonly IcloudE2eErrorCode[];
 }
 
