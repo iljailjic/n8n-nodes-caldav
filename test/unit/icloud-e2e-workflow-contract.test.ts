@@ -52,6 +52,17 @@ describe('iCloud E2E workflow contract', () => {
 		expect(e2eConfig).toContain("'test/e2e/tmp-icloud-cleanup.e2e.test.ts'");
 	});
 
+	it('keeps #56 event-query evidence and raw ICS confined to the opt-in test process', async () => {
+		const [workflow, e2eTest] = await Promise.all([
+			readFile(workflowPath, 'utf8'),
+			readFile(resolve(cwd(), 'test/e2e/icloud-e2e-harness.e2e.test.ts'), 'utf8'),
+		]);
+		expect(workflow).not.toMatch(/actions\/(upload|download)-artifact@/);
+		expect(e2eTest).toContain("schemaVersion: 'icloud-e2e-evidence/v3'");
+		expect(e2eTest).toContain('assertPrivateRawIcs');
+		expect(e2eTest).toContain('run-owned-seed');
+	});
+
 	it('is manually dispatched, explicitly confirmed, main-only, and cannot persist checkout credentials', async () => {
 		const workflow = await readFile(workflowPath, 'utf8');
 		expect(workflow).toMatch(/^on:\n\s+workflow_dispatch:/m);
