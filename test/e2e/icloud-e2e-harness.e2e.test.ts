@@ -836,6 +836,7 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 		const owned: Array<{ readonly uid: string; readonly resourceUrl: string }> = [];
 		let outcome: 'passed' | 'failed' = 'failed';
 		let calendarUrlForCleanup: string | undefined;
+		let incompleteSuppliedUidScan = false;
 
 		const execute = async (
 			parameters: Readonly<Record<string, unknown>>,
@@ -1106,20 +1107,57 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			const suppliedCreateStart = observedRequests.length;
 			const [upsertCreated] = await execute(
 				mutationParameters(selected.url, 'upsert', { uid: suppliedUid }),
+				true,
 			);
-			assertE2e(upsertCreated?.json.action === 'create');
-			assertCurrentIdentity(upsertCreated!.json, suppliedUid);
-			owned.push({ uid: suppliedUid, resourceUrl: upsertCreated!.json.resourceUrl as string });
 			const suppliedCreateTraffic = observedRequests.slice(suppliedCreateStart);
-			assertIcloudCandidateScanLookup(suppliedCreateTraffic, 2);
-			assertE2e(
-				suppliedCreateTraffic.filter(
-					(request) =>
-						request.method === CalDavMethod.PUT && request.conditional === 'if-none-match',
-				).length === 1 &&
-					suppliedCreateTraffic.every((request) => request.method !== CalDavMethod.DELETE),
-			);
-			scenarioIds.push('upsert-supplied-missing-one-lookup-conditional-create-no-delete');
+			const suppliedLookupIncomplete = upsertCreated?.json.action !== 'create';
+			if (suppliedLookupIncomplete) {
+				incompleteSuppliedUidScan = true;
+				assertE2e(
+					upsertCreated?.json.error ===
+						'The calendar event UID lookup could not be completed safely.',
+				);
+				assertE2e(
+					suppliedCreateTraffic.filter(
+						(request) =>
+							request.method === CalDavMethod.PUT || request.method === CalDavMethod.DELETE,
+					).length === 0,
+				);
+				scenarioIds.push('upsert-supplied-missing-incomplete-scan-terminal-no-write');
+				const suppliedResourceUrl = calendarEventResourceUrlForUid(selected.url, suppliedUid);
+				await createCalendarEventResource(
+					transport,
+					validateAbsoluteHttpUrl(selected.url),
+					validateAbsoluteHttpUrl(suppliedResourceUrl),
+					[
+						'BEGIN:VCALENDAR',
+						'VERSION:2.0',
+						'BEGIN:VEVENT',
+						`UID:${suppliedUid}`,
+						'DTSTAMP:20400101T000000Z',
+						'DTSTART:20400615T100000Z',
+						'DTEND:20400615T103000Z',
+						'SUMMARY:codex e2e issue 57 supplied seed',
+						'END:VEVENT',
+						'END:VCALENDAR',
+						'',
+					].join('\r\n'),
+				);
+				owned.push({ uid: suppliedUid, resourceUrl: suppliedResourceUrl });
+			} else {
+				assertE2e(upsertCreated?.json.action === 'create');
+				assertCurrentIdentity(upsertCreated!.json, suppliedUid);
+				owned.push({ uid: suppliedUid, resourceUrl: upsertCreated!.json.resourceUrl as string });
+				assertIcloudCandidateScanLookup(suppliedCreateTraffic, 2);
+				assertE2e(
+					suppliedCreateTraffic.filter(
+						(request) =>
+							request.method === CalDavMethod.PUT && request.conditional === 'if-none-match',
+					).length === 1 &&
+						suppliedCreateTraffic.every((request) => request.method !== CalDavMethod.DELETE),
+				);
+				scenarioIds.push('upsert-supplied-missing-one-lookup-conditional-create-no-delete');
+			}
 
 			const suppliedUpdateStart = observedRequests.length;
 			const [upsertUpdated] = await execute(
@@ -1315,6 +1353,10 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 				errorCodes.push(IcloudE2eErrorCode.MANUAL_CLEANUP_REQUIRED);
 				outcome = 'failed';
 			}
+			if (incompleteSuppliedUidScan) {
+				errorCodes.push(IcloudE2eErrorCode.ASSERTION_FAILED);
+				outcome = 'failed';
+			}
 			assertE2e(
 				observedRequests
 					.filter(
@@ -1334,7 +1376,7 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 					errorCodes,
 				}),
 			);
-			if (cleanupFailed) assertE2e(false);
+			if (cleanupFailed || incompleteSuppliedUidScan) assertE2e(false);
 		}
 	});
 });
