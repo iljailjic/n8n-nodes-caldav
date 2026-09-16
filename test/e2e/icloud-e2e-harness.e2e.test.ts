@@ -749,7 +749,8 @@ function assertIcloudCandidateScanLookup(
 		[CalDavMethod.GET, CalDavMethod.PROPFIND, CalDavMethod.REPORT].includes(request.method),
 	);
 	assertE2e(
-		lookupTraffic.filter((request) => request.method === CalDavMethod.GET).length === candidateGetCount,
+		lookupTraffic.filter((request) => request.method === CalDavMethod.GET).length ===
+			candidateGetCount,
 	);
 	if (candidateGetCount === 1) {
 		assertE2e(lookupTraffic.length === 1 && lookupTraffic[0]?.method === CalDavMethod.GET);
@@ -840,9 +841,9 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			parameters: Readonly<Record<string, unknown>>,
 			continueOnFail = false,
 		): Promise<ReadonlyArray<{ readonly json: Record<string, unknown> }>> =>
-			(await node.execute.call(
-				liveNodeContext(input, adapter, parameters, continueOnFail),
-			))[0] as Array<{
+			(
+				await node.execute.call(liveNodeContext(input, adapter, parameters, continueOnFail))
+			)[0] as Array<{
 				readonly json: Record<string, unknown>;
 			}>;
 
@@ -853,15 +854,24 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			const provider = defaultCalDavProviderRegistry.select(
 				validateAbsoluteHttpUrl(transport.serverUrl),
 			);
-			const calendars = await discoverCalendarCollections(transport, home.calendarHomeUrl, provider);
+			const calendars = await discoverCalendarCollections(
+				transport,
+				home.calendarHomeUrl,
+				provider,
+			);
 			const selected = selectExactCalendar(
-				calendars.map((calendar) => ({ displayName: calendar.displayName ?? '', url: calendar.url })),
+				calendars.map((calendar) => ({
+					displayName: calendar.displayName ?? '',
+					url: calendar.url,
+				})),
 				input.calendarDisplayName,
 			);
 			calendarUrlForCleanup = selected.url;
 
 			const createUid = `codex-e2e-57-${runId}-create`;
-			const [created] = await execute(mutationParameters(selected.url, 'create', { uid: createUid }));
+			const [created] = await execute(
+				mutationParameters(selected.url, 'create', { uid: createUid }),
+			);
 			assertE2e(created !== undefined);
 			assertCurrentIdentity(created!.json, createUid);
 			owned.push({ uid: createUid, resourceUrl: created!.json.resourceUrl as string });
@@ -1082,9 +1092,11 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			});
 			const omittedUidTraffic = observedRequests.slice(omittedUidStart);
 			assertE2e(
-				omittedUidTraffic.filter((request) => request.method === CalDavMethod.REPORT).length === 0 &&
+				omittedUidTraffic.filter((request) => request.method === CalDavMethod.REPORT).length ===
+					0 &&
 					omittedUidTraffic.filter(
-						(request) => request.method === CalDavMethod.PUT && request.conditional === 'if-none-match',
+						(request) =>
+							request.method === CalDavMethod.PUT && request.conditional === 'if-none-match',
 					).length === 1 &&
 					omittedUidTraffic.every((request) => request.method !== CalDavMethod.DELETE),
 			);
@@ -1102,8 +1114,9 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			assertIcloudCandidateScanLookup(suppliedCreateTraffic, 2);
 			assertE2e(
 				suppliedCreateTraffic.filter(
-						(request) => request.method === CalDavMethod.PUT && request.conditional === 'if-none-match',
-					).length === 1 &&
+					(request) =>
+						request.method === CalDavMethod.PUT && request.conditional === 'if-none-match',
+				).length === 1 &&
 					suppliedCreateTraffic.every((request) => request.method !== CalDavMethod.DELETE),
 			);
 			scenarioIds.push('upsert-supplied-missing-one-lookup-conditional-create-no-delete');
@@ -1241,7 +1254,9 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			} catch (error) {
 				uidConflict = error;
 			}
-			assertE2e(uidConflict instanceof CalDavAuthorizationError && uidConflict.noUidConflict === true);
+			assertE2e(
+				uidConflict instanceof CalDavAuthorizationError && uidConflict.noUidConflict === true,
+			);
 			scenarioIds.push('collection-wide-no-uid-conflict-distinct-resource-terminal');
 			outcome = 'passed';
 		} catch (error) {
@@ -1302,7 +1317,9 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			}
 			assertE2e(
 				observedRequests
-					.filter((request) => request.phase === 'cleanup' && request.method === CalDavMethod.DELETE)
+					.filter(
+						(request) => request.phase === 'cleanup' && request.method === CalDavMethod.DELETE,
+					)
 					.every((request) => request.conditional === 'if-match'),
 			);
 			// eslint-disable-next-line no-console -- Aggregate IDs and request shapes contain no live identifiers.
