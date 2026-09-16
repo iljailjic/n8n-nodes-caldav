@@ -106,6 +106,26 @@ Contain small, explicit interoperability rules. The default adapter follows
 standards; the iCloud adapter handles only confirmed iCloud behavior. Provider
 logic must not leak into workflow-facing identifiers or event fields.
 
+#### iCloud UID lookup compatibility
+
+iCloud can return HTTP 412 for the standards-based calendar-query UID REPORT.
+When the configured provider is iCloud, UID resolution therefore skips that
+REPORT and verifies resource-name candidates in this order: the shared
+base64url UID filename, then the percent-encoded UID filename. If neither
+candidate identifies the requested UID, the adapter performs a bounded Depth 1
+resource listing followed by sequential calendar-multiget requests in batches
+of up to 50 resources.
+
+The fallback is capped at 1,000 resources, 32 MiB of aggregate response body,
+and 60 seconds of elapsed time. Only a complete scan with zero matches is
+reported as “not found”; incomplete scans, limit exhaustion, transport errors,
+or invalid responses fail safely and never permit Upsert to create a new event.
+This may add bounded iCloud requests for UID lookups, while direct resource-URL
+operations and opaque ETag handling remain unchanged. Standard-provider
+adapters, including Radicale, retain the original UID REPORT path. Provider
+selection comes from the configured adapter and is not re-detected during
+lookup.
+
 ## Planned structure
 
 ```text
