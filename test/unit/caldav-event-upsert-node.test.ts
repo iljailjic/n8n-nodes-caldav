@@ -638,6 +638,18 @@ describe('CalDAV Event Upsert closed error adapter and privacy', () => {
 			undefined,
 		],
 		[
+			new CalDavCalendarEventUidResolutionError(CalendarEventUidResolutionFailureCode.INCOMPLETE),
+			'The calendar event UID lookup could not be completed safely.',
+			undefined,
+		],
+		[
+			new CalDavCalendarEventUidResolutionError(
+				CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED,
+			),
+			'The calendar event UID lookup exceeded its safety limits.',
+			undefined,
+		],
+		[
 			new CalDavCalendarEventUidResolutionError(
 				CalendarEventUidResolutionFailureCode.INVALID_RESPONSE,
 			),

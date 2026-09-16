@@ -9,6 +9,19 @@ export const CalDavProviderId = {
 
 export type CalDavProviderId = (typeof CalDavProviderId)[keyof typeof CalDavProviderId];
 
+export const CalDavEventUidLookupStrategy = Object.freeze({
+	CALENDAR_QUERY: 'calendar-query',
+	ICLOUD_CANDIDATE_SCAN: 'icloud-candidate-scan',
+} as const);
+
+export type CalDavEventUidLookupStrategy =
+	(typeof CalDavEventUidLookupStrategy)[keyof typeof CalDavEventUidLookupStrategy];
+
+export interface CalDavProviderContext {
+	readonly id: string;
+	readonly eventUidLookupStrategy: CalDavEventUidLookupStrategy;
+}
+
 export interface CalDavCredentialTargetContext {
 	readonly configuredUrl: AbsoluteHttpUrl;
 	readonly fromUrl: AbsoluteHttpUrl;
@@ -26,6 +39,7 @@ export interface CalDavProviderCalendarCollectionMetadata {
 
 export interface CalDavProviderAdapter {
 	readonly id: string;
+	readonly eventUidLookupStrategy: CalDavEventUidLookupStrategy;
 	readonly calendarCollectionProperties?: readonly PropfindExpandedPropertyName[];
 	matchesConfiguredServerUrl(configuredUrl: AbsoluteHttpUrl): boolean;
 	allowsCredentialForwarding(context: CalDavCredentialTargetContext): boolean;

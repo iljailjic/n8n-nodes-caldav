@@ -24,6 +24,10 @@ import {
 	CalendarEventMutationFailureCode,
 } from '../../nodes/CalDav/events/mutations';
 import {
+	CalDavCalendarEventUidResolutionError,
+	CalendarEventUidResolutionFailureCode,
+} from '../../nodes/CalDav/events/resolveByUid';
+import {
 	CalDavCalendarEventUpdateError,
 	CalendarEventUpdateFailureCode,
 } from '../../nodes/CalDav/events/update';
@@ -571,6 +575,18 @@ describe('CalDAV Event Update error mapping, continuation, and privacy', () => {
 		[new CalDavAuthorizationError(403), 'Event Update is not authorized.', NodeApiError],
 		[new CalDavNotFoundError(404), 'The calendar event was not found.', NodeApiError],
 		[
+			new CalDavCalendarEventUidResolutionError(CalendarEventUidResolutionFailureCode.INCOMPLETE),
+			'The calendar event UID lookup could not be completed safely.',
+			NodeApiError,
+		],
+		[
+			new CalDavCalendarEventUidResolutionError(
+				CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED,
+			),
+			'The calendar event UID lookup exceeded its safety limits.',
+			NodeApiError,
+		],
+		[
 			new CalDavRemoteProtocolError(409),
 			'The CalDAV server returned an invalid calendar-event update response.',
 			NodeApiError,
@@ -633,7 +649,11 @@ describe('CalDAV Event Update error mapping, continuation, and privacy', () => {
 				}),
 			)
 			.mockResolvedValueOnce(UPDATED_EVENT)
-			.mockRejectedValueOnce(new CalDavAuthorizationError(403));
+			.mockRejectedValueOnce(
+				new CalDavCalendarEventUidResolutionError(
+					CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED,
+				),
+			);
 
 		const [output] = await new CalDav().execute.call(
 			context([parameters(), parameters('uid'), parameters()], { continueOnFail: true }),
@@ -642,7 +662,10 @@ describe('CalDAV Event Update error mapping, continuation, and privacy', () => {
 		expect(output).toEqual([
 			{ json: { error: 'Event Update failed.' }, pairedItem: { item: 0 } },
 			{ json: UPDATED_EVENT, pairedItem: { item: 1 } },
-			{ json: { error: 'Event Update is not authorized.' }, pairedItem: { item: 2 } },
+			{
+				json: { error: 'The calendar event UID lookup exceeded its safety limits.' },
+				pairedItem: { item: 2 },
+			},
 		]);
 		expect(JSON.stringify(output)).not.toMatch(
 			/private-auth|private-etag|private remote|BEGIN:VCALENDAR|account\/path|input-/,

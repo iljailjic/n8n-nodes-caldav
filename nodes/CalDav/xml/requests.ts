@@ -28,6 +28,10 @@ export interface CalendarTimeRangeQueryInput {
 	readonly end: Date;
 }
 
+export interface CalendarMultigetInput {
+	readonly hrefs: readonly string[];
+}
+
 export const CURRENT_USER_PRINCIPAL_PROPERTIES: readonly ['currentUserPrincipal'] = Object.freeze([
 	'currentUserPrincipal',
 ]);
@@ -404,6 +408,32 @@ export function buildCalendarUidQueryReport(input: CalendarUidQueryInput): strin
 		`          <${XML_QUALIFIED_NAMES.textMatch.qualifiedName} collation="i;octet">${escapedUid}</${XML_QUALIFIED_NAMES.textMatch.qualifiedName}>`,
 		`        </${XML_QUALIFIED_NAMES.propFilter.qualifiedName}>`,
 		...reportSuffixLines(),
+	].join('\n');
+}
+
+export function buildCalendarMultigetReport(input: CalendarMultigetInput): string {
+	if (!Array.isArray(input.hrefs) || input.hrefs.length === 0) {
+		throw new XmlBuildError('INVALID_UID', 'Calendar multiget requires at least one href', 'hrefs');
+	}
+	const hrefs = input.hrefs.map((href) => {
+		if (typeof href !== 'string' || href.length === 0) {
+			throw new XmlBuildError('INVALID_UID', 'Calendar multiget href is invalid', 'hrefs');
+		}
+		return escapeXmlText(href);
+	});
+
+	return [
+		XML_DECLARATION,
+		`<${XML_QUALIFIED_NAMES.calendarMultiget.qualifiedName} ${rootAttributes(true)}>`,
+		`  <${XML_QUALIFIED_NAMES.prop.qualifiedName}>`,
+		emptyElement(XML_QUALIFIED_NAMES.getEtag, 2),
+		emptyElement(XML_QUALIFIED_NAMES.calendarData, 2),
+		`  </${XML_QUALIFIED_NAMES.prop.qualifiedName}>`,
+		...hrefs.map(
+			(href) =>
+				`  <${XML_QUALIFIED_NAMES.href.qualifiedName}>${href}</${XML_QUALIFIED_NAMES.href.qualifiedName}>`,
+		),
+		`</${XML_QUALIFIED_NAMES.calendarMultiget.qualifiedName}>`,
 	].join('\n');
 }
 

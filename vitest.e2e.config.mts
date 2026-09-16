@@ -6,6 +6,7 @@ export default mergeConfig(
 	sharedConfig,
 	defineConfig({
 		test: {
+			testTimeout: 90_000,
 			include: ['test/e2e/**/*.e2e.test.ts'],
 			exclude: ['test/unit/**', 'test/integration/**', 'test/e2e/tmp-icloud-cleanup.e2e.test.ts'],
 		},

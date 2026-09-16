@@ -20,7 +20,11 @@ import {
 	validateAndNormalizeServerUrl,
 } from '../../../credentials/CalDavApi.credentials';
 import { defaultCalDavProviderRegistry } from '../providers/registry';
-import type { CalDavProviderAdapter, CalDavProviderRegistry } from '../providers/types';
+import type {
+	CalDavProviderAdapter,
+	CalDavProviderContext,
+	CalDavProviderRegistry,
+} from '../providers/types';
 import {
 	type AbsoluteHttpUrl,
 	CalDavUrlValidationError,
@@ -236,6 +240,7 @@ interface LegacyCredentialTestRequestOptions {
 
 export interface CalDavTransport {
 	readonly serverUrl: string;
+	readonly providerContext?: CalDavProviderContext;
 	request(input: CalDavTransportRequest): Promise<CalDavTransportResponse>;
 }
 
@@ -1006,9 +1011,14 @@ export function createCalDavTransport(
 	} catch {
 		throw new CalDavAuthenticationError();
 	}
+	const providerContext: CalDavProviderContext = Object.freeze({
+		id: providerAdapter.id,
+		eventUidLookupStrategy: providerAdapter.eventUidLookupStrategy,
+	});
 
 	return {
 		serverUrl: normalizedServerUrl,
+		providerContext,
 		async request(input: CalDavTransportRequest): Promise<CalDavTransportResponse> {
 			let requestState = buildInitialRequestState(configuredUrl, input);
 			if (

@@ -111,6 +111,27 @@ function compareResults(left: CalendarEventReadResult, right: CalendarEventReadR
 	);
 }
 
+function utcRangeBoundary(value: Date): string {
+	return Date.prototype.toISOString.call(value).replace('.000Z', 'Z');
+}
+
+function overlapsHalfOpenRange(
+	result: CalendarEventReadResult,
+	range: CalendarTimeRangeQueryInput,
+): boolean {
+	const { event } = result;
+	if (event.timeMode === 'unsupported' || event.recurrence !== undefined) {
+		// A recurrence resource can overlap through an occurrence outside its master
+		// interval. Preserve the server-selected resource without expanding it.
+		return true;
+	}
+	const eventStart = event.timeMode === 'timed' ? event.start : `${event.startDate}T00:00:00Z`;
+	const eventEnd = event.timeMode === 'timed' ? event.end : `${event.endDate}T00:00:00Z`;
+	const rangeStart = utcRangeBoundary(range.start);
+	const rangeEnd = utcRangeBoundary(range.end);
+	return eventStart < rangeEnd && eventEnd > rangeStart;
+}
+
 export async function queryCalendarEventsByTimeRange(
 	transport: CalDavTransport,
 	calendarUrl: AbsoluteHttpUrl,
@@ -184,6 +205,7 @@ export async function queryCalendarEventsByTimeRange(
 		);
 	}
 
-	results.sort(compareResults);
-	return Object.freeze(results);
+	return Object.freeze(
+		results.filter((result) => overlapsHalfOpenRange(result, range)).sort(compareResults),
+	);
 }

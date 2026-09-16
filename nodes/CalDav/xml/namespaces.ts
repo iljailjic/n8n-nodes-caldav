@@ -57,7 +57,9 @@ export const XML_QUALIFIED_NAMES: Readonly<{
 	supportedCalendarComponentSet: XmlQualifiedName;
 	currentUserPrivilegeSet: XmlQualifiedName;
 	calendarQuery: XmlQualifiedName;
+	calendarMultiget: XmlQualifiedName;
 	calendarData: XmlQualifiedName;
+	href: XmlQualifiedName;
 	timezone: XmlQualifiedName;
 	filter: XmlQualifiedName;
 	compFilter: XmlQualifiedName;
@@ -77,7 +79,9 @@ export const XML_QUALIFIED_NAMES: Readonly<{
 	supportedCalendarComponentSet: createQualifiedName('caldav', 'supported-calendar-component-set'),
 	currentUserPrivilegeSet: createQualifiedName('dav', 'current-user-privilege-set'),
 	calendarQuery: createQualifiedName('caldav', 'calendar-query'),
+	calendarMultiget: createQualifiedName('caldav', 'calendar-multiget'),
 	calendarData: createQualifiedName('caldav', 'calendar-data'),
+	href: createQualifiedName('dav', 'href'),
 	timezone: createQualifiedName('caldav', 'timezone'),
 	filter: createQualifiedName('caldav', 'filter'),
 	compFilter: createQualifiedName('caldav', 'comp-filter'),

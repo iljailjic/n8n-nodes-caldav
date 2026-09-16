@@ -627,6 +627,16 @@ describe('CalDAV Event Delete sanitized errors and continuation', () => {
 			new CalDavCalendarEventUidResolutionError(CalendarEventUidResolutionFailureCode.AMBIGUOUS),
 			'More than one calendar event with the requested UID was found in the selected calendar.',
 		],
+		[
+			new CalDavCalendarEventUidResolutionError(CalendarEventUidResolutionFailureCode.INCOMPLETE),
+			'The calendar event UID lookup could not be completed safely.',
+		],
+		[
+			new CalDavCalendarEventUidResolutionError(
+				CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED,
+			),
+			'The calendar event UID lookup exceeded its safety limits.',
+		],
 	] as const)(
 		'maps UID cardinality without leaking the requested UID',
 		async (failure, message) => {
@@ -747,7 +757,7 @@ describe('CalDAV Event Delete sanitized errors and continuation', () => {
 		const second = resolvedEvent('second@example.test');
 		const third = resolvedEvent('third@example.test');
 		mocks.resolveCalendarEventByUid.mockRejectedValueOnce(
-			new CalDavCalendarEventUidResolutionError(CalendarEventUidResolutionFailureCode.AMBIGUOUS),
+			new CalDavCalendarEventUidResolutionError(CalendarEventUidResolutionFailureCode.INCOMPLETE),
 		);
 		mocks.getCalendarEventByResourceUrl.mockResolvedValueOnce(second).mockResolvedValueOnce(third);
 		mocks.deleteCalendarEventResource
@@ -768,8 +778,7 @@ describe('CalDAV Event Delete sanitized errors and continuation', () => {
 		expect(output).toEqual([
 			{
 				json: {
-					error:
-						'More than one calendar event with the requested UID was found in the selected calendar.',
+					error: 'The calendar event UID lookup could not be completed safely.',
 				},
 				pairedItem: { item: 0 },
 			},

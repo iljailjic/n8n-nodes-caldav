@@ -1,6 +1,7 @@
 import type { AbsoluteHttpUrl } from '../transport/url';
 import {
 	CalDavProviderId,
+	CalDavEventUidLookupStrategy,
 	type CalDavCredentialTargetContext,
 	type CalDavProviderAdapter,
 } from './types';
@@ -31,6 +32,7 @@ function isSameOrigin(left: AbsoluteHttpUrl, right: AbsoluteHttpUrl): boolean {
 
 export const standardCalDavProviderAdapter: CalDavProviderAdapter = Object.freeze({
 	id: CalDavProviderId.STANDARD,
+	eventUidLookupStrategy: CalDavEventUidLookupStrategy.CALENDAR_QUERY,
 	matchesConfiguredServerUrl: (): boolean => false,
 	allowsCredentialForwarding: ({
 		configuredUrl,

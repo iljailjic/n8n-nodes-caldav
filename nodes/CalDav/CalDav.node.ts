@@ -926,6 +926,8 @@ const EVENT_GET_MESSAGES = {
 	NOT_FOUND: 'The calendar event was not found.',
 	AMBIGUOUS:
 		'More than one calendar event with the requested UID was found in the selected calendar.',
+	UID_LOOKUP_INCOMPLETE: 'The calendar event UID lookup could not be completed safely.',
+	UID_LOOKUP_LIMIT: 'The calendar event UID lookup exceeded its safety limits.',
 	TLS: 'TLS certificate validation failed.',
 	TIMEOUT: 'Event Get timed out.',
 	RESPONSE_LIMIT: 'The Event Get response exceeded the size limit.',
@@ -973,6 +975,8 @@ const EVENT_DELETE_MESSAGES = {
 	NOT_FOUND: 'The calendar event was not found.',
 	AMBIGUOUS:
 		'More than one calendar event with the requested UID was found in the selected calendar.',
+	UID_LOOKUP_INCOMPLETE: 'The calendar event UID lookup could not be completed safely.',
+	UID_LOOKUP_LIMIT: 'The calendar event UID lookup exceeded its safety limits.',
 	MISSING_ETAG: 'The calendar event does not provide an ETag required for a safe mutation.',
 	CONCURRENCY: 'The calendar event changed before the mutation could be applied.',
 	TLS: 'TLS certificate validation failed.',
@@ -1068,6 +1072,8 @@ const EVENT_UPDATE_MESSAGES = {
 	NOT_FOUND: 'The calendar event was not found.',
 	AMBIGUOUS:
 		'More than one calendar event with the requested UID was found in the selected calendar.',
+	UID_LOOKUP_INCOMPLETE: 'The calendar event UID lookup could not be completed safely.',
+	UID_LOOKUP_LIMIT: 'The calendar event UID lookup exceeded its safety limits.',
 	MISSING_ETAG: 'The calendar event does not provide an ETag required for a safe mutation.',
 	CONCURRENCY: 'The calendar event changed before the mutation could be applied.',
 	TLS: 'TLS certificate validation failed.',
@@ -1090,6 +1096,8 @@ const EVENT_UPSERT_MESSAGES = {
 	NOT_FOUND: 'The selected calendar was not found.',
 	AMBIGUOUS:
 		'More than one calendar event with the requested UID was found in the selected calendar.',
+	UID_LOOKUP_INCOMPLETE: 'The calendar event UID lookup could not be completed safely.',
+	UID_LOOKUP_LIMIT: 'The calendar event UID lookup exceeded its safety limits.',
 	MISSING_ETAG: 'The calendar event does not provide an ETag required for a safe mutation.',
 	CONCURRENCY: 'The calendar changed while Event Upsert was in progress.',
 	TIMEOUT: 'Event Upsert timed out.',
@@ -1337,6 +1345,12 @@ function eventGetFailure(error: unknown): EventGetFailure {
 		if (error.code === CalendarEventUidResolutionFailureCode.AMBIGUOUS) {
 			return { message: EVENT_GET_MESSAGES.AMBIGUOUS, configuration: false };
 		}
+		if (error.code === CalendarEventUidResolutionFailureCode.INCOMPLETE) {
+			return { message: EVENT_GET_MESSAGES.UID_LOOKUP_INCOMPLETE, configuration: false };
+		}
+		if (error.code === CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED) {
+			return { message: EVENT_GET_MESSAGES.UID_LOOKUP_LIMIT, configuration: false };
+		}
 		return { message: EVENT_GET_MESSAGES.INVALID_RESPONSE, configuration: false };
 	}
 	if (error instanceof CalDavICalendarParseError) {
@@ -1413,6 +1427,12 @@ function eventDeleteFailure(error: unknown): EventDeleteFailure {
 		}
 		if (error.code === CalendarEventUidResolutionFailureCode.AMBIGUOUS) {
 			return { message: EVENT_DELETE_MESSAGES.AMBIGUOUS, configuration: false };
+		}
+		if (error.code === CalendarEventUidResolutionFailureCode.INCOMPLETE) {
+			return { message: EVENT_DELETE_MESSAGES.UID_LOOKUP_INCOMPLETE, configuration: false };
+		}
+		if (error.code === CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED) {
+			return { message: EVENT_DELETE_MESSAGES.UID_LOOKUP_LIMIT, configuration: false };
 		}
 		return { message: EVENT_DELETE_MESSAGES.INVALID_RESPONSE, configuration: false };
 	}
@@ -1725,6 +1745,12 @@ function eventUpdateFailure(error: unknown): EventUpdateFailure {
 		if (error.code === CalendarEventUidResolutionFailureCode.AMBIGUOUS) {
 			return { message: EVENT_UPDATE_MESSAGES.AMBIGUOUS, configuration: false };
 		}
+		if (error.code === CalendarEventUidResolutionFailureCode.INCOMPLETE) {
+			return { message: EVENT_UPDATE_MESSAGES.UID_LOOKUP_INCOMPLETE, configuration: false };
+		}
+		if (error.code === CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED) {
+			return { message: EVENT_UPDATE_MESSAGES.UID_LOOKUP_LIMIT, configuration: false };
+		}
 		return { message: EVENT_UPDATE_MESSAGES.INVALID_RESPONSE, configuration: false };
 	}
 	if (error instanceof CalDavCalendarEventMutationError) {
@@ -1832,6 +1858,12 @@ function eventUpsertFailure(error: unknown): EventUpdateFailure {
 		};
 	}
 	if (error instanceof CalDavCalendarEventUidResolutionError) {
+		if (error.code === CalendarEventUidResolutionFailureCode.INCOMPLETE) {
+			return { message: EVENT_UPSERT_MESSAGES.UID_LOOKUP_INCOMPLETE, configuration: false };
+		}
+		if (error.code === CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED) {
+			return { message: EVENT_UPSERT_MESSAGES.UID_LOOKUP_LIMIT, configuration: false };
+		}
 		return {
 			message:
 				error.code === CalendarEventUidResolutionFailureCode.AMBIGUOUS
