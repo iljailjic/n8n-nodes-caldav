@@ -153,12 +153,26 @@ describe('CalDAV XML namespaces', () => {
 				localName: 'calendar-query',
 				qualifiedName: 'c:calendar-query',
 			},
+			calendarMultiget: {
+				namespace: 'caldav',
+				namespaceUri: 'urn:ietf:params:xml:ns:caldav',
+				prefix: 'c',
+				localName: 'calendar-multiget',
+				qualifiedName: 'c:calendar-multiget',
+			},
 			calendarData: {
 				namespace: 'caldav',
 				namespaceUri: 'urn:ietf:params:xml:ns:caldav',
 				prefix: 'c',
 				localName: 'calendar-data',
 				qualifiedName: 'c:calendar-data',
+			},
+			href: {
+				namespace: 'dav',
+				namespaceUri: 'DAV:',
+				prefix: 'd',
+				localName: 'href',
+				qualifiedName: 'd:href',
 			},
 			filter: {
 				namespace: 'caldav',
