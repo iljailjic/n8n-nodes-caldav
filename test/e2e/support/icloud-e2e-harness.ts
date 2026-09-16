@@ -3,6 +3,7 @@
 
 export const ICLOUD_E2E_EVIDENCE_PREFIX = 'ICLOUD_E2E_EVIDENCE';
 export const ICLOUD_E2E_SCHEMA_VERSION = 'icloud-e2e-evidence/v3';
+export const ICLOUD_E2E_CLEANUP_DELETE_ATTEMPTS = 3;
 
 export const IcloudE2eErrorCode = Object.freeze({
 	OPT_IN_REQUIRED: 'E2E_OPT_IN_REQUIRED',
@@ -13,6 +14,8 @@ export const IcloudE2eErrorCode = Object.freeze({
 	EVENT_SEED_FAILED: 'E2E_EVENT_SEED_FAILED',
 	TIME_RANGE_CONVERGENCE_FAILED: 'E2E_TIME_RANGE_CONVERGENCE_FAILED',
 	EVENT_CLEANUP_FAILED: 'E2E_EVENT_CLEANUP_FAILED',
+	MANUAL_CLEANUP_REQUIRED: 'E2E_MANUAL_CLEANUP_REQUIRED',
+	MUTATION_CONFLICT_EXPECTED: 'E2E_MUTATION_CONFLICT_EXPECTED',
 	CALENDAR_NOT_FOUND: 'E2E_CALENDAR_NOT_FOUND',
 	CALENDAR_AMBIGUOUS: 'E2E_CALENDAR_AMBIGUOUS',
 	ASSERTION_FAILED: 'E2E_ASSERTION_FAILED',
@@ -37,7 +40,7 @@ export interface IcloudE2eInput {
 export interface IcloudE2eEvidence {
 	readonly schemaVersion: typeof ICLOUD_E2E_SCHEMA_VERSION;
 	readonly mode: 'fake' | 'live';
-	readonly sourceRevision: 'issue-56-contract-r1';
+	readonly sourceRevision: 'issue-56-contract-r1' | 'issue-57-contract-r1';
 	readonly outcome: 'passed' | 'failed';
 	readonly scenarios: readonly string[];
 	readonly requestMethods: readonly (
@@ -88,6 +91,25 @@ export function selectExactCalendar(
 
 export function assertE2e(condition: unknown): asserts condition {
 	if (!condition) throw new IcloudE2eHarnessError(IcloudE2eErrorCode.ASSERTION_FAILED);
+}
+
+export type IcloudE2eCleanupDeleteOutcome = 'deleted' | 'preconditionFailed' | 'failed';
+
+/**
+ * Harness-only recovery: product paths never call this helper. Each retry begins
+ * with a fresh ownership check and can only repeat a conditional-delete 412.
+ */
+export async function recoverOwnedE2eResource(
+	verifyOwnership: () => Promise<boolean>,
+	deleteConditionally: () => Promise<IcloudE2eCleanupDeleteOutcome>,
+): Promise<'cleaned' | 'manual-cleanup-required'> {
+	for (let attempt = 0; attempt < ICLOUD_E2E_CLEANUP_DELETE_ATTEMPTS; attempt += 1) {
+		if (!(await verifyOwnership())) return 'manual-cleanup-required';
+		const outcome = await deleteConditionally();
+		if (outcome === 'deleted') return 'cleaned';
+		if (outcome !== 'preconditionFailed') return 'manual-cleanup-required';
+	}
+	return 'manual-cleanup-required';
 }
 
 export function serializeEvidence(evidence: IcloudE2eEvidence): string {
