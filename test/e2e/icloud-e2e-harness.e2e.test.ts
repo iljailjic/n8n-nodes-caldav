@@ -23,11 +23,14 @@ import {
 import { defaultCalDavProviderRegistry } from '../../nodes/CalDav/providers/registry';
 import {
 	CalDavMethod,
+	CalDavAuthorizationError,
 	createCalDavTransport,
 	type CalDavRequestHelperAdapter,
 	type N8nCalDavRequestOptions,
 } from '../../nodes/CalDav/transport/http';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import { createCalendarEventResource } from '../../nodes/CalDav/events/mutations';
+import { calendarEventResourceUrlForUid } from '../../nodes/CalDav/events/createPreparation';
 
 import {
 	assertE2e,
@@ -35,11 +38,13 @@ import {
 	IcloudE2eErrorCode,
 	IcloudE2eHarnessError,
 	readIcloudE2eInput,
+	recoverOwnedE2eResource,
 	selectExactCalendar,
 	serializeEvidence,
 } from './support/icloud-e2e-harness';
 
 const CONTRACT_REVISION = 'issue-56-contract-r1' as const;
+const MUTATION_CONTRACT_REVISION = 'issue-57-contract-r1' as const;
 const READ_ONLY_METHODS = new Set<CalDavMethod>([CalDavMethod.OPTIONS, CalDavMethod.PROPFIND]);
 const LIVE_METHODS = new Set<CalDavMethod>([
 	CalDavMethod.OPTIONS,
@@ -59,16 +64,39 @@ function liveInputOrUndefined(): ReturnType<typeof readIcloudE2eInput> | undefin
 function liveRequestAdapter(
 	input: ReturnType<typeof readIcloudE2eInput>,
 	observedMethods: CalDavMethod[],
+	observedRequests: Array<{
+		readonly phase: 'product' | 'race' | 'cleanup';
+		readonly method: CalDavMethod;
+		readonly conditional: 'if-match' | 'if-none-match' | 'none';
+		statusCode?: number;
+	}> = [],
+	phase: () => 'product' | 'race' | 'cleanup' = () => 'product',
+	onReport: (() => Promise<void> | void) | undefined = undefined,
+	onGet: (() => Promise<void> | void) | undefined = undefined,
 ): CalDavRequestHelperAdapter {
 	return {
 		async request(options: N8nCalDavRequestOptions) {
 			assertE2e(LIVE_METHODS.has(options.method));
 			observedMethods.push(options.method);
+			const headerNames = Object.keys(options.headers ?? {}).map((name) => name.toLowerCase());
+			const requestRecord = {
+				phase: phase(),
+				method: options.method,
+				conditional: headerNames.includes('if-match')
+					? 'if-match'
+					: headerNames.includes('if-none-match')
+						? 'if-none-match'
+						: 'none',
+			};
+			observedRequests.push(requestRecord);
 			const response = await fetch(options.url, {
 				method: options.method,
 				headers: {
 					...options.headers,
-					Authorization: `Basic ${Buffer.from(`${input.username}:${input.appPassword}`, 'utf8').toString('base64')}`,
+					Authorization: `Basic ${Buffer.from(
+						`${input.username}:${input.appPassword}`,
+						'utf8',
+					).toString('base64')}`,
 				},
 				...(options.body === undefined ? {} : { body: options.body }),
 				redirect: 'manual',
@@ -78,6 +106,9 @@ function liveRequestAdapter(
 			response.headers.forEach((value, name) => {
 				headers[name] = value;
 			});
+			requestRecord.statusCode = response.status;
+			if (options.method === CalDavMethod.REPORT) await onReport?.();
+			if (options.method === CalDavMethod.GET) await onGet?.();
 			return {
 				statusCode: response.status,
 				headers,
@@ -239,6 +270,35 @@ async function waitForTimeRangeConvergence(
 }
 
 describe('iCloud E2E discovery contract (fictional synthetic regressions)', () => {
+	it('retries only cleanup 412s with ownership revalidation and reports a bounded manual-cleanup fallback', async () => {
+		const recoveredChecks: string[] = [];
+		let recoveredDeletes = 0;
+		const recovered = await recoverOwnedE2eResource(
+			async () => {
+				recoveredChecks.push('verify');
+				return true;
+			},
+			async () => {
+				recoveredChecks.push('delete');
+				recoveredDeletes += 1;
+				return recoveredDeletes === 1 ? 'preconditionFailed' : 'deleted';
+			},
+		);
+		expect(recovered).toBe('cleaned');
+		expect(recoveredChecks).toEqual(['verify', 'delete', 'verify', 'delete']);
+
+		let manualDeletes = 0;
+		const manual = await recoverOwnedE2eResource(
+			async () => true,
+			async () => {
+				manualDeletes += 1;
+				return 'preconditionFailed';
+			},
+		);
+		expect(manual).toBe('manual-cleanup-required');
+		expect(manualDeletes).toBe(3);
+	});
+
 	it('requires opt-in HTTPS input and canonicalizes identity without retaining secrets', () => {
 		expect(() => readIcloudE2eInput({})).toThrow(IcloudE2eHarnessError);
 		expect(() =>
@@ -649,6 +709,674 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live event lookup and range 
 				}),
 			);
 			if (cleanupFailed && !operationFailed) assertE2e(false);
+		}
+	});
+});
+
+function mutationParameters(
+	calendarUrl: string,
+	operation: 'create' | 'get' | 'update' | 'upsert' | 'delete',
+	overrides: Readonly<Record<string, unknown>> = {},
+): Readonly<Record<string, unknown>> {
+	return {
+		resource: 'event',
+		operation,
+		calendar: { __rl: true, mode: 'url', value: calendarUrl },
+		timeMode: 'timed',
+		timeZoneMode: 'utc',
+		start: '2040-06-15T10:00:00Z',
+		end: '2040-06-15T10:30:00Z',
+		summary: 'codex e2e issue 57',
+		additionalFields: {},
+		...overrides,
+	};
+}
+
+function assertCurrentIdentity(output: Readonly<Record<string, unknown>>, uid?: string): void {
+	assertE2e(typeof output.calendarUrl === 'string' && typeof output.resourceUrl === 'string');
+	assertE2e(typeof output.uid === 'string' && output.uid.length > 0);
+	assertE2e(typeof output.etag === 'string' && output.etag.length > 0);
+	if (uid !== undefined) assertE2e(output.uid === uid);
+}
+
+function assertIcloudCandidateScanLookup(
+	traffic: ReadonlyArray<{
+		readonly method: CalDavMethod;
+	}>,
+	candidateGetCount: 1 | 2,
+): void {
+	const lookupTraffic = traffic.filter((request) =>
+		[CalDavMethod.GET, CalDavMethod.PROPFIND, CalDavMethod.REPORT].includes(request.method),
+	);
+	assertE2e(
+		lookupTraffic.filter((request) => request.method === CalDavMethod.GET).length ===
+			candidateGetCount,
+	);
+	if (candidateGetCount === 1) {
+		assertE2e(lookupTraffic.length === 1 && lookupTraffic[0]?.method === CalDavMethod.GET);
+		return;
+	}
+	assertE2e(
+		lookupTraffic[0]?.method === CalDavMethod.GET &&
+			lookupTraffic[1]?.method === CalDavMethod.GET &&
+			lookupTraffic[2]?.method === CalDavMethod.PROPFIND &&
+			lookupTraffic.slice(3).length > 0 &&
+			lookupTraffic.slice(3).every((request) => request.method === CalDavMethod.REPORT),
+	);
+}
+
+function assertIcloudUidLookupConditionalPutAndCanonicalReadback(
+	traffic: ReadonlyArray<{
+		readonly method: CalDavMethod;
+		readonly conditional: 'if-match' | 'if-none-match' | 'none';
+	}>,
+): void {
+	const productPutIndex = traffic.findIndex(
+		(request) => request.method === CalDavMethod.PUT && request.conditional === 'if-match',
+	);
+	assertE2e(productPutIndex > 0);
+	assertIcloudCandidateScanLookup(traffic.slice(0, productPutIndex), 1);
+	const readback = traffic.slice(productPutIndex + 1);
+	assertE2e(readback.length === 1 && readback[0]?.method === CalDavMethod.GET);
+}
+
+function assertSingleFailedConditionalProductPut(
+	traffic: ReadonlyArray<{
+		readonly phase: 'product' | 'race' | 'cleanup';
+		readonly method: CalDavMethod;
+		readonly conditional: 'if-match' | 'if-none-match' | 'none';
+		readonly statusCode?: number;
+	}>,
+	conditional: 'if-match' | 'if-none-match',
+): void {
+	const productPuts = traffic.filter(
+		(request) =>
+			request.phase === 'product' &&
+			request.method === CalDavMethod.PUT &&
+			request.conditional === conditional,
+	);
+	assertE2e(productPuts.length === 1 && productPuts[0]?.statusCode === 412);
+}
+
+describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert contract', () => {
+	it('keeps conditional product conflicts terminal and isolates cleanup instrumentation', async () => {
+		const input = liveInput!;
+		const observedMethods: CalDavMethod[] = [];
+		const observedRequests: Array<{
+			readonly phase: 'product' | 'race' | 'cleanup';
+			readonly method: CalDavMethod;
+			readonly conditional: 'if-match' | 'if-none-match' | 'none';
+			statusCode?: number;
+		}> = [];
+		let phase: 'product' | 'race' | 'cleanup' = 'product';
+		let raceHook: (() => Promise<void>) | undefined;
+		let reportRaceHook: (() => Promise<void>) | undefined;
+		const runRaceHook = async (hook: (() => Promise<void>) | undefined): Promise<void> => {
+			const priorPhase = phase;
+			phase = 'race';
+			try {
+				await hook?.();
+			} finally {
+				phase = priorPhase;
+			}
+		};
+		const adapter = liveRequestAdapter(
+			input,
+			observedMethods,
+			observedRequests,
+			() => phase,
+			async () => await runRaceHook(reportRaceHook),
+			async () => await runRaceHook(raceHook),
+		);
+		const transport = createCalDavTransport(input.serverUrl, adapter);
+		const node = new CalDav();
+		const runId = randomUUID();
+		const scenarioIds: string[] = [];
+		const errorCodes: IcloudE2eErrorCode[] = [];
+		const owned: Array<{ readonly uid: string; readonly resourceUrl: string }> = [];
+		let outcome: 'passed' | 'failed' = 'failed';
+		let calendarUrlForCleanup: string | undefined;
+		let incompleteSuppliedUidScan = false;
+
+		const execute = async (
+			parameters: Readonly<Record<string, unknown>>,
+			continueOnFail = false,
+		): Promise<ReadonlyArray<{ readonly json: Record<string, unknown> }>> =>
+			(
+				await node.execute.call(liveNodeContext(input, adapter, parameters, continueOnFail))
+			)[0] as Array<{
+				readonly json: Record<string, unknown>;
+			}>;
+
+		try {
+			const principal = await discoverCurrentUserPrincipal(transport);
+			assertE2e(principal.kind === CurrentUserPrincipalDiscoveryKind.AUTHENTICATED);
+			const home = await discoverCalendarHome(transport, principal.principalUrl);
+			const provider = defaultCalDavProviderRegistry.select(
+				validateAbsoluteHttpUrl(transport.serverUrl),
+			);
+			const calendars = await discoverCalendarCollections(
+				transport,
+				home.calendarHomeUrl,
+				provider,
+			);
+			const selected = selectExactCalendar(
+				calendars.map((calendar) => ({
+					displayName: calendar.displayName ?? '',
+					url: calendar.url,
+				})),
+				input.calendarDisplayName,
+			);
+			calendarUrlForCleanup = selected.url;
+
+			const createUid = `codex-e2e-57-${runId}-create`;
+			const [created] = await execute(
+				mutationParameters(selected.url, 'create', { uid: createUid }),
+			);
+			assertE2e(created !== undefined);
+			assertCurrentIdentity(created!.json, createUid);
+			owned.push({ uid: createUid, resourceUrl: created!.json.resourceUrl as string });
+			scenarioIds.push('create-current-canonical-identity');
+
+			const collisionStart = observedRequests.length;
+			const [collision] = await execute(
+				mutationParameters(selected.url, 'create', { uid: createUid }),
+				true,
+			);
+			assertE2e(typeof collision?.json.error === 'string');
+			const createCollisionTraffic = observedRequests.slice(collisionStart);
+			assertSingleFailedConditionalProductPut(createCollisionTraffic, 'if-none-match');
+			assertE2e(createCollisionTraffic.every((request) => request.method !== CalDavMethod.DELETE));
+			scenarioIds.push('create-url-collision-terminal-no-retry');
+
+			const staleStart = observedRequests.length;
+			const [stale] = await execute(
+				mutationParameters(selected.url, 'update', {
+					identifierMode: 'resourceUrl',
+					resourceUrl: created!.json.resourceUrl,
+					etag: '"intentionally-stale"',
+					fieldsToUpdate: { summary: 'codex e2e issue 57 stale' },
+				}),
+				true,
+			);
+			assertE2e(typeof stale?.json.error === 'string');
+			const staleTraffic = observedRequests.slice(staleStart);
+			assertSingleFailedConditionalProductPut(staleTraffic, 'if-match');
+			assertE2e(staleTraffic.every((request) => request.method !== CalDavMethod.DELETE));
+			scenarioIds.push('update-supplied-stale-etag-terminal-no-overwrite');
+
+			const [updated] = await execute(
+				mutationParameters(selected.url, 'update', {
+					identifierMode: 'resourceUrl',
+					resourceUrl: created!.json.resourceUrl,
+					etag: created!.json.etag,
+					fieldsToUpdate: { summary: 'codex e2e issue 57 updated' },
+				}),
+			);
+			assertE2e(updated !== undefined);
+			assertCurrentIdentity(updated!.json, createUid);
+			assertPrivateRawIcs(updated!.json, createUid);
+			scenarioIds.push('update-conditional-current-canonical-identity-and-read-back');
+
+			const suppliedUidUpdateStart = observedRequests.length;
+			const [suppliedUidUpdated] = await execute(
+				mutationParameters(selected.url, 'update', {
+					identifierMode: 'uid',
+					uid: createUid,
+					etag: updated!.json.etag,
+					fieldsToUpdate: { summary: 'codex e2e issue 57 UID supplied ETag update' },
+				}),
+			);
+			assertE2e(suppliedUidUpdated !== undefined);
+			assertCurrentIdentity(suppliedUidUpdated!.json, createUid);
+			assertPrivateRawIcs(suppliedUidUpdated!.json, createUid);
+			const suppliedUidUpdateTraffic = observedRequests.slice(suppliedUidUpdateStart);
+			assertIcloudUidLookupConditionalPutAndCanonicalReadback(suppliedUidUpdateTraffic);
+			scenarioIds.push('update-uid-supplied-etag-provider-lookup-conditional-canonical-read-back');
+
+			const internalUidUpdateStart = observedRequests.length;
+			const [internalUidUpdated] = await execute(
+				mutationParameters(selected.url, 'update', {
+					identifierMode: 'uid',
+					uid: createUid,
+					fieldsToUpdate: { summary: 'codex e2e issue 57 UID internal ETag update' },
+				}),
+			);
+			assertE2e(internalUidUpdated !== undefined);
+			assertCurrentIdentity(internalUidUpdated!.json, createUid);
+			assertPrivateRawIcs(internalUidUpdated!.json, createUid);
+			const internalUidUpdateTraffic = observedRequests.slice(internalUidUpdateStart);
+			assertIcloudUidLookupConditionalPutAndCanonicalReadback(internalUidUpdateTraffic);
+			scenarioIds.push('update-uid-internal-etag-provider-lookup-conditional-canonical-read-back');
+
+			const updateRaceStart = observedRequests.length;
+			raceHook = async () => {
+				const winner = await adapter.request({
+					method: CalDavMethod.PUT,
+					url: internalUidUpdated!.json.resourceUrl as string,
+					headers: {
+						'Content-Type': 'text/calendar; charset=utf-8',
+						'If-Match': internalUidUpdated!.json.etag as string,
+					},
+					body: [
+						'BEGIN:VCALENDAR',
+						'VERSION:2.0',
+						'BEGIN:VEVENT',
+						`UID:${createUid}`,
+						'DTSTAMP:20400101T000000Z',
+						'DTSTART:20400615T100000Z',
+						'DTEND:20400615T103000Z',
+						'SUMMARY:codex e2e issue 57 update race winner',
+						'END:VEVENT',
+						'END:VCALENDAR',
+						'',
+					].join('\r\n'),
+				});
+				assertE2e(winner.statusCode === 204 || winner.statusCode === 201);
+				raceHook = undefined;
+			};
+			const [updateRace] = await execute(
+				mutationParameters(selected.url, 'update', {
+					identifierMode: 'resourceUrl',
+					resourceUrl: internalUidUpdated!.json.resourceUrl,
+					etag: '',
+					fieldsToUpdate: { summary: 'codex e2e issue 57 update race loser' },
+				}),
+				true,
+			);
+			assertE2e(typeof updateRace?.json.error === 'string');
+			const updateRaceTraffic = observedRequests.slice(updateRaceStart);
+			assertE2e(
+				updateRaceTraffic.filter((request) => request.method === CalDavMethod.GET).length === 1,
+			);
+			assertSingleFailedConditionalProductPut(updateRaceTraffic, 'if-match');
+			assertE2e(updateRaceTraffic.every((request) => request.method !== CalDavMethod.DELETE));
+			const [updateWinner] = await execute(
+				mutationParameters(selected.url, 'get', {
+					identifierMode: 'resourceUrl',
+					resourceUrl: internalUidUpdated!.json.resourceUrl,
+				}),
+			);
+			assertPrivateRawIcs(updateWinner!.json, createUid);
+			assertE2e(
+				typeof updateWinner!.json.rawIcs === 'string' &&
+					updateWinner!.json.rawIcs.includes('SUMMARY:codex e2e issue 57 update race winner'),
+			);
+			scenarioIds.push('update-lookup-put-race-terminal-winner-unchanged');
+
+			const deleteUid = `codex-e2e-57-${runId}-delete`;
+			const [deleteCreated] = await execute(
+				mutationParameters(selected.url, 'create', { uid: deleteUid }),
+			);
+			assertE2e(deleteCreated !== undefined);
+			assertCurrentIdentity(deleteCreated!.json, deleteUid);
+			owned.push({ uid: deleteUid, resourceUrl: deleteCreated!.json.resourceUrl as string });
+			const [deleted] = await execute(
+				mutationParameters(selected.url, 'delete', {
+					identifierMode: 'resourceUrl',
+					resourceUrl: deleteCreated!.json.resourceUrl,
+					etag: deleteCreated!.json.etag,
+				}),
+			);
+			assertE2e(deleted?.json.deleted === true);
+			const [afterDelete] = await execute(
+				mutationParameters(selected.url, 'get', {
+					identifierMode: 'resourceUrl',
+					resourceUrl: deleteCreated!.json.resourceUrl,
+				}),
+				true,
+			);
+			assertE2e(typeof afterDelete?.json.error === 'string');
+			const deleteReadback = [...observedRequests]
+				.reverse()
+				.find((request) => request.method === CalDavMethod.GET);
+			assertE2e(deleteReadback?.statusCode === 404);
+			const deletedOwnedIndex = owned.findIndex(
+				(resource) => resource.resourceUrl === deleteCreated!.json.resourceUrl,
+			);
+			assertE2e(deletedOwnedIndex !== -1);
+			owned.splice(deletedOwnedIndex, 1);
+			scenarioIds.push('delete-conditional-read-after-delete');
+
+			const preservedUid = `codex-e2e-57-${runId}-preserved`;
+			const preservedResourceUrl = new URL(
+				`${Buffer.from(preservedUid, 'utf8').toString('base64url')}.ics`,
+				selected.url,
+			).toString();
+			await createCalendarEventResource(
+				transport,
+				validateAbsoluteHttpUrl(selected.url),
+				validateAbsoluteHttpUrl(preservedResourceUrl),
+				[
+					'BEGIN:VCALENDAR',
+					'VERSION:2.0',
+					'BEGIN:VEVENT',
+					`UID:${preservedUid}`,
+					'DTSTAMP:20400101T000000Z',
+					'DTSTART:20400615T100000Z',
+					'DTEND:20400615T103000Z',
+					'SUMMARY:codex e2e issue 57 preserved',
+					'X-CODEX-E2E-UNKNOWN:retain',
+					'END:VEVENT',
+					'END:VCALENDAR',
+					'',
+				].join('\r\n'),
+			);
+			owned.push({ uid: preservedUid, resourceUrl: preservedResourceUrl });
+			const preservedUpsertStart = observedRequests.length;
+			const [preservedUpdate] = await execute(
+				mutationParameters(selected.url, 'upsert', {
+					uid: preservedUid,
+					summary: 'codex e2e issue 57 preserved update',
+				}),
+			);
+			assertE2e(preservedUpdate !== undefined);
+			assertE2e(preservedUpdate!.json.action === 'update');
+			assertPrivateRawIcs(preservedUpdate!.json, preservedUid);
+			const preservedUpsertTraffic = observedRequests.slice(preservedUpsertStart);
+			assertIcloudUidLookupConditionalPutAndCanonicalReadback(preservedUpsertTraffic);
+			assertE2e(
+				typeof preservedUpdate!.json.rawIcs === 'string' &&
+					preservedUpdate!.json.rawIcs.includes('X-CODEX-E2E-UNKNOWN:retain'),
+			);
+			scenarioIds.push('structured-upsert-update-preserves-seeded-unknown-property');
+
+			const omittedUidStart = observedRequests.length;
+			const [upsertOmittedUid] = await execute(
+				mutationParameters(selected.url, 'upsert', { uid: '' }),
+			);
+			assertE2e(upsertOmittedUid?.json.action === 'create');
+			assertCurrentIdentity(upsertOmittedUid!.json);
+			owned.push({
+				uid: upsertOmittedUid!.json.uid as string,
+				resourceUrl: upsertOmittedUid!.json.resourceUrl as string,
+			});
+			const omittedUidTraffic = observedRequests.slice(omittedUidStart);
+			assertE2e(
+				omittedUidTraffic.filter((request) => request.method === CalDavMethod.REPORT).length ===
+					0 &&
+					omittedUidTraffic.filter(
+						(request) =>
+							request.method === CalDavMethod.PUT && request.conditional === 'if-none-match',
+					).length === 1 &&
+					omittedUidTraffic.every((request) => request.method !== CalDavMethod.DELETE),
+			);
+			scenarioIds.push('upsert-omitted-uid-direct-conditional-create-no-lookup-delete');
+
+			const suppliedUid = `codex-e2e-57-${runId}-supplied`;
+			const suppliedCreateStart = observedRequests.length;
+			const [upsertCreated] = await execute(
+				mutationParameters(selected.url, 'upsert', { uid: suppliedUid }),
+				true,
+			);
+			const suppliedCreateTraffic = observedRequests.slice(suppliedCreateStart);
+			const suppliedLookupIncomplete = upsertCreated?.json.action !== 'create';
+			if (suppliedLookupIncomplete) {
+				incompleteSuppliedUidScan = true;
+				assertE2e(
+					upsertCreated?.json.error ===
+						'The calendar event UID lookup could not be completed safely.',
+				);
+				assertE2e(
+					suppliedCreateTraffic.filter(
+						(request) =>
+							request.method === CalDavMethod.PUT || request.method === CalDavMethod.DELETE,
+					).length === 0,
+				);
+				scenarioIds.push('upsert-supplied-missing-incomplete-scan-terminal-no-write');
+				const suppliedResourceUrl = calendarEventResourceUrlForUid(selected.url, suppliedUid);
+				await createCalendarEventResource(
+					transport,
+					validateAbsoluteHttpUrl(selected.url),
+					validateAbsoluteHttpUrl(suppliedResourceUrl),
+					[
+						'BEGIN:VCALENDAR',
+						'VERSION:2.0',
+						'BEGIN:VEVENT',
+						`UID:${suppliedUid}`,
+						'DTSTAMP:20400101T000000Z',
+						'DTSTART:20400615T100000Z',
+						'DTEND:20400615T103000Z',
+						'SUMMARY:codex e2e issue 57 supplied seed',
+						'END:VEVENT',
+						'END:VCALENDAR',
+						'',
+					].join('\r\n'),
+				);
+				owned.push({ uid: suppliedUid, resourceUrl: suppliedResourceUrl });
+			} else {
+				assertE2e(upsertCreated?.json.action === 'create');
+				assertCurrentIdentity(upsertCreated!.json, suppliedUid);
+				owned.push({ uid: suppliedUid, resourceUrl: upsertCreated!.json.resourceUrl as string });
+				assertIcloudCandidateScanLookup(suppliedCreateTraffic, 2);
+				assertE2e(
+					suppliedCreateTraffic.filter(
+						(request) =>
+							request.method === CalDavMethod.PUT && request.conditional === 'if-none-match',
+					).length === 1 &&
+						suppliedCreateTraffic.every((request) => request.method !== CalDavMethod.DELETE),
+				);
+				scenarioIds.push('upsert-supplied-missing-one-lookup-conditional-create-no-delete');
+			}
+
+			const suppliedUpdateStart = observedRequests.length;
+			const [upsertUpdated] = await execute(
+				mutationParameters(selected.url, 'upsert', {
+					uid: suppliedUid,
+					summary: 'codex e2e issue 57 updated',
+				}),
+			);
+			assertE2e(upsertUpdated?.json.action === 'update');
+			assertCurrentIdentity(upsertUpdated!.json, suppliedUid);
+			const suppliedUpdateTraffic = observedRequests.slice(suppliedUpdateStart);
+			assertIcloudUidLookupConditionalPutAndCanonicalReadback(suppliedUpdateTraffic);
+			assertE2e(suppliedUpdateTraffic.every((request) => request.method !== CalDavMethod.DELETE));
+			scenarioIds.push('upsert-unique-match-one-lookup-conditional-update-no-delete-move');
+
+			const upsertRaceStart = observedRequests.length;
+			raceHook = async () => {
+				const winner = await adapter.request({
+					method: CalDavMethod.PUT,
+					url: upsertUpdated!.json.resourceUrl as string,
+					headers: {
+						'Content-Type': 'text/calendar; charset=utf-8',
+						'If-Match': upsertUpdated!.json.etag as string,
+					},
+					body: [
+						'BEGIN:VCALENDAR',
+						'VERSION:2.0',
+						'BEGIN:VEVENT',
+						`UID:${suppliedUid}`,
+						'DTSTAMP:20400101T000000Z',
+						'DTSTART:20400615T100000Z',
+						'DTEND:20400615T103000Z',
+						'SUMMARY:codex e2e issue 57 race winner',
+						'END:VEVENT',
+						'END:VCALENDAR',
+						'',
+					].join('\r\n'),
+				});
+				assertE2e(winner.statusCode === 204 || winner.statusCode === 201);
+				raceHook = undefined;
+			};
+			const [upsertRace] = await execute(
+				mutationParameters(selected.url, 'upsert', {
+					uid: suppliedUid,
+					summary: 'codex e2e issue 57 race loser',
+				}),
+				true,
+			);
+			assertE2e(typeof upsertRace?.json.error === 'string');
+			const upsertRaceTraffic = observedRequests.slice(upsertRaceStart);
+			assertIcloudCandidateScanLookup(upsertRaceTraffic, 1);
+			assertSingleFailedConditionalProductPut(upsertRaceTraffic, 'if-match');
+			assertE2e(upsertRaceTraffic.every((request) => request.method !== CalDavMethod.DELETE));
+			const [upsertWinner] = await execute(
+				mutationParameters(selected.url, 'get', {
+					identifierMode: 'resourceUrl',
+					resourceUrl: upsertUpdated!.json.resourceUrl,
+				}),
+			);
+			assertPrivateRawIcs(upsertWinner!.json, suppliedUid);
+			assertE2e(
+				typeof upsertWinner!.json.rawIcs === 'string' &&
+					upsertWinner!.json.rawIcs.includes('SUMMARY:codex e2e issue 57 race winner'),
+			);
+			scenarioIds.push('upsert-unique-match-lookup-put-race-terminal-winner-unchanged');
+
+			const createRaceUid = `codex-e2e-57-${runId}-create-race`;
+			const createRaceResourceUrl = calendarEventResourceUrlForUid(selected.url, createRaceUid);
+			const upsertCreateRaceStart = observedRequests.length;
+			reportRaceHook = async () => {
+				const winner = await adapter.request({
+					method: CalDavMethod.PUT,
+					url: createRaceResourceUrl,
+					headers: {
+						'Content-Type': 'text/calendar; charset=utf-8',
+						'If-None-Match': '*',
+					},
+					body: [
+						'BEGIN:VCALENDAR',
+						'VERSION:2.0',
+						'BEGIN:VEVENT',
+						`UID:${createRaceUid}`,
+						'DTSTAMP:20400101T000000Z',
+						'DTSTART:20400615T100000Z',
+						'DTEND:20400615T103000Z',
+						'SUMMARY:codex e2e issue 57 create race winner',
+						'END:VEVENT',
+						'END:VCALENDAR',
+						'',
+					].join('\r\n'),
+				});
+				assertE2e(winner.statusCode === 204 || winner.statusCode === 201);
+				reportRaceHook = undefined;
+			};
+			const [upsertCreateRace] = await execute(
+				mutationParameters(selected.url, 'upsert', { uid: createRaceUid }),
+				true,
+			);
+			assertE2e(typeof upsertCreateRace?.json.error === 'string');
+			owned.push({ uid: createRaceUid, resourceUrl: createRaceResourceUrl });
+			const upsertCreateRaceTraffic = observedRequests.slice(upsertCreateRaceStart);
+			assertIcloudCandidateScanLookup(upsertCreateRaceTraffic, 2);
+			assertSingleFailedConditionalProductPut(upsertCreateRaceTraffic, 'if-none-match');
+			assertE2e(upsertCreateRaceTraffic.every((request) => request.method !== CalDavMethod.DELETE));
+			scenarioIds.push('upsert-create-path-uid-race-terminal-winner-unchanged');
+
+			const alternateResourceUrl = new URL(
+				`codex-e2e-57-${runId}-alternate.ics`,
+				selected.url,
+			).toString();
+			let uidConflict: unknown;
+			try {
+				await createCalendarEventResource(
+					transport,
+					validateAbsoluteHttpUrl(selected.url),
+					validateAbsoluteHttpUrl(alternateResourceUrl),
+					[
+						'BEGIN:VCALENDAR',
+						'VERSION:2.0',
+						'BEGIN:VEVENT',
+						`UID:${suppliedUid}`,
+						'DTSTAMP:20400101T000000Z',
+						'DTSTART:20400615T100000Z',
+						'DTEND:20400615T103000Z',
+						'SUMMARY:codex e2e issue 57 conflict',
+						'END:VEVENT',
+						'END:VCALENDAR',
+						'',
+					].join('\r\n'),
+				);
+				owned.push({ uid: suppliedUid, resourceUrl: alternateResourceUrl });
+			} catch (error) {
+				uidConflict = error;
+			}
+			assertE2e(
+				uidConflict instanceof CalDavAuthorizationError && uidConflict.noUidConflict === true,
+			);
+			scenarioIds.push('collection-wide-no-uid-conflict-distinct-resource-terminal');
+			outcome = 'passed';
+		} catch (error) {
+			errorCodes.push(
+				error instanceof IcloudE2eHarnessError
+					? error.code
+					: IcloudE2eErrorCode.MUTATION_CONFLICT_EXPECTED,
+			);
+			throw error;
+		} finally {
+			phase = 'cleanup';
+			let cleanupFailed = false;
+			for (const resource of [...owned].reverse()) {
+				try {
+					let etag: string | undefined;
+					const cleanup = await recoverOwnedE2eResource(
+						async () => {
+							const [current] = await execute(
+								mutationParameters(calendarUrlForCleanup ?? input.serverUrl, 'get', {
+									identifierMode: 'resourceUrl',
+									resourceUrl: resource.resourceUrl,
+								}),
+								true,
+							);
+							if (current?.json.uid !== resource.uid || typeof current?.json.etag !== 'string') {
+								return false;
+							}
+							etag = current.json.etag;
+							return true;
+						},
+						async () => {
+							const [deleted] = await execute(
+								mutationParameters(calendarUrlForCleanup ?? input.serverUrl, 'delete', {
+									identifierMode: 'resourceUrl',
+									resourceUrl: resource.resourceUrl,
+									etag,
+								}),
+								true,
+							);
+							if (deleted?.json.deleted === true) return 'deleted';
+							const latestDelete = [...observedRequests]
+								.reverse()
+								.find(
+									(request) =>
+										request.phase === 'cleanup' && request.method === CalDavMethod.DELETE,
+								);
+							return latestDelete?.statusCode === 412 ? 'preconditionFailed' : 'failed';
+						},
+					);
+					if (cleanup !== 'cleaned') cleanupFailed = true;
+				} catch {
+					cleanupFailed = true;
+				}
+			}
+			if (cleanupFailed) {
+				errorCodes.push(IcloudE2eErrorCode.MANUAL_CLEANUP_REQUIRED);
+				outcome = 'failed';
+			}
+			if (incompleteSuppliedUidScan) {
+				errorCodes.push(IcloudE2eErrorCode.ASSERTION_FAILED);
+				outcome = 'failed';
+			}
+			assertE2e(
+				observedRequests
+					.filter(
+						(request) => request.phase === 'cleanup' && request.method === CalDavMethod.DELETE,
+					)
+					.every((request) => request.conditional === 'if-match'),
+			);
+			// eslint-disable-next-line no-console -- Aggregate IDs and request shapes contain no live identifiers.
+			console.info(
+				serializeEvidence({
+					schemaVersion: 'icloud-e2e-evidence/v3',
+					mode: 'live',
+					sourceRevision: MUTATION_CONTRACT_REVISION,
+					outcome,
+					scenarios: scenarioIds,
+					requestMethods: [...new Set(observedMethods)],
+					errorCodes,
+				}),
+			);
+			if (cleanupFailed || incompleteSuppliedUidScan) assertE2e(false);
 		}
 	});
 });
