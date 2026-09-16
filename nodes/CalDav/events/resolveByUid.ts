@@ -297,6 +297,8 @@ function eventUid(resource: ICalendarResource): string | undefined {
 		) {
 			return undefined;
 		}
+		// The resolver's public contract preserves typed lower-layer errors for the node adapter.
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 		throw error;
 	}
 	const property = context.master.entries.find(
@@ -319,6 +321,8 @@ async function candidateGet(
 		response = await transport.request({ method: CalDavMethod.GET, url: resourceUrl });
 	} catch (error) {
 		if (error instanceof CalDavNotFoundError) return { bodyBytes: 0 };
+		// The resolver's public contract preserves typed transport errors for the node adapter.
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 		throw error;
 	}
 	if (response.statusCode !== 200 || response.body.byteLength > ICALENDAR_MAX_RESOURCE_BYTES) {
