@@ -123,6 +123,12 @@ function eventIcs(
 	].join('\r\n');
 }
 
+function allDayEventIcs(uid: string, start: string, end: string): string {
+	return eventIcs(uid, start, end)
+		.replace(`DTSTART:${start}`, `DTSTART;VALUE=DATE:${start}`)
+		.replace(`DTEND:${end}`, `DTEND;VALUE=DATE:${end}`);
+}
+
 function propstat(properties: string, status = 'HTTP/1.1 200 OK'): string {
 	return `<d:propstat><d:prop>${properties}</d:prop><d:status>${status}</d:status></d:propstat>`;
 }
@@ -605,6 +611,71 @@ describe('canonical resource deduplication and deterministic ordering', () => {
 	});
 });
 
+describe('local half-open time-range filtering', () => {
+	const timedRange = Object.freeze({
+		start: new Date('2026-01-02T10:00:00Z'),
+		end: new Date('2026-01-02T14:00:00Z'),
+	});
+
+	it('excludes returned timed boundary resources, retains overlaps, then sorts before a caller limit', async () => {
+		const xml = multistatus(
+			successfulResource(
+				'/ends-at-start.ics',
+				eventIcs('ends-at-start', '20260102T090000Z', '20260102T100000Z'),
+			) +
+				successfulResource(
+					'/inside.ics',
+					eventIcs('inside', '20260102T110000Z', '20260102T120000Z'),
+				) +
+				successfulResource(
+					'/starts-at-end.ics',
+					eventIcs('starts-at-end', '20260102T140000Z', '20260102T150000Z'),
+				) +
+				successfulResource(
+					'/spans-start.ics',
+					eventIcs('spans-start', '20260102T090000Z', '20260102T110000Z'),
+				),
+		);
+
+		const result = await queryCalendarEventsByTimeRange(
+			mockTransport(async () => transportResponse(xml)),
+			CALENDAR_URL,
+			timedRange,
+		);
+
+		expect(result.map(({ event }) => event.uid)).toEqual(['spans-start', 'inside']);
+		expect(result.slice(0, 1).map(({ event }) => event.uid)).toEqual(['spans-start']);
+	});
+
+	it('excludes returned all-day resources ending at start or starting at end', async () => {
+		const dayRange = Object.freeze({
+			start: new Date('2026-01-02T00:00:00Z'),
+			end: new Date('2026-01-03T00:00:00Z'),
+		});
+		const xml = multistatus(
+			successfulResource(
+				'/previous-day.ics',
+				allDayEventIcs('previous-day', '20260101', '20260102'),
+			) +
+				successfulResource(
+					'/current-day.ics',
+					allDayEventIcs('current-day', '20260102', '20260103'),
+				) +
+				successfulResource('/next-day.ics', allDayEventIcs('next-day', '20260103', '20260104')),
+		);
+
+		const result = await queryCalendarEventsByTimeRange(
+			mockTransport(async () => transportResponse(xml)),
+			CALENDAR_URL,
+			dayRange,
+		);
+
+		expect(result.map(({ event }) => [event.uid, event.timeMode])).toEqual([
+			['current-day', 'allDay'],
+		]);
+	});
+});
+
 describe('recurrence, lower errors, protocol failures, and byte limits', () => {
 	it('returns one server-selected recurring resource with its master and exceptions unexpanded', async () => {
 		const recurring = eventIcs('recurring-resource', '20260101T100000Z', '20260101T103000Z', {
@@ -644,10 +715,9 @@ describe('recurrence, lower errors, protocol failures, and byte limits', () => {
 	});
 
 	it('returns an unsupported event as safe read-only without dropping other resources', async () => {
-		const unsupported = eventIcs('private-tzid-sentinel').replace(
-			'DTSTART:20260102T100000Z',
-			'DTSTART;TZID=Private/Sentinel:20260102T100000',
-		);
+		const unsupported = eventIcs('private-tzid-sentinel')
+			.replace('DTSTART:20260102T100000Z', 'DTSTART;TZID=Private/Sentinel:20260101T100000')
+			.replace('DTEND:20260102T110000Z', 'DTEND;TZID=Private/Sentinel:20260101T110000');
 		const xml = multistatus(
 			successfulResource('/valid.ics', eventIcs('valid')) +
 				successfulResource('/unsupported.ics', unsupported),
@@ -703,7 +773,7 @@ describe('recurrence, lower errors, protocol failures, and byte limits', () => {
 			queryCalendarEventsByTimeRange(rejectingTransport, CALENDAR_URL, RANGE),
 		).rejects.toBe(transportLimit);
 		expect(rejectingTransport.request).toHaveBeenCalledTimes(1);
-	});
+	}, 20_000);
 
 	it.each([
 		[

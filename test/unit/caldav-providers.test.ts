@@ -9,7 +9,7 @@ import {
 	defaultCalDavProviderRegistry,
 } from '../../nodes/CalDav/providers/registry';
 import { standardCalDavProviderAdapter } from '../../nodes/CalDav/providers/standard';
-import { CalDavProviderId } from '../../nodes/CalDav/providers/types';
+import { CalDavEventUidLookupStrategy, CalDavProviderId } from '../../nodes/CalDav/providers/types';
 import type { CalDavProviderAdapter } from '../../nodes/CalDav/providers/types';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 
@@ -20,6 +20,12 @@ describe('CalDAV provider adapters', () => {
 		expect(CalDavProviderId).toEqual({ STANDARD: 'standard', ICLOUD: 'icloud' });
 		expect(standardCalDavProviderAdapter.id).toBe('standard');
 		expect(iCloudCalDavProviderAdapter.id).toBe('icloud');
+		expect(standardCalDavProviderAdapter.eventUidLookupStrategy).toBe(
+			CalDavEventUidLookupStrategy.CALENDAR_QUERY,
+		);
+		expect(iCloudCalDavProviderAdapter.eventUidLookupStrategy).toBe(
+			CalDavEventUidLookupStrategy.ICLOUD_CANDIDATE_SCAN,
+		);
 	});
 
 	it.each([
@@ -96,6 +102,7 @@ describe('CalDAV provider registry', () => {
 	function extension(id: string, matches: boolean): CalDavProviderAdapter {
 		return {
 			id,
+			eventUidLookupStrategy: CalDavEventUidLookupStrategy.CALENDAR_QUERY,
 			matchesConfiguredServerUrl: vi.fn().mockReturnValue(matches),
 			allowsCredentialForwarding: vi.fn().mockReturnValue(false),
 		};

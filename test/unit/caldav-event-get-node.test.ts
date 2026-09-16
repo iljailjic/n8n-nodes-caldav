@@ -733,6 +733,16 @@ describe('CalDAV Event Get sanitized errors and continuation', () => {
 			new CalDavCalendarEventUidResolutionError(CalendarEventUidResolutionFailureCode.AMBIGUOUS),
 			'More than one calendar event with the requested UID was found in the selected calendar.',
 		],
+		[
+			new CalDavCalendarEventUidResolutionError(CalendarEventUidResolutionFailureCode.INCOMPLETE),
+			'The calendar event UID lookup could not be completed safely.',
+		],
+		[
+			new CalDavCalendarEventUidResolutionError(
+				CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED,
+			),
+			'The calendar event UID lookup exceeded its safety limits.',
+		],
 	] as const)('maps UID cardinality failure without leaking the UID', async (failure, message) => {
 		mocks.resolveCalendarEventByUid.mockRejectedValue(failure);
 		const error = await captureError(context([parameters('uid', 'private-uid-sentinel')]));

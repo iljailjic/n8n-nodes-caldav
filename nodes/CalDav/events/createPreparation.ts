@@ -25,7 +25,6 @@ import {
 } from '../icalendar/serializer';
 import type { CalendarEventInstantProjector } from '../icalendar/serializer';
 import { projectInstantInTimeZone } from '../icalendar/timeZones';
-import { joinCalendarCollectionUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import type { CalendarEventCreateClock, StructuredCalendarEventCreateInput } from './create';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
@@ -33,27 +32,17 @@ import { resolveCalendarEventTimeZoneAuthoring } from './timeZoneAuthoring';
 import type { CalendarEventTimeZoneAuthoringCoverage } from './timeZoneAuthoring';
 import { resolveCalendarEventUid } from './uid';
 import type { CalendarEventUidGenerator } from './uid';
-
-const MAX_RESOURCE_SEGMENT_BYTES = 255;
-
-function resourceNameForUid(uid: string): string {
-	const encoded = Buffer.from(uid, 'utf8')
-		.toString('base64')
-		.replace(/\+/g, '-')
-		.replace(/\//g, '_')
-		.replace(/=+$/u, '');
-	const resourceName = `${encoded}.ics`;
-	if (Buffer.byteLength(resourceName, 'ascii') > MAX_RESOURCE_SEGMENT_BYTES) {
-		throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.RESOURCE_NAME_TOO_LONG);
-	}
-	return resourceName;
-}
+import { calendarEventResourceUrlForBase64Uid } from './resourceName';
 
 export function calendarEventResourceUrlForUid(
 	calendarUrl: AbsoluteHttpUrl,
 	uid: string,
 ): AbsoluteHttpUrl {
-	return joinCalendarCollectionUrl(calendarUrl, resourceNameForUid(uid));
+	const resourceUrl = calendarEventResourceUrlForBase64Uid(calendarUrl, uid);
+	if (resourceUrl === undefined) {
+		throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.RESOURCE_NAME_TOO_LONG);
+	}
+	return resourceUrl;
 }
 
 function readClock(clock: CalendarEventCreateClock): Date {

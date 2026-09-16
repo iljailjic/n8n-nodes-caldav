@@ -3,6 +3,7 @@ import type { DavXmlElement } from '../xml/parser';
 import { standardCalDavProviderAdapter } from './standard';
 import {
 	CalDavProviderId,
+	CalDavEventUidLookupStrategy,
 	type CalDavCalendarCollectionPropertyView,
 	type CalDavCredentialTargetContext,
 	type CalDavProviderAdapter,
@@ -62,6 +63,7 @@ export function isTrustedICloudCalDavUrl(url: AbsoluteHttpUrl): boolean {
 
 export const iCloudCalDavProviderAdapter: CalDavProviderAdapter = Object.freeze({
 	id: CalDavProviderId.ICLOUD,
+	eventUidLookupStrategy: CalDavEventUidLookupStrategy.ICLOUD_CANDIDATE_SCAN,
 	calendarCollectionProperties: Object.freeze([ICLOUD_CALENDAR_COLOR]),
 	matchesConfiguredServerUrl: isTrustedICloudCalDavUrl,
 	allowsCredentialForwarding: (context: CalDavCredentialTargetContext): boolean =>

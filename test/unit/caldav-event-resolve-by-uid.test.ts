@@ -9,7 +9,11 @@ import {
 import { CalDavCalendarEventReadModelError } from '../../nodes/CalDav/icalendar/eventReadModel';
 import type { CalendarEventReadResult } from '../../nodes/CalDav/icalendar/eventReadModel';
 import { CalDavICalendarParseError } from '../../nodes/CalDav/icalendar/parser';
-import { CalDavMethod, CalDavNetworkError } from '../../nodes/CalDav/transport/http';
+import {
+	CalDavMethod,
+	CalDavNetworkError,
+	CalDavNotFoundError,
+} from '../../nodes/CalDav/transport/http';
 import type {
 	CalDavTransport,
 	CalDavTransportRequest,
@@ -21,11 +25,20 @@ import {
 } from '../../nodes/CalDav/transport/url';
 import { XmlBuildError } from '../../nodes/CalDav/xml/errors';
 import { CalDavXmlParseError } from '../../nodes/CalDav/xml/parser';
+import { CalDavEventUidLookupStrategy } from '../../nodes/CalDav/providers/types';
+import {
+	calendarEventResourceUrlForBase64Uid,
+	calendarEventResourceUrlForEncodedUid,
+} from '../../nodes/CalDav/events/resourceName';
 
 const CALENDAR_URL = validateAbsoluteHttpUrl(
 	'https://calendar.example.test/calendars/selected?opaque=%2f',
 );
+const SCAN_CALENDAR_URL = validateAbsoluteHttpUrl(
+	'https://calendar.example.test/calendars/selected/?opaque=%2f',
+);
 const EFFECTIVE_URL = 'https://partition.example.test/calendars/selected/';
+const SCAN_EFFECTIVE_URL = 'https://calendar.example.test/calendars/selected/';
 
 type MockTransport = CalDavTransport & { request: ReturnType<typeof vi.fn> };
 
@@ -124,6 +137,16 @@ function transportResponse(
 	};
 }
 
+function listingResponse(hrefs: readonly string[]): CalDavTransportResponse {
+	return transportResponse(
+		multistatus(
+			hrefs.map((href) => propertyResponse(href, propstat('<d:resourcetype/>'))).join(''),
+		),
+		207,
+		SCAN_EFFECTIVE_URL,
+	);
+}
+
 function mockTransport(
 	implementation: (input: CalDavTransportRequest) => Promise<CalDavTransportResponse> = async () =>
 		transportResponse(multistatus('')),
@@ -172,6 +195,8 @@ describe('calendar-event UID resolver public contract', () => {
 		expect(CalendarEventUidResolutionFailureCode).toEqual({
 			NOT_FOUND: 'CALENDAR_EVENT_UID_NOT_FOUND',
 			AMBIGUOUS: 'AMBIGUOUS_CALENDAR_EVENT_UID',
+			INCOMPLETE: 'INCOMPLETE_CALENDAR_EVENT_UID_LOOKUP',
+			LIMIT_EXCEEDED: 'CALENDAR_EVENT_UID_LOOKUP_LIMIT_EXCEEDED',
 			INVALID_RESPONSE: 'INVALID_CALENDAR_EVENT_UID_RESPONSE',
 		});
 		expect(Object.isFrozen(CalendarEventUidResolutionFailureCode)).toBe(true);
@@ -221,6 +246,218 @@ describe('calendar-event UID resolver public contract', () => {
 		]) {
 			expect(error).not.toHaveProperty(forbidden);
 		}
+	});
+});
+
+describe('iCloud UID candidate lookup contract', () => {
+	function iCloudTransport(
+		implementation: (input: CalDavTransportRequest) => Promise<CalDavTransportResponse>,
+	): MockTransport {
+		return {
+			...mockTransport(implementation),
+			providerContext: Object.freeze({
+				id: 'icloud',
+				eventUidLookupStrategy: CalDavEventUidLookupStrategy.ICLOUD_CANDIDATE_SCAN,
+			}),
+		};
+	}
+
+	it('tries base64 then encoded candidate URLs without issuing a UID calendar-query REPORT', async () => {
+		const uid = 'candidate order@example.test';
+		const base64Url = calendarEventResourceUrlForBase64Uid(SCAN_CALENDAR_URL, uid)!;
+		const encodedUrl = calendarEventResourceUrlForEncodedUid(SCAN_CALENDAR_URL, uid)!;
+		const transport = iCloudTransport(async (request) => {
+			if (request.url === base64Url) throw new CalDavNotFoundError(404);
+			if (request.url === encodedUrl) {
+				return {
+					statusCode: 200,
+					headers: Object.freeze({ 'content-type': 'text/calendar; charset=utf-8' }),
+					effectiveUrl: encodedUrl,
+					etag: ' W/"candidate-etag" ',
+					body: Buffer.from(eventResource(uid), 'utf8'),
+				};
+			}
+			throw new Error('unexpected request');
+		});
+
+		const result = await resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid);
+
+		expect(result.event).toMatchObject({
+			uid,
+			resourceUrl: encodedUrl,
+			etag: ' W/"candidate-etag" ',
+		});
+		expect(transport.request.mock.calls.map(([request]) => request)).toEqual([
+			{ method: CalDavMethod.GET, url: base64Url },
+			{ method: CalDavMethod.GET, url: encodedUrl },
+		]);
+	});
+
+	it('does not fall back to a UID REPORT after an iCloud candidate response is structurally invalid', async () => {
+		const uid = 'candidate-invalid@example.test';
+		const base64Url = calendarEventResourceUrlForBase64Uid(CALENDAR_URL, uid)!;
+		const transport = iCloudTransport(async () => ({
+			statusCode: 412,
+			headers: Object.freeze({}),
+			effectiveUrl: base64Url,
+			body: Buffer.alloc(0),
+		}));
+
+		await captureResolutionError(
+			resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid),
+			CalendarEventUidResolutionFailureCode.INVALID_RESPONSE,
+		);
+		expect(transport.request).toHaveBeenCalledTimes(1);
+		expect(transport.request).toHaveBeenCalledWith({ method: CalDavMethod.GET, url: base64Url });
+	});
+
+	it('omits a calendar self PROPFIND href despite a different query string before scanning children', async () => {
+		const uid = 'scan-self-query@example.test';
+		const transport = iCloudTransport(async (request) => {
+			if (request.method === CalDavMethod.GET) throw new CalDavNotFoundError(404);
+			if (request.method === CalDavMethod.PROPFIND) {
+				return listingResponse([`${SCAN_EFFECTIVE_URL}?different=listing`, 'matching.ics']);
+			}
+			return transportResponse(
+				multistatus(eventResponse('matching.ics', uid)),
+				207,
+				SCAN_EFFECTIVE_URL,
+			);
+		});
+
+		const result = await resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid);
+
+		expect(result.event).toMatchObject({ uid, resourceUrl: `${SCAN_EFFECTIVE_URL}matching.ics` });
+		expect(transport.request.mock.calls.map(([request]) => request.method)).toEqual([
+			CalDavMethod.GET,
+			CalDavMethod.GET,
+			CalDavMethod.PROPFIND,
+			CalDavMethod.REPORT,
+		]);
+	});
+
+	it('rejects a non-child PROPFIND href without issuing a multiget', async () => {
+		const uid = 'scan-non-child@example.test';
+		const transport = iCloudTransport(async (request) => {
+			if (request.method === CalDavMethod.GET) throw new CalDavNotFoundError(404);
+			return listingResponse(['../outside.ics']);
+		});
+
+		await captureResolutionError(
+			resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid),
+			CalendarEventUidResolutionFailureCode.INCOMPLETE,
+		);
+		expect(transport.request.mock.calls.map(([request]) => request.method)).toEqual([
+			CalDavMethod.GET,
+			CalDavMethod.GET,
+			CalDavMethod.PROPFIND,
+		]);
+	});
+
+	it('scans every listed resource through sequential multiget batches and retains one recurring resource', async () => {
+		const uid = 'scan-recurring@example.test';
+		const hrefs = Array.from({ length: 51 }, (_, index) => `scan-${index}.ics`);
+		const recurring = calendar([
+			...event(uid, ['RRULE:FREQ=DAILY;COUNT=2']),
+			...event(uid, [
+				'RECURRENCE-ID:20400103T100000Z',
+				'DTSTART:20400103T120000Z',
+				'DTEND:20400103T123000Z',
+			]),
+		]);
+		const transport = iCloudTransport(async (request) => {
+			if (request.method === CalDavMethod.GET) throw new CalDavNotFoundError(404);
+			if (request.method === CalDavMethod.PROPFIND) return listingResponse(hrefs);
+			if (request.method === CalDavMethod.REPORT) {
+				const batch = transport.request.mock.calls.filter(
+					([call]) => call.method === CalDavMethod.REPORT,
+				).length;
+				const batchHrefs = hrefs.slice((batch - 1) * 50, batch * 50);
+				return transportResponse(
+					multistatus(
+						batchHrefs
+							.map((href) =>
+								eventResponse(href, href === 'scan-50.ics' ? uid : `other-${href}`, {
+									ics: href === 'scan-50.ics' ? recurring : eventResource(`other-${href}`),
+								}),
+							)
+							.join(''),
+					),
+					207,
+					SCAN_EFFECTIVE_URL,
+				);
+			}
+			throw new Error('unexpected request');
+		});
+
+		const result = await resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid);
+
+		expect(result.event).toMatchObject({ uid, resourceUrl: `${SCAN_EFFECTIVE_URL}scan-50.ics` });
+		expect(result.context.exceptions).toHaveLength(1);
+		expect(transport.request.mock.calls.map(([request]) => request.method)).toEqual([
+			CalDavMethod.GET,
+			CalDavMethod.GET,
+			CalDavMethod.PROPFIND,
+			CalDavMethod.REPORT,
+			CalDavMethod.REPORT,
+		]);
+	});
+
+	it('classifies an incomplete multiget response as INCOMPLETE rather than not found', async () => {
+		const uid = 'scan-incomplete@example.test';
+		const transport = iCloudTransport(async (request) => {
+			if (request.method === CalDavMethod.GET) throw new CalDavNotFoundError(404);
+			if (request.method === CalDavMethod.PROPFIND)
+				return listingResponse(['first.ics', 'second.ics']);
+			return transportResponse(
+				multistatus(eventResponse('first.ics', 'other@example.test')),
+				207,
+				SCAN_EFFECTIVE_URL,
+			);
+		});
+
+		await captureResolutionError(
+			resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid),
+			CalendarEventUidResolutionFailureCode.INCOMPLETE,
+		);
+	});
+
+	it('completes the scan before reporting multiple exact UID resources as ambiguous', async () => {
+		const uid = 'scan-ambiguous@example.test';
+		const transport = iCloudTransport(async (request) => {
+			if (request.method === CalDavMethod.GET) throw new CalDavNotFoundError(404);
+			if (request.method === CalDavMethod.PROPFIND)
+				return listingResponse(['first.ics', 'second.ics']);
+			return transportResponse(
+				multistatus(eventResponse('first.ics', uid) + eventResponse('second.ics', uid)),
+				207,
+				SCAN_EFFECTIVE_URL,
+			);
+		});
+
+		await captureResolutionError(
+			resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid),
+			CalendarEventUidResolutionFailureCode.AMBIGUOUS,
+		);
+		expect(transport.request).toHaveBeenCalledTimes(4);
+	});
+
+	it('fails the scan with LIMIT_EXCEEDED before any multiget when the listing exceeds 1,000 resources', async () => {
+		const uid = 'scan-limit@example.test';
+		const transport = iCloudTransport(async (request) => {
+			if (request.method === CalDavMethod.GET) throw new CalDavNotFoundError(404);
+			return listingResponse(Array.from({ length: 1001 }, (_, index) => `limit-${index}.ics`));
+		});
+
+		await captureResolutionError(
+			resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid),
+			CalendarEventUidResolutionFailureCode.LIMIT_EXCEEDED,
+		);
+		expect(transport.request.mock.calls.map(([request]) => request.method)).toEqual([
+			CalDavMethod.GET,
+			CalDavMethod.GET,
+			CalDavMethod.PROPFIND,
+		]);
 	});
 });
 

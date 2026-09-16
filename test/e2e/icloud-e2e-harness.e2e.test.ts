@@ -49,6 +49,8 @@ const LIVE_METHODS = new Set<CalDavMethod>([
 	CalDavMethod.PUT,
 	CalDavMethod.DELETE,
 ]);
+const TIME_RANGE_CONVERGENCE_ATTEMPTS = 4;
+const TIME_RANGE_CONVERGENCE_DELAY_MS = 2_000;
 
 function liveInputOrUndefined(): ReturnType<typeof readIcloudE2eInput> | undefined {
 	return process.env.CALDAV_ICLOUD_E2E_OPT_IN === '1' ? readIcloudE2eInput(process.env) : undefined;
@@ -214,6 +216,26 @@ function eventOutput(value: unknown): Readonly<Record<string, unknown>> {
 function assertPrivateRawIcs(output: Readonly<Record<string, unknown>>, uid: string): void {
 	// The node returns raw ICS for interoperability, but this suite must never serialize it.
 	assertE2e(typeof output.rawIcs === 'string' && output.rawIcs.includes(`UID:${uid}`));
+}
+
+async function waitForTimeRangeConvergence(
+	query: () => Promise<ReadonlyArray<Readonly<Record<string, unknown>>>>,
+	expected: ReadonlyArray<{ readonly label: string; readonly uid: string }>,
+): Promise<ReadonlyArray<Readonly<Record<string, unknown>>>> {
+	const expectedUids = new Set(expected.map(({ uid }) => uid));
+	for (let attempt = 0; attempt < TIME_RANGE_CONVERGENCE_ATTEMPTS; attempt++) {
+		const events = await query();
+		const observedUids = new Set(
+			events
+				.map((event) => event.uid)
+				.filter((uid): uid is string => typeof uid === 'string' && expectedUids.has(uid)),
+		);
+		if (observedUids.size === expectedUids.size) return events;
+		if (attempt + 1 < TIME_RANGE_CONVERGENCE_ATTEMPTS) {
+			await new Promise<void>((resolve) => setTimeout(resolve, TIME_RANGE_CONVERGENCE_DELAY_MS));
+		}
+	}
+	throw new IcloudE2eHarnessError(IcloudE2eErrorCode.TIME_RANGE_CONVERGENCE_FAILED);
 }
 
 describe('iCloud E2E discovery contract (fictional synthetic regressions)', () => {
@@ -504,6 +526,28 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live event lookup and range 
 				start: '2040-04-15T10:00:00Z',
 				end: '2040-04-15T14:00:00Z',
 			};
+			const expectedTimeRangeEvents = [
+				{ label: 'spans-start', uid: resources[1]!.uid },
+				{ label: 'at-start', uid: resources[2]!.uid },
+				{ label: 'inside', uid: resources[3]!.uid },
+				{ label: 'recurring', uid: resources[4]!.uid },
+			];
+			const allEvents = await waitForTimeRangeConvergence(async () => {
+				const [all] = await node.execute.call(
+					liveNodeContext(input, adapter, { ...query, returnAll: true }),
+				);
+				return all.map((item) => eventOutput(item.json));
+			}, expectedTimeRangeEvents);
+			const runOwnedRangeEvents = allEvents.filter((event) =>
+				expectedTimeRangeEvents.some(({ uid }) => event.uid === uid),
+			);
+			assertE2e(runOwnedRangeEvents.length === expectedTimeRangeEvents.length);
+			assertE2e(
+				runOwnedRangeEvents.map((event) => event.uid).join(',') ===
+					expectedTimeRangeEvents.map((event) => event.uid).join(','),
+			);
+			scenarios.push('time-range-convergence-four-run-owned-labels');
+
 			const [limited] = await node.execute.call(
 				liveNodeContext(input, adapter, { ...query, returnAll: false, limit: 2 }),
 			);
@@ -511,26 +555,24 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live event lookup and range 
 			assertE2e(limitedEvents.length === 2);
 			assertE2e(
 				limitedEvents.map((event) => event.uid).join(',') ===
-					[resources[1]!.uid, resources[2]!.uid].join(','),
+					allEvents
+						.slice(0, 2)
+						.map((event) => event.uid)
+						.join(','),
 			);
 			for (const event of limitedEvents) assertPrivateRawIcs(event, event.uid as string);
 			scenarios.push('half-open-boundaries-deterministic-limit');
 
-			const [all] = await node.execute.call(
-				liveNodeContext(input, adapter, { ...query, returnAll: true }),
-			);
-			const allEvents = all.map((item) => eventOutput(item.json));
-			assertE2e(allEvents.length === 4);
 			assertE2e(
-				allEvents.map((event) => event.uid).join(',') ===
+				runOwnedRangeEvents.map((event) => event.uid).join(',') ===
 					[resources[1]!.uid, resources[2]!.uid, resources[3]!.uid, resources[4]!.uid].join(','),
 			);
 			assertE2e(!allEvents.some((event) => event.uid === resources[7]!.uid));
-			assertPrivateRawIcs(allEvents[3]!, resources[4]!.uid);
+			assertPrivateRawIcs(runOwnedRangeEvents[3]!, resources[4]!.uid);
 			assertE2e(
-				typeof allEvents[3]!.rawIcs === 'string' &&
-					allEvents[3]!.rawIcs.includes('RRULE:FREQ=DAILY;COUNT=2') &&
-					allEvents[3]!.rawIcs.includes('RECURRENCE-ID:20400416T120000Z'),
+				typeof runOwnedRangeEvents[3]!.rawIcs === 'string' &&
+					runOwnedRangeEvents[3]!.rawIcs.includes('RRULE:FREQ=DAILY;COUNT=2') &&
+					runOwnedRangeEvents[3]!.rawIcs.includes('RECURRENCE-ID:20400416T120000Z'),
 			);
 			scenarios.push('return-all-one-recurring-resource');
 

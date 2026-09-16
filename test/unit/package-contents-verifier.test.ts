@@ -53,6 +53,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/events/resolveByUid.d.ts',
 	'dist/nodes/CalDav/events/resolveByUid.js',
 	'dist/nodes/CalDav/events/resolveByUid.js.map',
+	'dist/nodes/CalDav/events/resourceName.d.ts',
+	'dist/nodes/CalDav/events/resourceName.js',
+	'dist/nodes/CalDav/events/resourceName.js.map',
 	'dist/nodes/CalDav/events/timeRangeQuery.d.ts',
 	'dist/nodes/CalDav/events/timeRangeQuery.js',
 	'dist/nodes/CalDav/events/timeRangeQuery.js.map',
@@ -162,6 +165,12 @@ const uidArtifactPaths = [
 	'dist/nodes/CalDav/events/uid.js.map',
 ] as const;
 
+const resourceNameArtifactPaths = [
+	'dist/nodes/CalDav/events/resourceName.d.ts',
+	'dist/nodes/CalDav/events/resourceName.js',
+	'dist/nodes/CalDav/events/resourceName.js.map',
+] as const;
+
 const patcherArtifactPaths = [
 	'dist/nodes/CalDav/icalendar/patcher.d.ts',
 	'dist/nodes/CalDav/icalendar/patcher.js',
@@ -229,7 +238,7 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(133);
+		expect(expectedPackageFiles).toHaveLength(136);
 		expect(expectedPackageFiles.filter((path) => path.includes('/icalendar/alarms.'))).toEqual(
 			alarmArtifactPaths,
 		);
@@ -238,6 +247,9 @@ describe('package contents verifier', () => {
 		);
 		expect(expectedPackageFiles.filter((path) => path.includes('/events/uid.'))).toEqual(
 			uidArtifactPaths,
+		);
+		expect(expectedPackageFiles.filter((path) => path.includes('/events/resourceName.'))).toEqual(
+			resourceNameArtifactPaths,
 		);
 		expect(expectedPackageFiles.filter((path) => path.includes('/icalendar/serializer.'))).toEqual(
 			serializerArtifactPaths,

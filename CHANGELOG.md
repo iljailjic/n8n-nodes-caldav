@@ -9,6 +9,7 @@ documented in this file.
 
 - Accepted exact two- and three-digit iCloud CalDAV partition hosts while retaining strict HTTPS, port, and hostname trust checks.
 - Made the local iCloud E2E command execute its protected dry run directly before the live phase instead of spawning a nested npm command.
+- Made iCloud event lookups by UID verify candidate resource names before using a bounded calendar scan; standard-provider lookup behavior is unchanged, with the fallback adding only bounded iCloud requests.
 
 ## [0.6.0] - 2026-08-21
 
