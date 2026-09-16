@@ -745,7 +745,9 @@ function assertIcloudCandidateScanLookup(
 	const lookupTraffic = traffic.filter((request) =>
 		[CalDavMethod.GET, CalDavMethod.PROPFIND, CalDavMethod.REPORT].includes(request.method),
 	);
-	assertE2e(lookupTraffic.filter((request) => request.method === CalDavMethod.GET).length === candidateGetCount);
+	assertE2e(
+		lookupTraffic.filter((request) => request.method === CalDavMethod.GET).length === candidateGetCount,
+	);
 	if (candidateGetCount === 1) {
 		assertE2e(lookupTraffic.length === 1 && lookupTraffic[0]?.method === CalDavMethod.GET);
 		return;
@@ -835,7 +837,9 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			parameters: Readonly<Record<string, unknown>>,
 			continueOnFail = false,
 		): Promise<ReadonlyArray<{ readonly json: Record<string, unknown> }>> =>
-			(await node.execute.call(liveNodeContext(input, adapter, parameters, continueOnFail)))[0] as Array<{
+			(await node.execute.call(
+				liveNodeContext(input, adapter, parameters, continueOnFail),
+			))[0] as Array<{
 				readonly json: Record<string, unknown>;
 			}>;
 
@@ -968,7 +972,9 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			);
 			assertE2e(typeof updateRace?.json.error === 'string');
 			const updateRaceTraffic = observedRequests.slice(updateRaceStart);
-			assertE2e(updateRaceTraffic.filter((request) => request.method === CalDavMethod.GET).length === 1);
+			assertE2e(
+				updateRaceTraffic.filter((request) => request.method === CalDavMethod.GET).length === 1,
+			);
 			assertSingleFailedConditionalProductPut(updateRaceTraffic, 'if-match');
 			assertE2e(updateRaceTraffic.every((request) => request.method !== CalDavMethod.DELETE));
 			const [updateWinner] = await execute(
@@ -1204,7 +1210,10 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			assertE2e(upsertCreateRaceTraffic.every((request) => request.method !== CalDavMethod.DELETE));
 			scenarioIds.push('upsert-create-path-uid-race-terminal-winner-unchanged');
 
-			const alternateResourceUrl = new URL(`codex-e2e-57-${runId}-alternate.ics`, selected.url).toString();
+			const alternateResourceUrl = new URL(
+				`codex-e2e-57-${runId}-alternate.ics`,
+				selected.url,
+			).toString();
 			let uidConflict: unknown;
 			try {
 				await createCalendarEventResource(
