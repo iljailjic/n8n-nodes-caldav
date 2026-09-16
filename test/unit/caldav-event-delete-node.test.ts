@@ -379,6 +379,48 @@ describe('CalDAV Event Delete exact resolution, validator, and output', () => {
 		expect(TRANSPORT.request).not.toHaveBeenCalled();
 	});
 
+	it('uses the canonical effective calendar and resource pair returned by UID resolution', async () => {
+		const uid = 'redirected-uid@example.test';
+		const effectiveCalendarUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/',
+		);
+		const effectiveResourceUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/redirected-uid.ics',
+		);
+		const event = resolvedEvent(uid, {
+			calendarUrl: effectiveCalendarUrl,
+			resourceUrl: effectiveResourceUrl,
+		});
+		mocks.resolveCalendarEventByUid.mockResolvedValue(event);
+
+		await expect(new CalDav().execute.call(context([parameters('uid', uid)]))).resolves.toEqual([
+			[
+				{
+					json: {
+						calendarUrl: effectiveCalendarUrl,
+						resourceUrl: effectiveResourceUrl,
+						uid,
+						deleted: true,
+					},
+					pairedItem: { item: 0 },
+				},
+			],
+		]);
+		expect(mocks.resolveCalendarEventByUid).toHaveBeenCalledWith(
+			TRANSPORT,
+			'https://calendar.example.test/calendars/work/',
+			uid,
+			{ allowMissingEtag: true },
+		);
+		expect(mocks.deleteCalendarEventResource).toHaveBeenCalledWith(
+			TRANSPORT,
+			effectiveCalendarUrl,
+			effectiveResourceUrl,
+			event.event.etag,
+		);
+		expect(mocks.getCalendarEventByResourceUrl).not.toHaveBeenCalled();
+	});
+
 	it.each([
 		['undefined absence', undefined, 'W/"resolved-etag"'],
 		['empty optional UI field', '', 'W/"resolved-etag"'],

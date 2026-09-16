@@ -28,9 +28,11 @@ import {
 import {
 	CalDavCalendarEventUpdateError,
 	CalendarEventUpdateFailureCode,
+	assertResolvedCalendarEventUidIdentity,
 	updateCalendarEvent,
 } from '../../nodes/CalDav/events/update';
 import type { CalendarEventUpdateInput } from '../../nodes/CalDav/events/update';
+import { upsertCalendarEvent } from '../../nodes/CalDav/events/upsert';
 import {
 	CalDavCalendarEventReadModelError,
 	CalendarEventReadModelErrorCode,
@@ -46,6 +48,7 @@ import { CalDavNotFoundError, CalDavResponseLimitError } from '../../nodes/CalDa
 import type { CalDavTransport } from '../../nodes/CalDav/transport/http';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 import type { AbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
+import { registerResolvedUidIdentity } from '../../nodes/CalDav/events/resolvedUidIdentity';
 import { SUPPORTED_EMBEDDED_IANA_EVENT } from './fixtures/time-zones/synthetic-time-zone-fixtures';
 
 const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/work/');
@@ -133,6 +136,13 @@ function readResult(
 			? {}
 			: { timeZoneDefinition: options.timeZoneDefinition }),
 	});
+}
+
+function withCalendarUrl(
+	result: CalendarEventReadResult,
+	calendarUrl: AbsoluteHttpUrl,
+): CalendarEventReadResult {
+	return { ...result, event: { ...result.event, calendarUrl } };
 }
 
 function timeZoneDefinition(calendarText: string): ICalendarComponent {
@@ -938,6 +948,300 @@ describe('calendar event Update coordinator requests and authoritative result', 
 		);
 		expect(mocks.updateCalendarEventResource.mock.calls[0][4]).toBe('');
 		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledTimes(1);
+	});
+
+	it('uses resolver-registered redirect provenance for UID Update and its returned resource identity', async () => {
+		const effectiveCalendarUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/',
+		);
+		const effectiveResourceUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/redirected.ics',
+		);
+		const patch: CalendarEventPatch = { summary: { kind: 'set', value: 'Changed' } };
+		const current = withCalendarUrl(
+			readResult(calendarData(), {
+				resourceUrl: effectiveResourceUrl,
+				etag: '"snapshot"',
+			}),
+			effectiveCalendarUrl,
+		);
+		const confirmed = updatedRead(current, patch, {
+			resourceUrl: effectiveResourceUrl,
+			etag: '"confirmed"',
+		});
+		const returned = withCalendarUrl(confirmed.result, effectiveCalendarUrl);
+		const followUpPatch: CalendarEventPatch = { summary: { kind: 'set', value: 'Follow-up' } };
+		const followUp = updatedRead(returned, followUpPatch, {
+			resourceUrl: effectiveResourceUrl,
+			etag: '"follow-up"',
+		});
+		const followUpReturned = withCalendarUrl(followUp.result, effectiveCalendarUrl);
+		registerResolvedUidIdentity(current, CALENDAR_URL, effectiveCalendarUrl);
+		mocks.resolveCalendarEventByUid.mockResolvedValue(current);
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: effectiveResourceUrl,
+		});
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(returned)
+			.mockResolvedValueOnce(returned)
+			.mockResolvedValueOnce(followUpReturned);
+
+		const initial = await updateCalendarEvent(
+			TRANSPORT,
+			{
+				calendarUrl: CALENDAR_URL,
+				identifier: { kind: 'uid', uid: 'update@example.test' },
+				patch,
+			},
+			() => CLOCK,
+		);
+		expect(initial).toMatchObject({
+			calendarUrl: effectiveCalendarUrl,
+			resourceUrl: effectiveResourceUrl,
+			etag: '"confirmed"',
+		});
+		expect(mocks.updateCalendarEventResource).toHaveBeenNthCalledWith(
+			1,
+			TRANSPORT,
+			effectiveCalendarUrl,
+			effectiveResourceUrl,
+			expect.any(String),
+			'"snapshot"',
+		);
+
+		await expect(
+			updateCalendarEvent(
+				TRANSPORT,
+				{
+					calendarUrl: initial.calendarUrl,
+					identifier: { kind: 'resourceUrl', resourceUrl: initial.resourceUrl },
+					patch: followUpPatch,
+				},
+				() => CLOCK,
+			),
+		).resolves.toMatchObject({
+			calendarUrl: effectiveCalendarUrl,
+			resourceUrl: effectiveResourceUrl,
+			etag: '"follow-up"',
+		});
+		expect(mocks.updateCalendarEventResource).toHaveBeenNthCalledWith(
+			2,
+			TRANSPORT,
+			effectiveCalendarUrl,
+			effectiveResourceUrl,
+			expect.any(String),
+			'"confirmed"',
+		);
+		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenNthCalledWith(
+			2,
+			TRANSPORT,
+			effectiveCalendarUrl,
+			effectiveResourceUrl,
+			{ allowMissingEtag: true },
+		);
+		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenNthCalledWith(
+			3,
+			TRANSPORT,
+			effectiveCalendarUrl,
+			effectiveResourceUrl,
+		);
+	});
+
+	it('uses resolver-registered redirect provenance for raw UID Update', async () => {
+		const effectiveCalendarUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/',
+		);
+		const effectiveResourceUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/raw-update.ics',
+		);
+		const rawIcs = calendarData('Raw Update after redirect');
+		const current = withCalendarUrl(
+			readResult(calendarData(), {
+				resourceUrl: effectiveResourceUrl,
+				etag: '"snapshot"',
+			}),
+			effectiveCalendarUrl,
+		);
+		const confirmed = withCalendarUrl(
+			readResult(rawIcs, {
+				resourceUrl: effectiveResourceUrl,
+				etag: '"confirmed"',
+			}),
+			effectiveCalendarUrl,
+		);
+		registerResolvedUidIdentity(current, CALENDAR_URL, effectiveCalendarUrl);
+		mocks.resolveCalendarEventByUid.mockResolvedValue(current);
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: effectiveResourceUrl,
+		});
+		mocks.getCalendarEventByResourceUrl.mockResolvedValue(confirmed);
+
+		await expect(
+			updateCalendarEvent(TRANSPORT, {
+				calendarUrl: CALENDAR_URL,
+				identifier: { kind: 'uid', uid: 'update@example.test' },
+				inputMode: 'rawIcs',
+				rawIcs,
+			}),
+		).resolves.toMatchObject({
+			calendarUrl: effectiveCalendarUrl,
+			resourceUrl: effectiveResourceUrl,
+			etag: '"confirmed"',
+			rawIcs,
+		});
+		expect(mocks.updateCalendarEventResource).toHaveBeenCalledWith(
+			TRANSPORT,
+			effectiveCalendarUrl,
+			effectiveResourceUrl,
+			rawIcs,
+			'"snapshot"',
+		);
+		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledWith(
+			TRANSPORT,
+			effectiveCalendarUrl,
+			effectiveResourceUrl,
+		);
+	});
+
+	it('uses resolver-registered redirect provenance for existing raw UID Upsert', async () => {
+		const effectiveCalendarUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/',
+		);
+		const effectiveResourceUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/raw-upsert.ics',
+		);
+		const rawIcs = calendarData('Raw Upsert after redirect');
+		const current = withCalendarUrl(
+			readResult(calendarData(), {
+				resourceUrl: effectiveResourceUrl,
+				etag: '"snapshot"',
+			}),
+			effectiveCalendarUrl,
+		);
+		const confirmed = withCalendarUrl(
+			readResult(rawIcs, {
+				resourceUrl: effectiveResourceUrl,
+				etag: '"confirmed"',
+			}),
+			effectiveCalendarUrl,
+		);
+		registerResolvedUidIdentity(current, CALENDAR_URL, effectiveCalendarUrl);
+		mocks.resolveCalendarEventByUid.mockResolvedValue(current);
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: effectiveResourceUrl,
+		});
+		mocks.getCalendarEventByResourceUrl.mockResolvedValue(confirmed);
+
+		await expect(
+			upsertCalendarEvent(
+				TRANSPORT,
+				{ calendarUrl: CALENDAR_URL, inputMode: 'rawIcs', rawIcs },
+				{ clock: () => CLOCK, uidFactory: () => 'unused-raw-upsert-uid' },
+			),
+		).resolves.toMatchObject({
+			action: 'update',
+			event: {
+				calendarUrl: effectiveCalendarUrl,
+				resourceUrl: effectiveResourceUrl,
+				etag: '"confirmed"',
+				rawIcs,
+			},
+		});
+		expect(mocks.updateCalendarEventResource).toHaveBeenCalledWith(
+			TRANSPORT,
+			effectiveCalendarUrl,
+			effectiveResourceUrl,
+			rawIcs,
+			'"snapshot"',
+		);
+		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledWith(
+			TRANSPORT,
+			effectiveCalendarUrl,
+			effectiveResourceUrl,
+		);
+	});
+
+	it('does not apply redirect provenance to raw resource-URL Update', async () => {
+		const effectiveCalendarUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/',
+		);
+		const rawIcs = calendarData('Raw resource URL after update');
+		const current = readResult(calendarData(), { etag: '"snapshot"' });
+		const confirmed = readResult(rawIcs, { etag: '"confirmed"' });
+		registerResolvedUidIdentity(current, CALENDAR_URL, effectiveCalendarUrl);
+		mocks.getCalendarEventByResourceUrl
+			.mockResolvedValueOnce(current)
+			.mockResolvedValueOnce(confirmed);
+		mocks.updateCalendarEventResource.mockResolvedValue({
+			statusCode: 204,
+			resourceUrl: RESOURCE_URL,
+		});
+
+		await expect(
+			updateCalendarEvent(TRANSPORT, {
+				calendarUrl: CALENDAR_URL,
+				identifier: { kind: 'resourceUrl', resourceUrl: RESOURCE_URL },
+				inputMode: 'rawIcs',
+				rawIcs,
+			}),
+		).resolves.toMatchObject({ calendarUrl: CALENDAR_URL, rawIcs });
+		expect(mocks.updateCalendarEventResource).toHaveBeenCalledWith(
+			TRANSPORT,
+			CALENDAR_URL,
+			RESOURCE_URL,
+			rawIcs,
+			'"snapshot"',
+		);
+		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenLastCalledWith(
+			TRANSPORT,
+			CALENDAR_URL,
+			RESOURCE_URL,
+		);
+	});
+
+	it('rejects fabricated, mismatched, and non-child redirect UID provenance before mutation', () => {
+		const effectiveCalendarUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/',
+		);
+		const effectiveResourceUrl = validateAbsoluteHttpUrl(
+			'https://partition.example.test/calendars/work/redirected.ics',
+		);
+		const fabricated = readResult(calendarData(), { resourceUrl: effectiveResourceUrl });
+		const registered = withCalendarUrl(
+			readResult(calendarData(), { resourceUrl: effectiveResourceUrl }),
+			effectiveCalendarUrl,
+		);
+		const nonChild = withCalendarUrl(
+			readResult(calendarData(), {
+				resourceUrl: validateAbsoluteHttpUrl(
+					'https://partition.example.test/calendars/work/nested/redirected.ics',
+				),
+			}),
+			effectiveCalendarUrl,
+		);
+		registerResolvedUidIdentity(registered, CALENDAR_URL, effectiveCalendarUrl);
+		registerResolvedUidIdentity(nonChild, CALENDAR_URL, effectiveCalendarUrl);
+		const differentSelectedCalendar = validateAbsoluteHttpUrl(
+			'https://calendar.example.test/calendars/different/',
+		);
+
+		for (const [selectedCalendarUrl, current] of [
+			[CALENDAR_URL, fabricated],
+			[differentSelectedCalendar, registered],
+			[CALENDAR_URL, nonChild],
+		] as const) {
+			let failure: unknown;
+			try {
+				assertResolvedCalendarEventUidIdentity(selectedCalendarUrl, 'update@example.test', current);
+			} catch (error) {
+				failure = error;
+			}
+			expect(failure).toMatchObject({ code: 'INVALID_CALENDAR_EVENT_UID_RESPONSE' });
+		}
+		expect(mocks.updateCalendarEventResource).not.toHaveBeenCalled();
 	});
 
 	it('uses the snapshot validator only when the caller ETag is absent or empty', async () => {

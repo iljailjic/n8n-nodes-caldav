@@ -17,6 +17,7 @@ import {
 	CalendarEventUidResolutionFailureCode,
 	resolveCalendarEventByUid,
 } from './resolveByUid';
+import { effectiveCalendarUrlForResolvedUid } from './resolvedUidIdentity';
 import type {
 	CalendarEvent,
 	CalendarEventReadResult,
@@ -246,6 +247,14 @@ export function assertResolvedCalendarEventUidIdentity(
 	expectedUid: string,
 	current: CalendarEventReadResult,
 ): void {
+	const effectiveCalendarUrl = effectiveCalendarUrlForResolvedUid(current, selectedCalendarUrl);
+	if (
+		effectiveCalendarUrl !== undefined &&
+		current.event.uid === expectedUid &&
+		isDirectCalendarChild(effectiveCalendarUrl, current.event.resourceUrl)
+	) {
+		return;
+	}
 	assertSnapshotResourceUrl(
 		{ kind: 'uid', uid: expectedUid },
 		selectedCalendarUrl,
@@ -1058,7 +1067,9 @@ async function updateCalendarEventInternal(
 						transport,
 						current.event.calendarUrl,
 						updatedResourceUrl,
-						{ timeZoneContext },
+						{
+							timeZoneContext,
+						},
 					);
 		if (
 			confirmed.event.etag === undefined ||
@@ -1145,7 +1156,6 @@ function snapshotRawUpdateInput(input: RawCalendarEventUpdateInput): RawCalendar
 
 export async function updatePreparedRawCalendarEvent(
 	transport: CalDavTransport,
-	calendarUrl: AbsoluteHttpUrl,
 	current: CalendarEventReadResult,
 	prepared: PreparedRawCalendarEventWrite,
 	etag: string,
@@ -1174,8 +1184,8 @@ export async function updatePreparedRawCalendarEvent(
 		if (
 			confirmed.event.etag === undefined ||
 			normalizeCalendarCollectionUrl(confirmed.event.calendarUrl) !==
-				normalizeCalendarCollectionUrl(calendarUrl) ||
-			!isDirectCalendarChild(calendarUrl, confirmed.event.resourceUrl) ||
+				normalizeCalendarCollectionUrl(current.event.calendarUrl) ||
+			!isDirectCalendarChild(current.event.calendarUrl, confirmed.event.resourceUrl) ||
 			confirmed.event.uid !== prepared.uid ||
 			!rawCalendarEventResourcesAreSemanticallyEqual(prepared.resource, confirmed.context.resource)
 		) {
@@ -1234,13 +1244,7 @@ async function updateRawCalendarEvent(
 	if (etag === undefined) {
 		throw new CalDavCalendarEventMutationError(CalendarEventMutationFailureCode.MISSING_ETAG);
 	}
-	return await updatePreparedRawCalendarEvent(
-		transport,
-		snapshot.calendarUrl,
-		current,
-		prepared,
-		etag,
-	);
+	return await updatePreparedRawCalendarEvent(transport, current, prepared, etag);
 }
 
 export interface CalendarEventResolvedUpdateInput {
