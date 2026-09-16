@@ -93,7 +93,10 @@ function liveRequestAdapter(
 				method: options.method,
 				headers: {
 					...options.headers,
-					Authorization: `Basic ${Buffer.from(`${input.username}:${input.appPassword}`, 'utf8').toString('base64')}`,
+					Authorization: `Basic ${Buffer.from(
+						`${input.username}:${input.appPassword}`,
+						'utf8',
+					).toString('base64')}`,
 				},
 				...(options.body === undefined ? {} : { body: options.body }),
 				redirect: 'manual',
