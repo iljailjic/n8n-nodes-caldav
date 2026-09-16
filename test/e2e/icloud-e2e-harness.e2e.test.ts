@@ -29,7 +29,11 @@ import {
 	type N8nCalDavRequestOptions,
 } from '../../nodes/CalDav/transport/http';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
-import { createCalendarEventResource } from '../../nodes/CalDav/events/mutations';
+import {
+	CalendarEventMutationFailureCode,
+	CalDavCalendarEventMutationError,
+	createCalendarEventResource,
+} from '../../nodes/CalDav/events/mutations';
 import { calendarEventResourceUrlForUid } from '../../nodes/CalDav/events/createPreparation';
 
 import {
@@ -1227,6 +1231,7 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			const createRaceUid = `codex-e2e-57-${runId}-create-race`;
 			const createRaceResourceUrl = calendarEventResourceUrlForUid(selected.url, createRaceUid);
 			const upsertCreateRaceStart = observedRequests.length;
+			let createRaceWinnerCreated = false;
 			reportRaceHook = async () => {
 				const winner = await adapter.request({
 					method: CalDavMethod.PUT,
@@ -1250,6 +1255,7 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 					].join('\r\n'),
 				});
 				assertE2e(winner.statusCode === 204 || winner.statusCode === 201);
+				createRaceWinnerCreated = true;
 				reportRaceHook = undefined;
 			};
 			const [upsertCreateRace] = await execute(
@@ -1257,7 +1263,9 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 				true,
 			);
 			assertE2e(typeof upsertCreateRace?.json.error === 'string');
-			owned.push({ uid: createRaceUid, resourceUrl: createRaceResourceUrl });
+			if (createRaceWinnerCreated) {
+				owned.push({ uid: createRaceUid, resourceUrl: createRaceResourceUrl });
+			}
 			const upsertCreateRaceTraffic = observedRequests.slice(upsertCreateRaceStart);
 			assertIcloudCandidateScanLookup(upsertCreateRaceTraffic, 2);
 			assertSingleFailedConditionalProductPut(upsertCreateRaceTraffic, 'if-none-match');
@@ -1293,7 +1301,9 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 				uidConflict = error;
 			}
 			assertE2e(
-				uidConflict instanceof CalDavAuthorizationError && uidConflict.noUidConflict === true,
+				(uidConflict instanceof CalDavAuthorizationError && uidConflict.noUidConflict === true) ||
+					(uidConflict instanceof CalDavCalendarEventMutationError &&
+						uidConflict.code === CalendarEventMutationFailureCode.CREATE_CONFLICT),
 			);
 			scenarioIds.push('collection-wide-no-uid-conflict-distinct-resource-terminal');
 			outcome = 'passed';

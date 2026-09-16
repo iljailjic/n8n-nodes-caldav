@@ -876,7 +876,6 @@ async function upsertRawCalendarEvent(
 	try {
 		const event = await updatePreparedRawCalendarEvent(
 			transport,
-			rawInput.calendarUrl,
 			current,
 			prepared,
 			current.event.etag,

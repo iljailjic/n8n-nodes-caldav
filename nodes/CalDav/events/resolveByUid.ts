@@ -10,7 +10,11 @@ import { ICALENDAR_MAX_RESOURCE_BYTES, parseICalendarResource } from '../icalend
 import type { ICalendarResource } from '../icalendar/parser';
 import { CalDavMethod, CalDavNotFoundError, decodeCalDavTextBody } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
-import { resolveCalDavHref, validateAbsoluteHttpUrl } from '../transport/url';
+import {
+	normalizeCalendarCollectionUrl,
+	resolveCalDavHref,
+	validateAbsoluteHttpUrl,
+} from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import { CalDavEventUidLookupStrategy } from '../providers/types';
 import { parseDavMultiStatus } from '../xml/parser';
@@ -24,6 +28,7 @@ import {
 	calendarEventResourceUrlForBase64Uid,
 	calendarEventResourceUrlForEncodedUid,
 } from './resourceName';
+import { registerResolvedUidIdentity } from './resolvedUidIdentity';
 
 export const CalendarEventUidResolutionFailureCode = Object.freeze({
 	NOT_FOUND: 'CALENDAR_EVENT_UID_NOT_FOUND',
@@ -83,6 +88,7 @@ interface ListedResource {
 }
 
 interface ResourceListing {
+	readonly effectiveCalendarUrl: AbsoluteHttpUrl;
 	readonly resources: readonly ListedResource[];
 	readonly bodyBytes: number;
 }
@@ -364,6 +370,28 @@ function collectionResource(property: DavProperty): boolean {
 	return false;
 }
 
+function hasExplicitlyMissingResourceType(response: DavPropertyResponse): boolean {
+	const resourceTypeStatuses = response.propstats.flatMap((propstat) =>
+		propstat.properties
+			.filter((property) => isExpandedName(property, DAV_NAMESPACE, 'resourcetype'))
+			.map(() => propstat.status),
+	);
+	return (
+		resourceTypeStatuses.length === 1 &&
+		!resourceTypeStatuses[0].isSuccessful &&
+		resourceTypeStatuses[0].code === 404
+	);
+}
+
+function hasOneSuccessfulEtag(response: DavPropertyResponse): boolean {
+	const etags = response.successfulProperties.filter((property) =>
+		isExpandedName(property, DAV_NAMESPACE, 'getetag'),
+	);
+	if (etags.length !== 1) return false;
+	readCharacterText(etags[0], false);
+	return true;
+}
+
 async function listResources(
 	transport: CalDavTransport,
 	calendarUrl: AbsoluteHttpUrl,
@@ -377,6 +405,12 @@ async function listResources(
 		body: buildPropfindRequest(['resourceType', 'getEtag']),
 	});
 	if (response.statusCode !== 207) return incomplete();
+	let effectiveCalendarUrl: AbsoluteHttpUrl;
+	try {
+		effectiveCalendarUrl = normalizeCalendarCollectionUrl(response.effectiveUrl);
+	} catch {
+		return incomplete();
+	}
 	let decoded: string;
 	try {
 		decoded = decodeCalDavTextBody(response.body, response.headers, { xml: true });
@@ -392,19 +426,27 @@ async function listResources(
 		} catch {
 			return incomplete();
 		}
-		if (isCalendarResource(calendarUrl, resourceUrl)) continue;
-		if (!isDirectChild(calendarUrl, resourceUrl)) return incomplete();
+		if (isCalendarResource(effectiveCalendarUrl, resourceUrl)) continue;
+		if (!isDirectChild(effectiveCalendarUrl, resourceUrl)) return incomplete();
 		const types = davResponse.successfulProperties.filter((property) =>
 			isExpandedName(property, DAV_NAMESPACE, 'resourcetype'),
 		);
-		if (types.length !== 1) return incomplete();
-		if (collectionResource(types[0])) continue;
+		if (types.length === 0) {
+			if (!hasExplicitlyMissingResourceType(davResponse) || !hasOneSuccessfulEtag(davResponse)) {
+				return incomplete();
+			}
+		}
+		if (types.length > 1) return incomplete();
+		if (types.length === 1 && collectionResource(types[0])) continue;
 		const previous = result.get(resourceUrl);
-		if (previous !== undefined && previous.href !== davResponse.hrefs[0]) return incomplete();
+		if (previous !== undefined && previous.href !== davResponse.hrefs[0]) {
+			return incomplete();
+		}
 		result.set(resourceUrl, Object.freeze({ href: davResponse.hrefs[0], resourceUrl }));
 		checkBudget(startedAt, result.size);
 	}
 	return Object.freeze({
+		effectiveCalendarUrl,
 		resources: Object.freeze([...result.values()]),
 		bodyBytes: response.body.byteLength,
 	});
@@ -457,17 +499,17 @@ async function scan(
 			const properties = requestedProperties(davResponse, options.allowMissingEtag === true);
 			const resource = parseICalendarResource(Buffer.from(properties.calendarData, 'utf8'));
 			if (eventUid(resource) !== uid) continue;
-			matches.push(
-				await mapCalendarEventResourceWithTimeZoneContext(
-					{
-						calendarUrl,
-						resourceUrl,
-						...(properties.etag === undefined ? {} : { etag: properties.etag }),
-						resource,
-					},
-					options.timeZoneContext,
-				),
+			const match = await mapCalendarEventResourceWithTimeZoneContext(
+				{
+					calendarUrl: listing.effectiveCalendarUrl,
+					resourceUrl,
+					...(properties.etag === undefined ? {} : { etag: properties.etag }),
+					resource,
+				},
+				options.timeZoneContext,
 			);
+			registerResolvedUidIdentity(match, calendarUrl, listing.effectiveCalendarUrl);
+			matches.push(match);
 			checkBudget(startedAt, undefined, bodyBytes);
 		}
 		if (returned.size !== batch.length) return incomplete();

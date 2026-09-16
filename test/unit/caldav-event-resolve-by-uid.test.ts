@@ -336,6 +336,80 @@ describe('iCloud UID candidate lookup contract', () => {
 		]);
 	});
 
+	it('scopes a redirected iCloud listing to its validated effective calendar URL', async () => {
+		const uid = 'scan-effective-url@example.test';
+		const effectiveCalendarUrl = 'https://partition.example.test/calendars/selected/';
+		const transport = iCloudTransport(async (request) => {
+			if (request.method === CalDavMethod.GET) throw new CalDavNotFoundError(404);
+			if (request.method === CalDavMethod.PROPFIND) {
+				return transportResponse(
+					multistatus(
+						propertyResponse(
+							`${effectiveCalendarUrl}?listing=alias`,
+							propstat('<d:resourcetype/>'),
+						) + propertyResponse('matching.ics', propstat('<d:resourcetype/>')),
+					),
+					207,
+					effectiveCalendarUrl,
+				);
+			}
+			return transportResponse(
+				multistatus(eventResponse('matching.ics', uid)),
+				207,
+				effectiveCalendarUrl,
+			);
+		});
+
+		const result = await resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid);
+
+		expect(result.event).toMatchObject({
+			calendarUrl: effectiveCalendarUrl,
+			resourceUrl: `${effectiveCalendarUrl}matching.ics`,
+			uid,
+		});
+		expect(transport.request.mock.calls.map(([request]) => request.method)).toEqual([
+			CalDavMethod.GET,
+			CalDavMethod.GET,
+			CalDavMethod.PROPFIND,
+			CalDavMethod.REPORT,
+		]);
+	});
+
+	it('scans a direct child when iCloud reports only its unique ETag and a separate 404 resource type', async () => {
+		const uid = 'scan-missing-resource-type@example.test';
+		const transport = iCloudTransport(async (request) => {
+			if (request.method === CalDavMethod.GET) throw new CalDavNotFoundError(404);
+			if (request.method === CalDavMethod.PROPFIND) {
+				return transportResponse(
+					multistatus(
+						propertyResponse(
+							'matching.ics',
+							propstat(etagProperty('"listing-etag"')) +
+								propstat('<d:resourcetype/>', 'HTTP/1.1 404 Not Found'),
+						),
+					),
+					207,
+					SCAN_EFFECTIVE_URL,
+				);
+			}
+			return transportResponse(
+				multistatus(eventResponse('matching.ics', uid)),
+				207,
+				SCAN_EFFECTIVE_URL,
+			);
+		});
+
+		const result = await resolveCalendarEventByUid(transport, SCAN_CALENDAR_URL, uid);
+
+		expect(result.event).toMatchObject({ uid, resourceUrl: `${SCAN_EFFECTIVE_URL}matching.ics` });
+		expect(transport.request.mock.calls.map(([request]) => request.method)).toEqual([
+			CalDavMethod.GET,
+			CalDavMethod.GET,
+			CalDavMethod.PROPFIND,
+			CalDavMethod.REPORT,
+		]);
+	});
+
 	it('rejects a non-child PROPFIND href without issuing a multiget', async () => {
 		const uid = 'scan-non-child@example.test';
 		const transport = iCloudTransport(async (request) => {
