@@ -2,7 +2,6 @@
 // eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { Readable } from 'node:stream';
 // UUIDs scope mutable resources to this one test run.
-// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { randomUUID } from 'node:crypto';
 /* eslint-disable @n8n/community-nodes/no-restricted-globals, @n8n/community-nodes/require-node-api-error -- The opt-in test suite reads only its own environment and reports stable public-safe codes. */
 
@@ -35,6 +34,7 @@ import {
 	createCalendarEventResource,
 } from '../../nodes/CalDav/events/mutations';
 import { calendarEventResourceUrlForUid } from '../../nodes/CalDav/events/createPreparation';
+import { parseICalendarResource, type ICalendarEntry } from '../../nodes/CalDav/icalendar/parser';
 
 import {
 	assertE2e,
@@ -45,10 +45,12 @@ import {
 	recoverOwnedE2eResource,
 	selectExactCalendar,
 	serializeEvidence,
+	emailAlarmRecipient,
 } from './support/icloud-e2e-harness';
 
 const CONTRACT_REVISION = 'issue-56-contract-r1' as const;
 const MUTATION_CONTRACT_REVISION = 'issue-57-contract-r1' as const;
+const ADVANCED_EVENT_CONTRACT_REVISION = 'issue-58-contract-r1' as const;
 const READ_ONLY_METHODS = new Set<CalDavMethod>([CalDavMethod.OPTIONS, CalDavMethod.PROPFIND]);
 const LIVE_METHODS = new Set<CalDavMethod>([
 	CalDavMethod.OPTIONS,
@@ -253,6 +255,32 @@ function assertPrivateRawIcs(output: Readonly<Record<string, unknown>>, uid: str
 	assertE2e(typeof output.rawIcs === 'string' && output.rawIcs.includes(`UID:${uid}`));
 }
 
+function semanticIcsShape(rawIcs: string): Readonly<Record<string, number>> {
+	const resource = parseICalendarResource(Buffer.from(rawIcs, 'utf8'));
+	const counts: Record<string, number> = {};
+	const visit = (entries: readonly ICalendarEntry[]) => {
+		for (const entry of entries) {
+			counts[entry.name] = (counts[entry.name] ?? 0) + 1;
+			if (entry.kind === 'component') visit(entry.entries);
+		}
+	};
+	visit(resource.calendar.entries);
+	return counts;
+}
+
+function semanticIcsValues(rawIcs: string): Readonly<Record<string, readonly string[]>> {
+	const resource = parseICalendarResource(Buffer.from(rawIcs, 'utf8'));
+	const values: Record<string, string[]> = {};
+	const visit = (entries: readonly ICalendarEntry[]) => {
+		for (const entry of entries) {
+			if (entry.kind === 'component') visit(entry.entries);
+			else (values[entry.name] ??= []).push(entry.value.raw);
+		}
+	};
+	visit(resource.calendar.entries);
+	return values;
+}
+
 async function waitForTimeRangeConvergence(
 	query: () => Promise<ReadonlyArray<Readonly<Record<string, unknown>>>>,
 	expected: ReadonlyArray<{ readonly label: string; readonly uid: string }>,
@@ -358,7 +386,7 @@ describe('iCloud E2E discovery contract (fictional synthetic regressions)', () =
 
 	it('emits only privacy-safe, discovery-only evidence', () => {
 		const evidence = serializeEvidence({
-			schemaVersion: 'icloud-e2e-evidence/v3',
+			schemaVersion: 'icloud-e2e-evidence/v4',
 			mode: 'fake',
 			sourceRevision: CONTRACT_REVISION,
 			outcome: 'passed',
@@ -395,6 +423,40 @@ describe('iCloud E2E discovery contract (fictional synthetic regressions)', () =
 		);
 		expect(READ_ONLY_METHODS.has(CalDavMethod.GET)).toBe(false);
 	});
+});
+
+it('uses a fictional email recipient by default and compares advanced ICS by parsed shape', () => {
+	const defaultRecipient = emailAlarmRecipient({ CALDAV_ICLOUD_E2E_OPT_IN: '1' });
+	expect(defaultRecipient).toBe('mailto:advanced-event-recipient@caldav-e2e.invalid');
+	expect(
+		emailAlarmRecipient({
+			CALDAV_ICLOUD_E2E_OPT_IN: '1',
+			CALDAV_ICLOUD_E2E_EMAIL_OPT_IN: '1',
+			CALDAV_ICLOUD_E2E_EMAIL_SINK: 'mailto:owner-controlled@example.test',
+		}),
+	).toBe('mailto:owner-controlled@example.test');
+
+	const shape = semanticIcsShape(
+		[
+			'BEGIN:VCALENDAR',
+			'VERSION:2.0',
+			'BEGIN:VEVENT',
+			'UID:advanced-semantic-fixture@example.test',
+			'DTSTAMP:20400101T000000Z',
+			'DTSTART;TZID=Europe/Prague:20400325T033000',
+			'DTEND;TZID=Europe/Prague:20400325T043000',
+			'RRULE:FREQ=DAILY;COUNT=2',
+			'X-CODEX-UNKNOWN:preserve',
+			'BEGIN:VALARM',
+			'ACTION:DISPLAY',
+			'TRIGGER:-PT15M',
+			'END:VALARM',
+			'END:VEVENT',
+			'END:VCALENDAR',
+			'',
+		].join('\r\n'),
+	);
+	expect(shape).toMatchObject({ VEVENT: 1, VALARM: 1, RRULE: 1, 'X-CODEX-UNKNOWN': 1 });
 });
 
 const liveInput = liveInputOrUndefined();
@@ -490,7 +552,7 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live read-only discovery', (
 			// eslint-disable-next-line no-console -- The manual workflow log receives only aggregate, privacy-safe evidence.
 			console.info(
 				serializeEvidence({
-					schemaVersion: 'icloud-e2e-evidence/v3',
+					schemaVersion: 'icloud-e2e-evidence/v4',
 					mode: 'live',
 					sourceRevision: CONTRACT_REVISION,
 					outcome,
@@ -703,7 +765,7 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live event lookup and range 
 			// eslint-disable-next-line no-console -- Only aggregate evidence leaves the test process.
 			console.info(
 				serializeEvidence({
-					schemaVersion: 'icloud-e2e-evidence/v3',
+					schemaVersion: 'icloud-e2e-evidence/v4',
 					mode: 'live',
 					sourceRevision: CONTRACT_REVISION,
 					outcome,
@@ -1377,7 +1439,7 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 			// eslint-disable-next-line no-console -- Aggregate IDs and request shapes contain no live identifiers.
 			console.info(
 				serializeEvidence({
-					schemaVersion: 'icloud-e2e-evidence/v3',
+					schemaVersion: 'icloud-e2e-evidence/v4',
 					mode: 'live',
 					sourceRevision: MUTATION_CONTRACT_REVISION,
 					outcome,
@@ -1387,6 +1449,276 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live CRUD, ETag, and Upsert 
 				}),
 			);
 			if (cleanupFailed || incompleteSuppliedUidScan) assertE2e(false);
+		}
+	});
+});
+
+describe.runIf(liveInput !== undefined)('iCloud E2E live advanced event semantics', () => {
+	it('creates, reads, queries, replaces, upserts, and conditionally removes only advanced run-owned resources', async () => {
+		const input = liveInput!;
+		const observedMethods: CalDavMethod[] = [];
+		const adapter = liveRequestAdapter(input, observedMethods);
+		const transport = createCalDavTransport(input.serverUrl, adapter);
+		const node = new CalDav();
+		const runId = randomUUID();
+		const scenarioIds: string[] = [];
+		const errorCodes: IcloudE2eErrorCode[] = [];
+		let outcome: 'passed' | 'failed' = 'failed';
+		const owned: Array<{ readonly uid: string; readonly resourceUrl: string }> = [];
+		let selectedCalendarUrl: string | undefined;
+		const execute = async (parameters: Readonly<Record<string, unknown>>, continueOnFail = false) =>
+			(
+				await node.execute.call(liveNodeContext(input, adapter, parameters, continueOnFail))
+			)[0] as Array<{ readonly json: Record<string, unknown> }>;
+
+		try {
+			const principal = await discoverCurrentUserPrincipal(transport);
+			assertE2e(principal.kind === CurrentUserPrincipalDiscoveryKind.AUTHENTICATED);
+			const home = await discoverCalendarHome(transport, principal.principalUrl);
+			const calendars = await discoverCalendarCollections(
+				transport,
+				home.calendarHomeUrl,
+				defaultCalDavProviderRegistry.select(validateAbsoluteHttpUrl(transport.serverUrl)),
+			);
+			const selected = selectExactCalendar(
+				calendars.map((calendar) => ({
+					displayName: calendar.displayName ?? '',
+					url: calendar.url,
+				})),
+				input.calendarDisplayName,
+			);
+			const calendar = { __rl: true, mode: 'url', value: selected.url };
+			selectedCalendarUrl = selected.url;
+			const uid = `codex-e2e-58-${runId}-advanced`;
+			const rawIcs = [
+				'BEGIN:VCALENDAR',
+				'VERSION:2.0',
+				'PRODID:-//CalDAV E2E//Issue 58//EN',
+				'BEGIN:VEVENT',
+				`UID:${uid}`,
+				'DTSTAMP:20400101T000000Z',
+				'DTSTART;VALUE=DATE:20401027',
+				'DTEND;VALUE=DATE:20401029',
+				'RRULE:FREQ=DAILY;COUNT=2',
+				'X-CODEX-E2E-UNKNOWN:preserve',
+				'BEGIN:VALARM',
+				'ACTION:DISPLAY',
+				'TRIGGER:-PT15M',
+				'DESCRIPTION:advanced display',
+				'END:VALARM',
+				'BEGIN:VALARM',
+				'ACTION:AUDIO',
+				'TRIGGER:-PT30M',
+				'END:VALARM',
+				'BEGIN:VALARM',
+				'ACTION:EMAIL',
+				'TRIGGER:-PT45M',
+				'SUMMARY:advanced email',
+				'DESCRIPTION:advanced email body',
+				`ATTENDEE:${emailAlarmRecipient(process.env)}`,
+				'END:VALARM',
+				'END:VEVENT',
+				'END:VCALENDAR',
+				'',
+			].join('\r\n');
+			const [created] = await execute({
+				resource: 'event',
+				operation: 'create',
+				calendar,
+				inputMode: 'rawIcs',
+				rawIcs,
+			});
+			assertE2e(created !== undefined);
+			assertCurrentIdentity(created!.json, uid);
+			owned.push({ uid, resourceUrl: created!.json.resourceUrl as string });
+			scenarioIds.push('advanced-raw-create-current-identity');
+
+			const [read] = await execute({
+				resource: 'event',
+				operation: 'get',
+				calendar,
+				identifierMode: 'resourceUrl',
+				resourceUrl: owned[0]!.resourceUrl,
+			});
+			assertPrivateRawIcs(read!.json, uid);
+			const initialShape = semanticIcsShape(read!.json.rawIcs as string);
+			assertE2e(
+				initialShape.VALARM === 3 &&
+					initialShape.RRULE === 1 &&
+					initialShape['X-CODEX-E2E-UNKNOWN'] === 1,
+			);
+			const initialValues = semanticIcsValues(read!.json.rawIcs as string);
+			assertE2e(
+				initialValues.RRULE?.includes('FREQ=DAILY;COUNT=2') === true &&
+					initialValues.ACTION?.includes('DISPLAY') === true &&
+					initialValues.ACTION?.includes('AUDIO') === true &&
+					initialValues.ACTION?.includes('EMAIL') === true &&
+					initialValues.TRIGGER?.includes('-PT15M') === true &&
+					initialValues.TRIGGER?.includes('-PT30M') === true &&
+					initialValues.TRIGGER?.includes('-PT45M') === true &&
+					initialValues['X-CODEX-E2E-UNKNOWN']?.includes('preserve') === true,
+			);
+			assertE2e(
+				read!.json.timeMode === 'allDay' &&
+					read!.json.startDate === '2040-10-27' &&
+					read!.json.endDate === '2040-10-29',
+			);
+			scenarioIds.push('advanced-all-day-recurrence-alarms-unknown-semantic-readback');
+
+			const queried = await execute({
+				resource: 'event',
+				operation: 'getMany',
+				calendar,
+				start: '2040-10-27T00:00:00Z',
+				end: '2040-10-29T00:00:00Z',
+				returnAll: true,
+			});
+			assertE2e(queried.some((item) => item.json.uid === uid));
+			scenarioIds.push('advanced-all-day-half-open-query');
+
+			const [dstCreated] = await execute(
+				mutationParameters(selected.url, 'create', {
+					uid: `codex-e2e-58-${runId}-dst`,
+					timeZoneMode: 'iana',
+					timeZone: 'Europe/Prague',
+					start: '2040-03-25T03:30:00+02:00',
+					end: '2040-03-25T04:30:00+02:00',
+					summary: 'advanced DST wall-time',
+				}),
+			);
+			assertCurrentIdentity(dstCreated!.json);
+			owned.push({
+				uid: dstCreated!.json.uid as string,
+				resourceUrl: dstCreated!.json.resourceUrl as string,
+			});
+			assertE2e(
+				dstCreated!.json.timeZoneMode === 'iana' && dstCreated!.json.timeZone === 'Europe/Prague',
+			);
+			assertE2e(
+				dstCreated!.json.startLocal === '2040-03-25T03:30:00' &&
+					dstCreated!.json.endLocal === '2040-03-25T04:30:00',
+			);
+			scenarioIds.push('advanced-iana-prague-spring-dst-wall-time-readback');
+
+			const replacement = rawIcs.replace(
+				'X-CODEX-E2E-UNKNOWN:preserve',
+				'X-CODEX-E2E-UNKNOWN:replacement',
+			);
+			const [updated] = await execute({
+				resource: 'event',
+				operation: 'update',
+				calendar,
+				inputMode: 'rawIcs',
+				rawIcs: replacement,
+				identifierMode: 'resourceUrl',
+				resourceUrl: owned[0]!.resourceUrl,
+				etag: read!.json.etag,
+			});
+			assertCurrentIdentity(updated!.json, uid);
+			const updatedValues = semanticIcsValues(updated!.json.rawIcs as string);
+			assertE2e(
+				semanticIcsShape(updated!.json.rawIcs as string)['X-CODEX-E2E-UNKNOWN'] === 1 &&
+					updatedValues.RRULE?.includes('FREQ=DAILY;COUNT=2') === true &&
+					updatedValues.ACTION?.includes('DISPLAY') === true &&
+					updatedValues.ACTION?.includes('AUDIO') === true &&
+					updatedValues.ACTION?.includes('EMAIL') === true &&
+					updatedValues.TRIGGER?.includes('-PT15M') === true &&
+					updatedValues.TRIGGER?.includes('-PT30M') === true &&
+					updatedValues.TRIGGER?.includes('-PT45M') === true &&
+					updatedValues['X-CODEX-E2E-UNKNOWN']?.includes('replacement') === true,
+			);
+			scenarioIds.push('advanced-raw-full-replacement-semantic-readback');
+
+			const [upserted] = await execute({
+				resource: 'event',
+				operation: 'upsert',
+				calendar,
+				inputMode: 'rawIcs',
+				rawIcs: replacement,
+			});
+			assertE2e(upserted!.json.action === 'update');
+			assertCurrentIdentity(upserted!.json, uid);
+			owned[0] = { uid, resourceUrl: upserted!.json.resourceUrl as string };
+			const upsertedValues = semanticIcsValues(upserted!.json.rawIcs as string);
+			assertE2e(
+				upsertedValues.RRULE?.includes('FREQ=DAILY;COUNT=2') === true &&
+					upsertedValues.ACTION?.includes('DISPLAY') === true &&
+					upsertedValues.ACTION?.includes('AUDIO') === true &&
+					upsertedValues.ACTION?.includes('EMAIL') === true &&
+					upsertedValues.TRIGGER?.includes('-PT15M') === true &&
+					upsertedValues.TRIGGER?.includes('-PT30M') === true &&
+					upsertedValues.TRIGGER?.includes('-PT45M') === true &&
+					upsertedValues['X-CODEX-E2E-UNKNOWN']?.includes('replacement') === true,
+			);
+			scenarioIds.push('advanced-raw-upsert-update-uid-semantic-readback');
+			outcome = 'passed';
+		} catch (error) {
+			errorCodes.push(
+				error instanceof IcloudE2eHarnessError ? error.code : IcloudE2eErrorCode.ASSERTION_FAILED,
+			);
+			throw error;
+		} finally {
+			if (selectedCalendarUrl !== undefined) {
+				let cleanupFailed = false;
+				for (const resource of [...owned].reverse()) {
+					try {
+						let cleanupEtag: string | undefined;
+						const cleanup = await recoverOwnedE2eResource(
+							async () => {
+								const [current] = await execute(
+									{
+										resource: 'event',
+										operation: 'get',
+										calendar: { __rl: true, mode: 'url', value: selectedCalendarUrl },
+										identifierMode: 'resourceUrl',
+										resourceUrl: resource.resourceUrl,
+									},
+									true,
+								);
+								if (current?.json.uid !== resource.uid || typeof current.json.etag !== 'string') {
+									return false;
+								}
+								cleanupEtag = current.json.etag;
+								return true;
+							},
+							async () => {
+								const [deleted] = await execute(
+									{
+										resource: 'event',
+										operation: 'delete',
+										calendar: { __rl: true, mode: 'url', value: selectedCalendarUrl },
+										identifierMode: 'resourceUrl',
+										resourceUrl: resource.resourceUrl,
+										etag: cleanupEtag,
+									},
+									true,
+								);
+								return deleted?.json.deleted === true ? 'deleted' : 'failed';
+							},
+						);
+						if (cleanup !== 'cleaned') cleanupFailed = true;
+					} catch {
+						cleanupFailed = true;
+					}
+				}
+				if (cleanupFailed) {
+					errorCodes.push(IcloudE2eErrorCode.MANUAL_CLEANUP_REQUIRED);
+					outcome = 'failed';
+				}
+			}
+			// eslint-disable-next-line no-console -- The opt-in live suite emits its public-safe evidence record for CI artifacts.
+			console.info(
+				serializeEvidence({
+					schemaVersion: 'icloud-e2e-evidence/v4',
+					mode: 'live',
+					sourceRevision: ADVANCED_EVENT_CONTRACT_REVISION,
+					outcome,
+					scenarios: scenarioIds,
+					requestMethods: [...new Set(observedMethods)],
+					errorCodes,
+				}),
+			);
+			if (outcome === 'failed') assertE2e(false);
 		}
 	});
 });
