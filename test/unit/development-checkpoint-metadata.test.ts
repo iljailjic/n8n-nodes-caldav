@@ -9,18 +9,20 @@ import { cwd } from 'node:process';
 import { describe, expect, it } from 'vitest';
 
 const PACKAGE_NAME = '@iljailjic/n8n-nodes-caldav';
-const CHECKPOINT_VERSION = '0.6.0';
-const CHECKPOINT_HEADING = '## [0.6.0] - 2026-08-21';
-const CHECKPOINT_SECTION = `## [0.6.0] - 2026-08-21
+const UNRELEASED_HEADING = '## Unreleased';
+const CHECKPOINT_VERSION = '1.0.0-beta.1';
+const CHECKPOINT_HEADING = '## [1.0.0-beta.1] - 2026-09-17';
+const CHECKPOINT_SECTION = `## [1.0.0-beta.1] - 2026-09-17
 
 ### Development checkpoint
 
-- Added structured categories, status, and transparency across Event reads, Create, Update, and Upsert with explicit omission/set/remove semantics and preservation of unrelated iCalendar content (#46).
-- Added a deterministic structured recurrence-rule model for daily, weekly, monthly, and yearly rules with bounded validation and preservation of unsupported recurrence data (#47).
-- Added recurrence authoring and safe recurrence mutation across Create, Update, and Upsert while preserving exceptions, EXDATE/RDATE, unsupported fields, and IANA VTIMEZONE correctness without occurrence expansion (#48).
-- Added multiple structured DISPLAY, AUDIO, and EMAIL reminders with relative triggers, targeted mutation, and preservation of unsupported or untouched VALARM content (#49).
-- Added bounded source \`rawIcs\` output for Event Get, Get Many, Update, and Upsert update results with authoritative snapshot provenance and privacy-safe errors (#50).
-- Added validated Raw ICS input mode for Event Create, Update, and Upsert with complete-object replacement semantics, UID/calendar/ETag safeguards, semantic preservation, and authoritative read-back (#51).
+- Completed MVP integration and privacy-safe opt-in iCloud end-to-end validation.
+
+### Fixed
+
+- Accepted exact two- and three-digit iCloud CalDAV partition hosts while retaining strict HTTPS, port, and hostname trust checks.
+- Made the local iCloud E2E command execute its protected dry run directly before the live phase instead of spawning a nested npm command.
+- Made iCloud event lookups by UID verify candidate resource names before using a bounded calendar scan; standard-provider lookup behavior is unchanged, with the fallback adding only bounded iCloud requests.
 `;
 
 interface PackageIdentity {
@@ -40,8 +42,8 @@ async function readJson<T>(path: string): Promise<T> {
 	return JSON.parse(await readRepositoryFile(path)) as T;
 }
 
-describe('0.6.0 development checkpoint metadata', () => {
-	it('synchronizes the package and root lockfile identities at exactly 0.6.0', async () => {
+describe('1.0.0-beta.1 development checkpoint metadata', () => {
+	it('synchronizes the package and root lockfile identities at exactly 1.0.0-beta.1', async () => {
 		const packageJson = await readJson<PackageIdentity>('package.json');
 		const packageLock = await readJson<PackageLock>('package-lock.json');
 
@@ -53,16 +55,20 @@ describe('0.6.0 development checkpoint metadata', () => {
 		});
 	});
 
-	it('documents the exact dated checkpoint before 0.5.0 without claiming a release', async () => {
+	it('documents the exact dated checkpoint immediately after Unreleased without claiming a release', async () => {
 		const changelog = await readRepositoryFile('CHANGELOG.md');
 		const checkpointStart = changelog.indexOf(CHECKPOINT_HEADING);
-		const previousCheckpointStart = changelog.indexOf('## [0.5.0]');
+		const unreleasedStart = changelog.indexOf(UNRELEASED_HEADING);
+		const previousCheckpointStart = changelog.indexOf('## [0.6.0]');
 		const nextHeadingStart = changelog.indexOf(
 			'\n## ',
 			checkpointStart + CHECKPOINT_HEADING.length,
 		);
 
-		expect(changelog.match(/^## \[0\.6\.0\] - 2026-08-21$/gm) ?? []).toHaveLength(1);
+		expect(changelog.match(/^## \[1\.0\.0-beta\.1\] - 2026-09-17$/gm) ?? []).toHaveLength(1);
+		expect(changelog.match(/^## Unreleased$/gm) ?? []).toHaveLength(1);
+		expect(changelog).toContain(`${UNRELEASED_HEADING}\n\n${CHECKPOINT_HEADING}`);
+		expect(checkpointStart).toBe(unreleasedStart + UNRELEASED_HEADING.length + 2);
 		expect(checkpointStart).toBeGreaterThanOrEqual(0);
 		expect(previousCheckpointStart).toBeGreaterThan(checkpointStart);
 		expect(nextHeadingStart).toBe(previousCheckpointStart - 1);
