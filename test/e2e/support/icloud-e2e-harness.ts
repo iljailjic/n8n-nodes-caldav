@@ -2,7 +2,7 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- Stable test-harness errors are deliberately independent of n8n execution. */
 
 export const ICLOUD_E2E_EVIDENCE_PREFIX = 'ICLOUD_E2E_EVIDENCE';
-export const ICLOUD_E2E_SCHEMA_VERSION = 'icloud-e2e-evidence/v3';
+export const ICLOUD_E2E_SCHEMA_VERSION = 'icloud-e2e-evidence/v4';
 export const ICLOUD_E2E_CLEANUP_DELETE_ATTEMPTS = 3;
 
 export const IcloudE2eErrorCode = Object.freeze({
@@ -15,6 +15,7 @@ export const IcloudE2eErrorCode = Object.freeze({
 	TIME_RANGE_CONVERGENCE_FAILED: 'E2E_TIME_RANGE_CONVERGENCE_FAILED',
 	EVENT_CLEANUP_FAILED: 'E2E_EVENT_CLEANUP_FAILED',
 	MANUAL_CLEANUP_REQUIRED: 'E2E_MANUAL_CLEANUP_REQUIRED',
+	EMAIL_SINK_OPT_IN_REQUIRED: 'E2E_EMAIL_SINK_OPT_IN_REQUIRED',
 	MUTATION_CONFLICT_EXPECTED: 'E2E_MUTATION_CONFLICT_EXPECTED',
 	CALENDAR_NOT_FOUND: 'E2E_CALENDAR_NOT_FOUND',
 	CALENDAR_AMBIGUOUS: 'E2E_CALENDAR_AMBIGUOUS',
@@ -40,7 +41,7 @@ export interface IcloudE2eInput {
 export interface IcloudE2eEvidence {
 	readonly schemaVersion: typeof ICLOUD_E2E_SCHEMA_VERSION;
 	readonly mode: 'fake' | 'live';
-	readonly sourceRevision: 'issue-56-contract-r1' | 'issue-57-contract-r1';
+	readonly sourceRevision: 'issue-56-contract-r1' | 'issue-57-contract-r1' | 'issue-58-contract-r1';
 	readonly outcome: 'passed' | 'failed';
 	readonly scenarios: readonly string[];
 	readonly requestMethods: readonly (
@@ -114,4 +115,16 @@ export async function recoverOwnedE2eResource(
 
 export function serializeEvidence(evidence: IcloudE2eEvidence): string {
 	return `${ICLOUD_E2E_EVIDENCE_PREFIX} ${JSON.stringify(evidence)}`;
+}
+
+/** The ordinary live opt-in may never select a real mail recipient. */
+export function emailAlarmRecipient(env: NodeJS.ProcessEnv): string {
+	const sink = env.CALDAV_ICLOUD_E2E_EMAIL_SINK;
+	if (env.CALDAV_ICLOUD_E2E_EMAIL_OPT_IN !== '1' || sink === undefined || sink.length === 0) {
+		return 'mailto:advanced-event-recipient@caldav-e2e.invalid';
+	}
+	if (!sink.startsWith('mailto:')) {
+		throw new IcloudE2eHarnessError(IcloudE2eErrorCode.EMAIL_SINK_OPT_IN_REQUIRED);
+	}
+	return sink;
 }
