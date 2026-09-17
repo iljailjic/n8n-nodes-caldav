@@ -5,6 +5,12 @@ documented in this file.
 
 ## Unreleased
 
+## [1.0.0-beta.1] - 2026-09-17
+
+### Development checkpoint
+
+- Completed MVP integration and privacy-safe opt-in iCloud end-to-end validation.
+
 ### Fixed
 
 - Accepted exact two- and three-digit iCloud CalDAV partition hosts while retaining strict HTTPS, port, and hostname trust checks.
