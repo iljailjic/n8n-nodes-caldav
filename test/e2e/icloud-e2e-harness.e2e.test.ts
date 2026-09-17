@@ -2,7 +2,6 @@
 // eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { Readable } from 'node:stream';
 // UUIDs scope mutable resources to this one test run.
-// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
 import { randomUUID } from 'node:crypto';
 /* eslint-disable @n8n/community-nodes/no-restricted-globals, @n8n/community-nodes/require-node-api-error -- The opt-in test suite reads only its own environment and reports stable public-safe codes. */
 
@@ -1707,6 +1706,7 @@ describe.runIf(liveInput !== undefined)('iCloud E2E live advanced event semantic
 					outcome = 'failed';
 				}
 			}
+			// eslint-disable-next-line no-console -- The opt-in live suite emits its public-safe evidence record for CI artifacts.
 			console.info(
 				serializeEvidence({
 					schemaVersion: 'icloud-e2e-evidence/v4',
