@@ -1,0 +1,80 @@
+{
+	"name": "CalDAV Create then read by UID (sanitized example)",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "70ff7fd4-1fb3-4074-822f-9ded2d9cc49a",
+			"name": "When clicking 'Execute workflow'",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [-240, 0]
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "create",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/dedicated-test/"
+				},
+				"inputMode": "structured",
+				"uid": "create-read-example@example.test",
+				"timeMode": "timed",
+				"timeZoneMode": "utc",
+				"start": "2026-09-21T09:00:00Z",
+				"end": "2026-09-21T09:30:00Z",
+				"summary": "Sanitized create and read example",
+				"additionalFields": {}
+			},
+			"id": "bb25292a-2c92-46b0-8800-1d94cbac0c8a",
+			"name": "Create event",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 0],
+			"credentials": {
+				"calDavApi": {
+					"id": null,
+					"name": "Select your CalDAV credential after import"
+				}
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "get",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "={{ $json.calendarUrl }}"
+				},
+				"identifierMode": "uid",
+				"uid": "={{ $json.uid }}"
+			},
+			"id": "94d426eb-46d0-49af-b451-3670d3bef27c",
+			"name": "Read event by UID",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [240, 0],
+			"credentials": {
+				"calDavApi": {
+					"id": null,
+					"name": "Select your CalDAV credential after import"
+				}
+			}
+		}
+	],
+	"connections": {
+		"When clicking 'Execute workflow'": {
+			"main": [[{ "node": "Create event", "type": "main", "index": 0 }]]
+		},
+		"Create event": {
+			"main": [[{ "node": "Read event by UID", "type": "main", "index": 0 }]]
+		}
+	},
+	"pinData": {},
+	"active": false,
+	"settings": { "executionOrder": "v1" },
+	"versionId": "6f37e43a-dcba-488f-8431-7dd2f15ee2b1",
+	"meta": { "templateCredsSetupCompleted": false }
+}

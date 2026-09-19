@@ -1,0 +1,52 @@
+{
+	"name": "CalDAV All-Day Upsert (sanitized example)",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "68dbd85e-90c3-4862-9c86-024133de098f",
+			"name": "When clicking 'Execute workflow'",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [-220, 0]
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "upsert",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/dedicated-test/"
+				},
+				"inputMode": "structured",
+				"uid": "upsert-example@example.test",
+				"timeMode": "allDay",
+				"startDate": "2026-09-21",
+				"endDate": "2026-09-22",
+				"summary": "Sanitized all-day Upsert example",
+				"additionalFields": {}
+			},
+			"id": "5a956558-64a6-4a7f-87b1-186e39848594",
+			"name": "Upsert all-day event",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [20, 0],
+			"credentials": {
+				"calDavApi": {
+					"id": null,
+					"name": "Select your CalDAV credential after import"
+				}
+			}
+		}
+	],
+	"connections": {
+		"When clicking 'Execute workflow'": {
+			"main": [[{ "node": "Upsert all-day event", "type": "main", "index": 0 }]]
+		}
+	},
+	"pinData": {},
+	"active": false,
+	"settings": { "executionOrder": "v1" },
+	"versionId": "3e4a6b0d-a2e1-49ec-8eb7-d7c62b58eff4",
+	"meta": { "templateCredsSetupCompleted": false }
+}
