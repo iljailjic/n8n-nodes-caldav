@@ -1,0 +1,59 @@
+{
+	"name": "CalDAV Raw ICS Create (sanitized example)",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "b46e6204-b06f-41ef-a243-a78d367096d5",
+			"name": "When clicking 'Execute workflow'",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [-220, 0]
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "create",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/dedicated-test/"
+				},
+				"inputMode": "rawIcs",
+				"rawIcs": "BEGIN:VCALENDAR\\nVERSION:2.0\\nPRODID:-//example.test//CalDAV Raw ICS example//EN\\nBEGIN:VEVENT\\nUID:caldav-raw-ics-example@example.test\\nDTSTAMP:20260919T080000Z\\nDTSTART:20260921T090000Z\\nDTEND:20260921T093000Z\\nSUMMARY:Sanitized CalDAV Raw ICS example\\nEND:VEVENT\\nEND:VCALENDAR"
+			},
+			"id": "7377fc70-57de-47aa-84c0-8d0a6a6edb67",
+			"name": "Create event from Raw ICS",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [20, 0],
+			"credentials": {
+				"calDavApi": {
+					"id": null,
+					"name": "Select your CalDAV credential after import"
+				}
+			}
+		}
+	],
+	"connections": {
+		"When clicking 'Execute workflow'": {
+			"main": [
+				[
+					{
+						"node": "Create event from Raw ICS",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
+	"pinData": {},
+	"active": false,
+	"settings": {
+		"executionOrder": "v1"
+	},
+	"versionId": "d1b0d527-12e2-4e32-9f69-bc05e38b548a",
+	"meta": {
+		"templateCredsSetupCompleted": false
+	}
+}

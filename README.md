@@ -135,6 +135,11 @@ definition only when no preserved calendar content still references it.
 See [docs/MVP.md](docs/MVP.md) for the complete version 1.0.0 scope and
 acceptance criteria.
 
+The stable workflow-facing field, output, error, and compatibility contract is
+in [docs/CONTRACT.md](docs/CONTRACT.md). See
+[docs/WORKFLOW-EXAMPLES.md](docs/WORKFLOW-EXAMPLES.md) for sanitized wiring
+examples covering Create, Upsert, Update, Get Many, and Delete.
+
 ## Usage
 
 1. Install the community node.

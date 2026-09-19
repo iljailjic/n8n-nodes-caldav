@@ -1,0 +1,80 @@
+{
+	"name": "CalDAV ETag-protected Update (sanitized example)",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "2f51c6e6-3b9a-4cbe-a8d2-ef7f2cd701a0",
+			"name": "When clicking 'Execute workflow'",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [-240, 0]
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "get",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/dedicated-test/"
+				},
+				"identifierMode": "resourceUrl",
+				"resourceUrl": "https://calendar.example.test/calendars/dedicated-test/etag-update-example.ics"
+			},
+			"id": "43ea4630-b001-4124-8c0e-b3cad6cf93ad",
+			"name": "Read event with ETag",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 0],
+			"credentials": {
+				"calDavApi": {
+					"id": null,
+					"name": "Select your CalDAV credential after import"
+				}
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "update",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "={{ $json.calendarUrl }}"
+				},
+				"inputMode": "structured",
+				"identifierMode": "resourceUrl",
+				"resourceUrl": "={{ $json.resourceUrl }}",
+				"etag": "={{ $json.etag }}",
+				"timeMode": "timed",
+				"fieldsToUpdate": {
+					"summary": "Sanitized ETag-protected update"
+				}
+			},
+			"id": "f262b16a-cc24-4198-a58b-e72f40ddc4a1",
+			"name": "Update event with ETag",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [240, 0],
+			"credentials": {
+				"calDavApi": {
+					"id": null,
+					"name": "Select your CalDAV credential after import"
+				}
+			}
+		}
+	],
+	"connections": {
+		"When clicking 'Execute workflow'": {
+			"main": [[{ "node": "Read event with ETag", "type": "main", "index": 0 }]]
+		},
+		"Read event with ETag": {
+			"main": [[{ "node": "Update event with ETag", "type": "main", "index": 0 }]]
+		}
+	},
+	"pinData": {},
+	"active": false,
+	"settings": { "executionOrder": "v1" },
+	"versionId": "e32c5445-b09b-425b-bb2b-a4e306d9f9e2",
+	"meta": { "templateCredsSetupCompleted": false }
+}
