@@ -133,7 +133,19 @@ lookup or generation. Explicit representation changes remove an old embedded
 definition only when no preserved calendar content still references it.
 
 See [docs/MVP.md](docs/MVP.md) for the complete version 1.0.0 scope and
-acceptance criteria.
+acceptance criteria. The supported fixed validation baseline for the shipped
+examples is n8n `2.39.8` on Node.js `24` (or the official n8n `2.39.8` image),
+with stable n8n 2.x as the compatibility intent.
+
+The stable workflow-facing field, output, error, and compatibility contract is
+in [docs/CONTRACT.md](docs/CONTRACT.md). See
+[docs/WORKFLOW-EXAMPLES.md](docs/WORKFLOW-EXAMPLES.md) for sanitized wiring
+examples covering Create, Upsert, Update, Get Many, and Delete.
+
+For implementation boundaries and provider-neutral layering, see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For local validation, see
+[CONTRIBUTING.md](CONTRIBUTING.md); for handling secrets and private calendar
+data, see [SECURITY.md](SECURITY.md).
 
 ## Usage
 
