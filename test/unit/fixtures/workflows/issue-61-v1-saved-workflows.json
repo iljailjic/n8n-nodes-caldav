@@ -1,0 +1,343 @@
+{
+	"name": "CalDAV v1 compatibility matrix (sanitized fixture)",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "00000000-0000-4000-8000-000000000001",
+			"name": "When clicking 'Execute workflow'",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [-320, 0]
+		},
+		{
+			"parameters": {
+				"resource": "calendar",
+				"operation": "get",
+				"calendar": { "__rl": true, "mode": "url", "value": "={{ $json.calendarUrl }}" }
+			},
+			"id": "00000000-0000-4000-8000-000000000002",
+			"name": "Calendar Get by expression locator",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, -500],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": { "resource": "calendar", "operation": "getMany" },
+			"id": "00000000-0000-4000-8000-000000000003",
+			"name": "Calendar Get Many with defaults omitted",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, -400],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "create",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/work/"
+				},
+				"inputMode": "structured",
+				"timeMode": "timed",
+				"start": "2030-01-02T09:00:00Z",
+				"end": "2030-01-02T09:30:00Z",
+				"summary": "Structured compatibility event"
+			},
+			"id": "00000000-0000-4000-8000-000000000004",
+			"name": "Event Create Structured defaults omitted",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, -300],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "create",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/work/"
+				},
+				"inputMode": "rawIcs",
+				"rawIcs": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:raw-create@example.test\r\nDTSTART:20300102T090000Z\r\nDTEND:20300102T093000Z\r\nSUMMARY:Raw compatibility event\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+			},
+			"id": "00000000-0000-4000-8000-000000000005",
+			"name": "Event Create Raw ICS",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, -200],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "get",
+				"calendar": { "__rl": true, "mode": "url", "value": "={{ $json.calendarUrl }}" },
+				"identifierMode": "resourceUrl",
+				"resourceUrl": "={{ $json.resourceUrl }}"
+			},
+			"id": "00000000-0000-4000-8000-000000000006",
+			"name": "Event Get by Resource URL",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, -100],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "get",
+				"calendar": { "__rl": true, "mode": "url", "value": "={{ $json.calendarUrl }}" },
+				"identifierMode": "uid",
+				"uid": "={{ $json.uid }}"
+			},
+			"id": "00000000-0000-4000-8000-000000000007",
+			"name": "Event Get by UID",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 0],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "getMany",
+				"calendar": { "__rl": true, "mode": "url", "value": "={{ $json.calendarUrl }}" },
+				"start": "2030-01-01T00:00:00Z",
+				"end": "2030-02-01T00:00:00Z"
+			},
+			"id": "00000000-0000-4000-8000-000000000008",
+			"name": "Event Get Many defaults omitted",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 100],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "update",
+				"calendar": { "__rl": true, "mode": "url", "value": "={{ $json.calendarUrl }}" },
+				"inputMode": "structured",
+				"identifierMode": "resourceUrl",
+				"resourceUrl": "={{ $json.resourceUrl }}",
+				"etag": "={{ $json.etag }}",
+				"timeMode": "timed",
+				"fieldsToUpdate": { "summary": "Updated through structured v1 workflow" }
+			},
+			"id": "00000000-0000-4000-8000-000000000009",
+			"name": "Event Update Structured",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 200],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "update",
+				"calendar": { "__rl": true, "mode": "url", "value": "={{ $json.calendarUrl }}" },
+				"inputMode": "rawIcs",
+				"identifierMode": "resourceUrl",
+				"resourceUrl": "={{ $json.resourceUrl }}",
+				"etag": "={{ $json.etag }}",
+				"rawIcs": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:raw-update@example.test\r\nDTSTART:20300102T090000Z\r\nDTEND:20300102T093000Z\r\nSUMMARY:Raw updated compatibility event\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+			},
+			"id": "00000000-0000-4000-8000-000000000010",
+			"name": "Event Update Raw ICS",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 300],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "upsert",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/work/"
+				},
+				"inputMode": "structured",
+				"uid": "upsert-structured@example.test",
+				"timeMode": "timed",
+				"start": "2030-01-02T10:00:00Z",
+				"end": "2030-01-02T10:30:00Z",
+				"summary": "Upsert through structured v1 workflow"
+			},
+			"id": "00000000-0000-4000-8000-000000000011",
+			"name": "Event Upsert Structured defaults omitted",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 400],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "upsert",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/work/"
+				},
+				"inputMode": "rawIcs",
+				"rawIcs": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:raw-upsert@example.test\r\nDTSTART:20300102T100000Z\r\nDTEND:20300102T103000Z\r\nSUMMARY:Raw upsert compatibility event\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+			},
+			"id": "00000000-0000-4000-8000-000000000012",
+			"name": "Event Upsert Raw ICS",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 500],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "delete",
+				"calendar": { "__rl": true, "mode": "url", "value": "={{ $json.calendarUrl }}" },
+				"identifierMode": "uid",
+				"uid": "={{ $json.uid }}",
+				"etag": "={{ $json.etag }}"
+			},
+			"id": "00000000-0000-4000-8000-000000000013",
+			"name": "Event Delete by UID",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 600],
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "get",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/work/"
+				},
+				"identifierMode": "resourceUrl",
+				"resourceUrl": "not-an-absolute-url"
+			},
+			"id": "00000000-0000-4000-8000-000000000014",
+			"name": "Event Get invalid Resource URL (Continue On Fail)",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 700],
+			"continueOnFail": true,
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		},
+		{
+			"parameters": {
+				"resource": "event",
+				"operation": "delete",
+				"calendar": {
+					"__rl": true,
+					"mode": "url",
+					"value": "https://calendar.example.test/calendars/work/"
+				},
+				"identifierMode": "uid",
+				"uid": ""
+			},
+			"id": "00000000-0000-4000-8000-000000000015",
+			"name": "Event Delete invalid UID (Continue On Fail)",
+			"type": "@iljailjic/n8n-nodes-caldav.calDav",
+			"typeVersion": 1,
+			"position": [0, 800],
+			"continueOnFail": true,
+			"credentials": {
+				"calDavApi": { "id": null, "name": "Select your CalDAV credential after import" }
+			}
+		}
+	],
+	"connections": {
+		"When clicking 'Execute workflow'": {
+			"main": [
+				[
+					{ "node": "Calendar Get by expression locator", "type": "main", "index": 0 },
+					{ "node": "Calendar Get Many with defaults omitted", "type": "main", "index": 0 },
+					{ "node": "Event Create Structured defaults omitted", "type": "main", "index": 0 },
+					{ "node": "Event Create Raw ICS", "type": "main", "index": 0 },
+					{ "node": "Event Get by Resource URL", "type": "main", "index": 0 },
+					{ "node": "Event Get by UID", "type": "main", "index": 0 },
+					{ "node": "Event Get Many defaults omitted", "type": "main", "index": 0 },
+					{ "node": "Event Update Structured", "type": "main", "index": 0 },
+					{ "node": "Event Update Raw ICS", "type": "main", "index": 0 },
+					{ "node": "Event Upsert Structured defaults omitted", "type": "main", "index": 0 },
+					{ "node": "Event Upsert Raw ICS", "type": "main", "index": 0 },
+					{ "node": "Event Delete by UID", "type": "main", "index": 0 },
+					{
+						"node": "Event Get invalid Resource URL (Continue On Fail)",
+						"type": "main",
+						"index": 0
+					},
+					{ "node": "Event Delete invalid UID (Continue On Fail)", "type": "main", "index": 0 }
+				]
+			]
+		}
+	},
+	"pinData": {},
+	"active": false,
+	"settings": { "executionOrder": "v1" },
+	"versionId": "00000000-0000-4000-8000-000000000061",
+	"meta": { "templateCredsSetupCompleted": false },
+	"compatibility": {
+		"credentialType": "calDavApi",
+		"outputSamples": {
+			"Calendar Get by expression locator": {
+				"calendarUrl": "https://calendar.example.test/calendars/work/",
+				"displayName": "Work"
+			},
+			"Event Create Structured defaults omitted": {
+				"calendarUrl": "https://calendar.example.test/calendars/work/",
+				"resourceUrl": "https://calendar.example.test/calendars/work/structured.ics",
+				"uid": "generated-or-server-assigned",
+				"timeMode": "timed",
+				"accessMode": "editable"
+			},
+			"Event Delete by UID": {
+				"calendarUrl": "https://calendar.example.test/calendars/work/",
+				"resourceUrl": "https://calendar.example.test/calendars/work/deleted.ics",
+				"uid": "delete@example.test",
+				"deleted": true
+			}
+		},
+		"omittedParameters": {
+			"Calendar Get Many with defaults omitted": ["returnAll", "limit"],
+			"Event Create Structured defaults omitted": ["uid", "timeZoneMode", "additionalFields"],
+			"Event Get Many defaults omitted": ["returnAll", "limit"],
+			"Event Upsert Structured defaults omitted": ["timeZoneMode", "additionalFields"]
+		}
+	}
+}
