@@ -157,3 +157,20 @@ implemented.
    intentionally replace.
 9. Add dependencies only when the implementation needs them and the project has
    made the relevant publishing and n8n Cloud-support decision.
+
+## Security invariants
+
+The shared transport enforces a 30-second deadline, a 10 MiB successful-body
+limit, an 8 KiB error excerpt, and a five-redirect limit. URL validation accepts
+only HTTP(S) targets without userinfo or fragments and rejects HTTPS-to-HTTP
+downgrades. Authorization is retained only for the configured origin and the
+narrow, trusted HTTPS iCloud partition transition.
+
+XML parsing rejects DTD/entity declarations and caps depth at 64 and elements at
+100,000. iCalendar parsing and serialization cap resources at 5 MiB, components
+at 100,000, properties at 100,000, and nesting depth at 64. The iCloud UID
+fallback is bounded to 1,000 resources, 32 MiB aggregate body, and 60 seconds;
+an incomplete scan is a safe failure and never permits Upsert to create.
+Mutation services preserve ETag preconditions and expose typed errors without
+credentials, authorization headers, raw response bodies, or private calendar
+data.

@@ -264,9 +264,9 @@ for UID lookup. No credentials, private response bodies, calendar contents, or
 account-specific URLs belong in workflow exports, logs, fixtures, or issues.
 
 The node rejects unsafe XML declarations before parsing, applies response and
-calendar-resource limits, and validates absolute HTTP(S) URLs without userinfo.
-The configured server URL may contain a fragment, but calendar collection URLs,
-event resource URLs, and resolved CalDAV `href` values reject fragments.
+calendar-resource limits, and validates absolute HTTP(S) URLs without userinfo
+or fragments. Calendar collection URLs, event resource URLs, and resolved
+CalDAV `href` values use the same fragment-free URL boundary.
 Insecure HTTPS-to-HTTP redirect downgrades are rejected and only trusted
 redirects are followed. Use HTTPS and keep certificate validation enabled in
 production. Deferred features include recurrence-exception editing,

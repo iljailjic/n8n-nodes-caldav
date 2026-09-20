@@ -224,6 +224,82 @@ describe('RFC 7809 capability and RFC 7808 TZDIST resolution', () => {
 		expect(urls).not.toEqual(expect.arrayContaining([expect.stringContaining('127.0.0.1')]));
 	});
 
+	it('follows exactly five anonymous capability redirects, then retains only the TZDIST Accept header', async () => {
+		const transport = transportForServices(['https://tzdist.example.test/']);
+		let capabilityCalls = 0;
+		const request = vi.fn(async (input: unknown) => {
+			const requestInput = input as { readonly url?: unknown; readonly headers?: unknown };
+			const url = String(requestInput.url ?? '');
+			if (url.includes('capabilities')) {
+				capabilityCalls += 1;
+				return capabilityCalls <= 5
+					? response(302, 'redirect-body-sentinel', {
+							location: `https://tzdist.example.test/capabilities-hop-${capabilityCalls}`,
+						})
+					: response(200, TZDIST_CAPABILITIES, { 'content-type': 'application/json' });
+			}
+			if (url.includes('tzdist-cdn.example.test')) {
+				return response(200, TZDIST_ZONE_RESPONSE, {
+					'content-type': 'text/calendar; charset=utf-8',
+					etag: '"anonymous-redirect-etag"',
+				});
+			}
+			return response(302, 'zone-redirect-body-sentinel', {
+				location: 'https://tzdist-cdn.example.test/zones/Europe%2FPrague',
+			});
+		}) as unknown as TimeZoneDistributionRequest;
+
+		await expect(
+			context(transport, request).resolveReference(CALENDAR_URL, 'Europe/Prague'),
+		).resolves.toMatchObject({ etag: '"anonymous-redirect-etag"' });
+		expect(request).toHaveBeenCalledTimes(8);
+		const calls = (request as unknown as ReturnType<typeof vi.fn>).mock.calls.map(
+			([input]) => input as { readonly url: string; readonly headers?: unknown },
+		);
+		expect(calls.slice(0, 6).every(({ headers }) => headers === undefined)).toBe(true);
+		expect(calls.slice(6)).toEqual([
+			expect.objectContaining({
+				url: 'https://tzdist.example.test/zones/Europe%2FPrague',
+				headers: { Accept: 'text/calendar' },
+			}),
+			expect.objectContaining({
+				url: 'https://tzdist-cdn.example.test/zones/Europe%2FPrague',
+				headers: { Accept: 'text/calendar' },
+			}),
+		]);
+		for (const { headers } of calls) {
+			expect(JSON.stringify(headers ?? {})).not.toMatch(
+				/authorization|cookie|credential|redirect-body-sentinel|zone-redirect-body-sentinel/i,
+			);
+		}
+	});
+
+	it('stops after the sixth anonymous redirect and exposes no redirect or credential sentinel', async () => {
+		const transport = transportForServices(['https://tzdist.example.test/']);
+		const request = vi.fn(async (input: unknown) => {
+			const url = String((input as { readonly url?: unknown }).url ?? '');
+			return response(302, 'redirect-body-sentinel', {
+				location: `${url}?private-query-sentinel`,
+				Authorization: 'credential-sentinel',
+			});
+		}) as unknown as TimeZoneDistributionRequest;
+
+		const error = await captureError(
+			context(transport, request).resolveReference(CALENDAR_URL, 'Europe/Prague'),
+		);
+		expect(error).toMatchObject({
+			code: TimeZoneReferenceFailureCode.ZONE_UNAVAILABLE,
+			message: 'The selected IANA time zone is not available by reference on the CalDAV server.',
+		});
+		expect(request).toHaveBeenCalledTimes(6);
+		const publicRepresentation = `${error.stack}\n${JSON.stringify(error)}\n${JSON.stringify(
+			Object.getOwnPropertyDescriptors(error),
+		)}`;
+		expect(publicRepresentation).not.toMatch(
+			/redirect-body-sentinel|private-query-sentinel|credential-sentinel|authorization|cookie/i,
+		);
+	});
+
 	it.each([
 		['private DNS answer', 'https://private-dns.example.test/', async () => ['10.0.0.7']],
 		[
