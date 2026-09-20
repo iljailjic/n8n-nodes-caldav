@@ -36,13 +36,17 @@
 		"test:e2e:icloud:dry-run": "CALDAV_ICLOUD_E2E_OPT_IN=0 node --env-file-if-exists=.env.icloud-e2e ./node_modules/vitest/vitest.mjs run --config vitest.e2e.config.mts",
 		"test:integration": "vitest run --config vitest.integration.config.mts",
 		"test:watch": "vitest watch --config vitest.config.mts",
-		"verify:package": "node scripts/verify-package-contents.mjs",
+		"verify:package": "node scripts/verify-package-contents.mjs && node scripts/verify-package-clean-host.mjs",
+		"verify:package:clean-host": "node scripts/verify-package-clean-host.mjs",
 		"release": "n8n-node release",
 		"prepublishOnly": "n8n-node prerelease"
 	},
 	"files": [
 		"dist"
 	],
+	"engines": {
+		"node": ">=22 <25"
+	},
 	"publishConfig": {
 		"access": "public"
 	},

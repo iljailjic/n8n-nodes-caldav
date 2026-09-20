@@ -20,10 +20,11 @@ behind a provider-neutral n8n interface.
 
 ## Installation
 
-Install `@iljailjic/n8n-nodes-caldav` through the Community Nodes section of your n8n
-instance. See the
-[n8n community node installation guide](https://docs.n8n.io/integrations/community-nodes/installation/)
-for supported installation methods.
+Install `@iljailjic/n8n-nodes-caldav` through the Community Nodes section of a
+self-hosted n8n instance. In n8n, open **Settings > Community Nodes**, choose
+**Install**, enter the package name, and confirm the install. See the current
+[n8n community-node installation and management guide](https://docs.n8n.io/integrations/community-nodes/installation-and-management/)
+for supported installation methods and their self-hosting requirements.
 
 ## Credentials
 
@@ -135,7 +136,9 @@ definition only when no preserved calendar content still references it.
 See [docs/MVP.md](docs/MVP.md) for the complete version 1.0.0 scope and
 acceptance criteria. The supported fixed validation baseline for the shipped
 examples is n8n `2.39.8` on Node.js `24` (or the official n8n `2.39.8` image),
-with stable n8n 2.x as the compatibility intent.
+with stable n8n 2.x as the compatibility intent. See
+[docs/COMMUNITY-NODE-ELIGIBILITY.md](docs/COMMUNITY-NODE-ELIGIBILITY.md) for
+the dated eligibility checklist and the separate release-time gates.
 
 The stable workflow-facing field, output, error, and compatibility contract is
 in [docs/CONTRACT.md](docs/CONTRACT.md). See
