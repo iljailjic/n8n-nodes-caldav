@@ -89,6 +89,7 @@ function context(
 		readonly input?: INodeExecutionData[];
 		readonly secureEgressFilter?: {
 			readonly validateUrl: ReturnType<typeof vi.fn>;
+			readonly validateConnectionHost?: ReturnType<typeof vi.fn>;
 			readonly createSecureLookup: ReturnType<typeof vi.fn>;
 		};
 	} = {},
@@ -414,13 +415,16 @@ describe('CalDAV timed event timezone normalization and errors', () => {
 		'keeps the native anonymous adapter manual for a %s and binds its socket lookup',
 		async (_label, statusCode) => {
 			mockNativeResponse(statusCode);
-			const secureLookup = vi.fn();
+			const pinnedLookup = vi.fn();
 			const validateUrl = vi.fn().mockResolvedValue({ ok: true, value: undefined });
+			const validateConnectionHost = vi.fn().mockReturnValue({ ok: true, value: undefined });
+			const createSecureLookup = vi.fn();
 			await new CalDav().execute.call(
 				context([parameters({ timeZoneMode: 'iana', timeZone: 'Europe/Prague' })], {
 					secureEgressFilter: {
 						validateUrl,
-						createSecureLookup: vi.fn().mockReturnValue(secureLookup),
+						validateConnectionHost,
+						createSecureLookup,
 					},
 				}),
 			);
@@ -443,11 +447,14 @@ describe('CalDAV timed event timezone normalization and errors', () => {
 					method: 'GET',
 					url: 'https://tzdist.example.test/resource',
 				},
-				{ hostname: 'tzdist.example.test', address: '93.184.216.34', lookup: vi.fn() },
+				{ hostname: 'tzdist.example.test', address: '93.184.216.34', lookup: pinnedLookup },
 			);
 			expect(validateUrl).toHaveBeenCalledWith(
 				expect.objectContaining({ href: 'https://tzdist.example.test/resource' }),
 			);
+			expect(validateUrl).toHaveBeenCalledTimes(1);
+			expect(validateConnectionHost).toHaveBeenCalledWith('93.184.216.34');
+			expect(createSecureLookup).not.toHaveBeenCalled();
 			expect(mocks.httpsRequest).toHaveBeenCalledTimes(1);
 			const [target, options] = mocks.httpsRequest.mock.calls[0]!;
 			expect(target).toEqual(
@@ -458,12 +465,154 @@ describe('CalDAV timed event timezone normalization and errors', () => {
 				headers: { Host: 'tzdist.example.test' },
 				servername: 'tzdist.example.test',
 			});
-			expect((options as { readonly lookup?: unknown }).lookup).toBe(secureLookup);
+			expect((options as { readonly lookup?: unknown }).lookup).toBe(pinnedLookup);
 			expect(response).toMatchObject({
 				statusCode,
 				headers: { location: 'https://tzdist-next.example.test/resource' },
 			});
 			expect(response.body.toString()).toBe(`status-${statusCode}`);
+		},
+	);
+
+	it.each([
+		['logical URL', { ok: false, value: undefined }, { ok: true, value: undefined }],
+		['pinned address', { ok: true, value: undefined }, { ok: false, value: undefined }],
+	] as const)(
+		'refuses anonymous adapter I/O when the %s fails secure egress validation',
+		async (label, urlValidation, connectionValidation) => {
+			const validateUrl = vi.fn().mockResolvedValue(urlValidation);
+			const validateConnectionHost = vi.fn().mockReturnValue(connectionValidation);
+			const createSecureLookup = vi.fn();
+			await new CalDav().execute.call(
+				context([parameters({ timeZoneMode: 'iana', timeZone: 'Europe/Prague' })], {
+					secureEgressFilter: {
+						validateUrl,
+						validateConnectionHost,
+						createSecureLookup,
+					},
+				}),
+			);
+			const factoryInput = mocks.createCalendarEventTimeZoneExecutionContext.mock.calls[0]![0] as {
+				readonly request: (
+					input: unknown,
+					binding: {
+						readonly hostname: string;
+						readonly address: string;
+						readonly lookup: ReturnType<typeof vi.fn>;
+					},
+				) => Promise<unknown>;
+			};
+			await expect(
+				factoryInput.request(
+					{ method: 'GET', url: 'https://tzdist.example.test/resource' },
+					{
+						hostname: 'tzdist.example.test',
+						address: '93.184.216.34',
+						lookup: vi.fn(),
+					},
+				),
+			).rejects.toThrow('Anonymous time zone request failed');
+			expect(validateUrl).toHaveBeenCalledWith(
+				expect.objectContaining({ href: 'https://tzdist.example.test/resource' }),
+			);
+			if (label === 'logical URL') {
+				expect(validateConnectionHost).not.toHaveBeenCalled();
+			} else {
+				expect(validateConnectionHost).toHaveBeenCalledWith('93.184.216.34');
+			}
+			expect(createSecureLookup).not.toHaveBeenCalled();
+			expect(mocks.httpRequest).not.toHaveBeenCalled();
+			expect(mocks.httpsRequest).not.toHaveBeenCalled();
+		},
+	);
+
+	it('uses the legacy egress filter for the logical and IPv6-pinned URLs without replacing lookup', async () => {
+		mockNativeResponse(200);
+		const pinnedLookup = vi.fn();
+		const validateUrl = vi.fn().mockResolvedValue({ ok: true, value: undefined });
+		const createSecureLookup = vi.fn();
+		await new CalDav().execute.call(
+			context([parameters({ timeZoneMode: 'iana', timeZone: 'Europe/Prague' })], {
+				secureEgressFilter: { validateUrl, createSecureLookup },
+			}),
+		);
+		const factoryInput = mocks.createCalendarEventTimeZoneExecutionContext.mock.calls[0]![0] as {
+			readonly request: (
+				input: unknown,
+				binding: {
+					readonly hostname: string;
+					readonly address: string;
+					readonly lookup: ReturnType<typeof vi.fn>;
+				},
+			) => Promise<unknown>;
+		};
+		await factoryInput.request(
+			{ method: 'GET', url: 'https://tzdist.example.test/resource' },
+			{
+				hostname: 'tzdist.example.test',
+				address: '2001:4860:4860::8888',
+				lookup: pinnedLookup,
+			},
+		);
+		expect(validateUrl.mock.calls.map(([url]) => (url as URL).href)).toEqual([
+			'https://tzdist.example.test/resource',
+			'https://[2001:4860:4860::8888]/resource',
+		]);
+		expect(createSecureLookup).not.toHaveBeenCalled();
+		expect(mocks.httpsRequest).toHaveBeenCalledOnce();
+		expect((mocks.httpsRequest.mock.calls[0]![1] as { readonly lookup?: unknown }).lookup).toBe(
+			pinnedLookup,
+		);
+	});
+
+	it.each([
+		['logical URL', [{ ok: false, value: undefined }]],
+		[
+			'IPv6 pinned address',
+			[
+				{ ok: true, value: undefined },
+				{ ok: false, value: undefined },
+			],
+		],
+	] as const)(
+		'refuses legacy anonymous adapter I/O when the %s fails egress validation',
+		async (_label, validations) => {
+			const validateUrl = vi.fn();
+			for (const validation of validations) validateUrl.mockResolvedValueOnce(validation);
+			const createSecureLookup = vi.fn();
+			await new CalDav().execute.call(
+				context([parameters({ timeZoneMode: 'iana', timeZone: 'Europe/Prague' })], {
+					secureEgressFilter: { validateUrl, createSecureLookup },
+				}),
+			);
+			const factoryInput = mocks.createCalendarEventTimeZoneExecutionContext.mock.calls[0]![0] as {
+				readonly request: (
+					input: unknown,
+					binding: {
+						readonly hostname: string;
+						readonly address: string;
+						readonly lookup: ReturnType<typeof vi.fn>;
+					},
+				) => Promise<unknown>;
+			};
+			await expect(
+				factoryInput.request(
+					{ method: 'GET', url: 'https://tzdist.example.test/resource' },
+					{
+						hostname: 'tzdist.example.test',
+						address: '2001:4860:4860::8888',
+						lookup: vi.fn(),
+					},
+				),
+			).rejects.toThrow('Anonymous time zone request failed');
+			expect(validateUrl.mock.calls.map(([url]) => (url as URL).href)).toEqual(
+				validations.length === 1
+					? ['https://tzdist.example.test/resource']
+					: ['https://tzdist.example.test/resource', 'https://[2001:4860:4860::8888]/resource'],
+			);
+			expect(createSecureLookup).not.toHaveBeenCalled();
+			expect(mocks.httpRequest).not.toHaveBeenCalled();
+			expect(mocks.httpsRequest).not.toHaveBeenCalled();
 		},
 	);
 

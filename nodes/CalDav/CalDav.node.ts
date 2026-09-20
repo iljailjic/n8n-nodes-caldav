@@ -3646,6 +3646,31 @@ function normalizedConnectionHostname(hostname: string): string {
 	return normalized.endsWith('.') ? normalized.slice(0, -1) : normalized;
 }
 
+interface NodeEgressAddressValidator {
+	validateConnectionHost(hostname: string): { readonly ok: boolean };
+}
+
+async function validatePinnedAnonymousTimeZoneAddress(
+	egressFilter: NodeEgressFilter,
+	logicalUrl: URL,
+	binding: AnonymousTimeZoneConnectionBinding,
+): Promise<boolean> {
+	const addressValidator = egressFilter as unknown as Partial<NodeEgressAddressValidator>;
+	if (typeof addressValidator.validateConnectionHost === 'function') {
+		return addressValidator.validateConnectionHost(binding.address).ok;
+	}
+
+	try {
+		const pinnedAddressUrl = new URL(logicalUrl);
+		pinnedAddressUrl.hostname = binding.address.includes(':')
+			? `[${binding.address}]`
+			: binding.address;
+		return (await egressFilter.validateUrl(pinnedAddressUrl)).ok;
+	} catch {
+		return false;
+	}
+}
+
 function anonymousResponseHeaders(
 	headers: IncomingHttpHeaders,
 ): Readonly<Record<string, string | readonly string[]>> {
@@ -3682,13 +3707,19 @@ async function anonymousTimeZoneRequest(
 	}
 	try {
 		const egressFilter = execution.helpers.getSecureEgressFilter?.();
-		let lookup = binding.lookup;
 		if (egressFilter !== undefined) {
-			const validation = await egressFilter.validateUrl(logicalUrl);
-			if (!validation.ok) {
+			const urlValidation = await egressFilter.validateUrl(logicalUrl);
+			if (!urlValidation.ok) {
 				throw new NodeOperationError(execution.getNode(), 'Anonymous time zone request failed');
 			}
-			lookup = egressFilter.createSecureLookup();
+			const connectionValidation = await validatePinnedAnonymousTimeZoneAddress(
+				egressFilter,
+				logicalUrl,
+				binding,
+			);
+			if (!connectionValidation) {
+				throw new NodeOperationError(execution.getNode(), 'Anonymous time zone request failed');
+			}
 		}
 		const accept = Object.entries(request.headers ?? {}).find(
 			([name]) => name.toLowerCase() === 'accept',
@@ -3708,7 +3739,7 @@ async function anonymousTimeZoneRequest(
 				{
 					method: 'GET',
 					headers,
-					lookup,
+					lookup: binding.lookup,
 					maxHeaderSize: ANONYMOUS_TIME_ZONE_MAX_HEADER_BYTES,
 					...(logicalUrl.protocol === 'https:' ? { servername: binding.hostname } : {}),
 				},
