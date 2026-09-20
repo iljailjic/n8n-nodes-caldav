@@ -6,11 +6,43 @@ CalDAV features.
 
 ## Compatibility baseline
 
-The documentation and workflow examples target the n8n package baseline
-`1.0.0`. The validation matrix is n8n `2.39.8` on Node.js `24`. The package
-may still be published as a pre-1.0 development release; the baseline names
-the workflow contract, not a release or a promise of support for every n8n
-version.
+The documentation and workflow examples target the workflow contract named
+`1.0.0`. The validation matrix is n8n `2.39.8` on Node.js `24`, or the
+official n8n `2.39.8` image. The package may still be published as a pre-1.0
+development release: a beta or other pre-1.0 checkpoint is not itself a
+compatibility baseline. The baseline names the workflow contract, not a
+release or a promise of support for every n8n version.
+
+### Saved workflow compatibility and migration
+
+The initial CalDAV node is n8n node version `1` (`typeVersion: 1`). Existing
+v1 saved workflows are the compatibility baseline. A change may remain in v1
+only when it is additive and preserves all behavior observed by an omitted
+parameter, including its default, visibility, validation, error text, and
+output shape. New optional fields or operations must not change the behavior
+of an existing v1 export when those fields are absent.
+
+A change is breaking when it changes the meaning of an existing parameter or
+omission, a default, a visible/hidden condition, an identifier mode, an error
+branch or message relied on by workflows, or an output field's presence,
+type, or meaning. Breaking changes require a light node-version increment and
+version-gated runtime behavior: v1 keeps the old behavior, while the newer
+version opts into the new behavior. Do not silently reinterpret an imported
+v1 node as the newer behavior.
+
+The v1 node must not introduce n8n `VersionedNodeType` full versioning. Use
+the node's existing light-versioning shape for any future breaking change;
+full versioning is reserved for a separately justified rewrite or a node that
+already uses it. See [NODE-VERSIONING.md](NODE-VERSIONING.md) for the decision
+rules and examples.
+
+The saved-workflow compatibility matrix is intentionally navigable from the
+repository: [`issue-61-v1-saved-workflows.json`](../test/unit/fixtures/workflows/issue-61-v1-saved-workflows.json)
+covers every v1 Calendar/Event operation, both Resource URL and UID identifier
+modes, both Structured and Raw ICS input modes, expression locators,
+intentional default omissions, stable output samples, and Continue on Fail
+error shapes. Its focused check is
+[`issue-61-v1-workflow-compatibility.test.ts`](../test/unit/issue-61-v1-workflow-compatibility.test.ts).
 
 The node requires a `CalDAV` credential with a server URL, username,
 password, and an optional development-only TLS-validation bypass. Credentials
