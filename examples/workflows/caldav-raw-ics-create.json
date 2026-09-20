@@ -19,7 +19,7 @@
 					"value": "https://calendar.example.test/calendars/dedicated-test/"
 				},
 				"inputMode": "rawIcs",
-				"rawIcs": "BEGIN:VCALENDAR\\nVERSION:2.0\\nPRODID:-//example.test//CalDAV Raw ICS example//EN\\nBEGIN:VEVENT\\nUID:caldav-raw-ics-example@example.test\\nDTSTAMP:20260919T080000Z\\nDTSTART:20260921T090000Z\\nDTEND:20260921T093000Z\\nSUMMARY:Sanitized CalDAV Raw ICS example\\nEND:VEVENT\\nEND:VCALENDAR"
+				"rawIcs": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//example.test//CalDAV Raw ICS example//EN\r\nBEGIN:VEVENT\r\nUID:caldav-raw-ics-example@example.test\r\nDTSTAMP:20260919T080000Z\r\nDTSTART:20260921T090000Z\r\nDTEND:20260921T093000Z\r\nSUMMARY:Sanitized CalDAV Raw ICS example\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
 			},
 			"id": "7377fc70-57de-47aa-84c0-8d0a6a6edb67",
 			"name": "Create event from Raw ICS",

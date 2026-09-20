@@ -5,6 +5,11 @@ every node. Each of the four scenarios with a shipped fixture links to its
 sanitized, importable workflow export; the Delete and failure-handling notes
 remain prose guidance.
 
+The contract reference in [docs/CONTRACT.md](CONTRACT.md) defines every field,
+boundary, output, and error used here. For credentials and provider limits,
+also see the [README](../README.md), [security policy](../SECURITY.md), and
+[MVP scope](MVP.md).
+
 ## Create a timed event, then read it by UID
 
 [Importable fixture: `caldav-create-read.json`](../examples/workflows/caldav-create-read.json)
@@ -119,3 +124,8 @@ workflow should keep successful items. Failed items are returned as:
 The node preserves each failed item's `pairedItem` reference. Keep `rawIcs`
 out of logs and shared workflow data unless the workflow explicitly needs the
 complete calendar object.
+
+For local, repeatable verification of these examples, use the Radicale
+integration instructions in [CONTRIBUTING.md](../CONTRIBUTING.md) and
+[docs/RADICALE-INTEGRATION.md](RADICALE-INTEGRATION.md). The examples target
+n8n `2.39.8` with Node.js `24` (or the official n8n `2.39.8` image).

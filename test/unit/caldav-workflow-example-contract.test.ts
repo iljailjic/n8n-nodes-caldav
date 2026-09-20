@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 
 import packageManifest from '../../package.json';
 import { CalDav } from '../../nodes/CalDav/CalDav.node';
+import { parseICalendarResource } from '../../nodes/CalDav/icalendar/parser';
 
 const workflowPaths = {
 	createRead: resolve(cwd(), 'examples/workflows/caldav-create-read.json'),
@@ -100,6 +101,10 @@ describe('sanitized n8n workflow export contract', () => {
 		expect(rawIcsCreate?.parameters.rawIcs).toContain('BEGIN:VCALENDAR');
 		expect(rawIcsCreate?.parameters.rawIcs).toContain('BEGIN:VEVENT');
 		expect(rawIcsCreate?.parameters.rawIcs).toContain('END:VCALENDAR');
+		expect(rawIcsCreate?.parameters.rawIcs).toContain('\r\nBEGIN:VEVENT\r\n');
+		expect(() =>
+			parseICalendarResource(Buffer.from(rawIcsCreate?.parameters.rawIcs as string, 'utf8')),
+		).not.toThrow();
 
 		const createRead = workflowExports[0].nodes;
 		expect(createRead.find((node) => node.name === 'Create event')).toMatchObject({

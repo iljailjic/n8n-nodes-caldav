@@ -12,9 +12,18 @@ may still be published as a pre-1.0 development release; the baseline names
 the workflow contract, not a release or a promise of support for every n8n
 version.
 
-The node requires a `CalDAV API` credential with a server URL, username,
+The node requires a `CalDAV` credential with a server URL, username,
 password, and an optional development-only TLS-validation bypass. Credentials
 are managed by n8n and are never returned in node output.
+
+For iCloud, set **Server URL** to `https://caldav.icloud.com`, use the Apple
+Account email as **Username**, and use an Apple app-specific password as
+**Password**. Discovery follows the current-user principal and calendar-home
+properties, including trusted iCloud redirects and partition hosts, to find
+calendar collections. The resulting collection and event URLs are opaque
+values: pass them back to the node or choose **Calendar → From List** rather
+than constructing iCloud paths yourself. Keep **Skip TLS Validation** disabled
+outside isolated development environments.
 
 ## Resources and operations
 
@@ -171,18 +180,49 @@ raises an item-aware n8n error.
 Errors are sanitized and branchable. These representative messages preserve
 the public behavior without exposing credentials or response bodies:
 
-| Failure category        | Example error text                                                                                                                              | Safe workflow action                                                                  |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Invalid input           | `The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.`                                                               | Correct the mapped parameter; do not retry unchanged input                            |
-| Not found/ambiguous UID | `The calendar event was not found.` / `More than one calendar event with the requested UID was found in the selected calendar.`                 | Stop or select a unique identifier; Upsert must not create after an incomplete lookup |
-| Missing ETag            | `The calendar event does not provide an ETag required for a safe mutation.`                                                                     | Read the event again or use a provider that supplies ETags                            |
-| Concurrency             | `The calendar event changed before the mutation could be applied.`                                                                              | Re-read, review the new state, then deliberately retry with the new ETag              |
-| Transport/security      | `TLS certificate validation failed.`, `The CalDAV server could not be reached.`, or `The CalDAV server returned an unsafe or invalid redirect.` | Surface the failure; do not log credentials or raw responses                          |
+| Failure category        | Example error text                                                                                                                              | Safe workflow action                                                                   |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Invalid input           | `The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.`                                                               | Correct the mapped parameter; do not retry unchanged input                             |
+| Not found/ambiguous UID | `The calendar event was not found.` / `More than one calendar event with the requested UID was found in the selected calendar.`                 | Stop or select a unique identifier; Upsert must not create after an incomplete lookup  |
+| Missing ETag            | `The calendar event does not provide an ETag required for a safe mutation.`                                                                     | Read the event again or use a provider that supplies ETags                             |
+| Concurrency             | `The calendar event changed before the mutation could be applied.`                                                                              | Re-read, review the new state, then deliberately retry with the new ETag               |
+| Authentication          | `CalDAV authentication failed. Check the CalDAV username and password.`                                                                         | Verify the Server URL, username, and password; for iCloud use an app-specific password |
+| Authorization           | `The CalDAV server refused access to this resource.`                                                                                            | Select a calendar the account can access; do not retry unchanged credentials           |
+| Timeout                 | `The CalDAV request timed out.`                                                                                                                 | Check server reachability, then retry deliberately; do not increase limits in a loop   |
+| Response limit          | `The CalDAV server response exceeded the allowed size.`                                                                                         | Narrow the operation or date range; do not expect truncated data                       |
+| Transport/security      | `TLS certificate validation failed.`, `The CalDAV server could not be reached.`, or `The CalDAV server returned an unsafe or invalid redirect.` | Surface the failure; do not log credentials or raw responses                           |
 
 When **Continue on Fail** is enabled, the error text is placed in an output
 item's `error` field and retains input pairing. Otherwise the node throws an
 item-aware n8n error. HTTP precondition failures map to the concurrency branch;
 they are never silently converted into an unconditional write.
+
+## Troubleshooting
+
+- **No calendars appear in From List:** verify the absolute Server URL,
+  username, and password first. For iCloud, use an app-specific password and
+  allow discovery to complete; use **By URL** only with a collection URL
+  returned by discovery or supplied by the provider.
+- **UID lookup reports not found or ambiguous:** confirm that the UID is an
+  iCalendar UID in the selected collection, not a resource URL. A bounded or
+  incomplete iCloud lookup fails safely; it never falls through to an Upsert
+  create.
+- **A mutation reports a missing or stale ETag:** read the event again and map
+  its current `etag`. Review the new event before retrying a concurrency
+  failure; do not turn the request into an unconditional write.
+- **A structured update is read-only:** the event’s time representation is
+  unsupported or ambiguous. It remains readable and deletable; use Raw ICS only
+  when you intentionally supply a complete replacement object.
+- **A TLS, redirect, or response-limit error occurs:** keep certificate
+  validation enabled, verify the HTTPS endpoint, and inspect only the
+  sanitized node error. Do not log credentials, `rawIcs`, or private response
+  bodies.
+
+For local validation, follow the deterministic Radicale matrix and Docker
+prerequisites in [CONTRIBUTING.md](../CONTRIBUTING.md) and
+[docs/RADICALE-INTEGRATION.md](RADICALE-INTEGRATION.md). The supported fixed
+validation baseline for these examples is n8n `2.39.8` on Node.js `24` (or the
+official n8n `2.39.8` image); the contract is intended for stable n8n 2.x use.
 
 ## Stability and security boundaries
 
@@ -200,3 +240,8 @@ redirects are followed. Use HTTPS and keep certificate validation enabled in
 production. Deferred features include recurrence-exception editing,
 scheduling, free/busy, collection mutation, sync tokens, sharing, delegation,
 and attachments.
+
+Related repository guidance: [README](../README.md), [MVP scope](MVP.md),
+[architecture](ARCHITECTURE.md), [security policy](../SECURITY.md),
+[contributing and validation](../CONTRIBUTING.md), and the
+[importable workflow examples](WORKFLOW-EXAMPLES.md).
