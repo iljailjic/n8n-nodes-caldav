@@ -10,6 +10,11 @@ boundary, output, and error used here. For credentials and provider limits,
 also see the [README](../README.md), [security policy](../SECURITY.md), and
 [MVP scope](MVP.md).
 
+For saved-workflow migration rules, light node-versioning guidance, and the
+sanitized v1 compatibility matrix, see
+[docs/NODE-VERSIONING.md](NODE-VERSIONING.md) and the linked fixture/test in
+the [contract](CONTRACT.md#saved-workflow-compatibility-and-migration).
+
 ## Create a timed event, then read it by UID
 
 [Importable fixture: `caldav-create-read.json`](../examples/workflows/caldav-create-read.json)
