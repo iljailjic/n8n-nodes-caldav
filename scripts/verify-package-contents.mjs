@@ -5,8 +5,8 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const EXPECTED_PACKAGE_NAME = '@iljailjic/n8n-nodes-caldav';
-const EXPECTED_PACKAGE_VERSION = '1.0.0-beta.1';
-const EXPECTED_PACKAGE_FILES = new Set([
+const EXPECTED_PACKAGE_VERSION = '1.0.0-beta.2';
+export const EXPECTED_PACKAGE_FILES = new Set([
 	'LICENSE.md',
 	'README.md',
 	'dist/credentials/CalDavApi.credentials.d.ts',

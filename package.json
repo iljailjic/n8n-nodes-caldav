@@ -1,6 +1,6 @@
 {
 	"name": "@iljailjic/n8n-nodes-caldav",
-	"version": "1.0.0-beta.1",
+	"version": "1.0.0-beta.2",
 	"description": "CalDAV community node for n8n with iCloud-first interoperability",
 	"license": "MIT",
 	"homepage": "https://github.com/iljailjic/n8n-nodes-caldav#readme",
@@ -29,8 +29,8 @@
 		"build": "n8n-node build",
 		"build:watch": "tsc --watch",
 		"dev": "n8n-node dev",
-		"lint": "n8n-node lint",
-		"lint:fix": "n8n-node lint --fix",
+		"lint": "eslint . --ignore-pattern '.codex-runtime/**'",
+		"lint:fix": "eslint . --ignore-pattern '.codex-runtime/**' --fix",
 		"test": "vitest run --config vitest.config.mts && npm run test:integration",
 		"test:e2e:icloud": "CALDAV_ICLOUD_E2E_OPT_IN=0 node --env-file-if-exists=.env.icloud-e2e ./node_modules/vitest/vitest.mjs run --config vitest.e2e.config.mts && CALDAV_ICLOUD_E2E_OPT_IN=1 node --env-file-if-exists=.env.icloud-e2e ./node_modules/vitest/vitest.mjs run --config vitest.e2e.config.mts",
 		"test:e2e:icloud:dry-run": "CALDAV_ICLOUD_E2E_OPT_IN=0 node --env-file-if-exists=.env.icloud-e2e ./node_modules/vitest/vitest.mjs run --config vitest.e2e.config.mts",

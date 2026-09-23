@@ -1,0 +1,82 @@
+name: Prepare release archive
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed version tag with a draft GitHub Release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out existing tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Validate tag and empty draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          node scripts/release-gate.mjs metadata prepare "$RELEASE_TAG"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > "$RUNNER_TEMP/release.json"
+          node scripts/release-gate.mjs release prepare "$RELEASE_TAG" "$RUNNER_TEMP/release.json"
+
+      - name: Install dependencies and check source
+        run: |
+          set -euo pipefail
+          npm ci
+          ./node_modules/.bin/prettier --check .
+          npm run lint
+          npm test --if-present
+          npm run build
+
+      - name: Pack once and verify exact archive
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-archive"
+          npm pack --json --pack-destination "$RUNNER_TEMP/release-archive" > "$RUNNER_TEMP/pack.json"
+          node scripts/verify-package-contents.mjs --stdin < "$RUNNER_TEMP/pack.json"
+          archive="$RUNNER_TEMP/release-archive/iljailjic-n8n-nodes-caldav-${RELEASE_TAG#v}.tgz"
+          node scripts/release-gate.mjs checksum "$archive"
+          node scripts/release-gate.mjs archive "$RELEASE_TAG" "$archive" "$archive.sha256"
+          node scripts/verify-package-clean-host.mjs --archive "$archive"
+
+      - name: Attach reviewed archive to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/release-archive/iljailjic-n8n-nodes-caldav-${RELEASE_TAG#v}.tgz"
+          gh release upload "$RELEASE_TAG" "$archive" "$archive.sha256"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > "$RUNNER_TEMP/release-uploaded.json"
+          node scripts/release-gate.mjs release prepare-uploaded "$RELEASE_TAG" "$RUNNER_TEMP/release-uploaded.json"
+          node scripts/release-gate.mjs archive "$RELEASE_TAG" "$archive" "$archive.sha256" "$RUNNER_TEMP/release-uploaded.json"

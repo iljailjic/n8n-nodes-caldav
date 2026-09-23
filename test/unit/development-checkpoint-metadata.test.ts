@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 const PACKAGE_NAME = '@iljailjic/n8n-nodes-caldav';
 const UNRELEASED_HEADING = '## Unreleased';
-const CHECKPOINT_VERSION = '1.0.0-beta.1';
+const CURRENT_VERSION = '1.0.0-beta.2';
 const CHECKPOINT_HEADING = '## [1.0.0-beta.1] - 2026-09-17';
 const CHECKPOINT_SECTION = `## [1.0.0-beta.1] - 2026-09-17
 
@@ -42,16 +42,16 @@ async function readJson<T>(path: string): Promise<T> {
 	return JSON.parse(await readRepositoryFile(path)) as T;
 }
 
-describe('1.0.0-beta.1 development checkpoint metadata', () => {
-	it('synchronizes the package and root lockfile identities at exactly 1.0.0-beta.1', async () => {
+describe('release metadata and 1.0.0-beta.1 development checkpoint', () => {
+	it('synchronizes the package and root lockfile identities at exactly 1.0.0-beta.2', async () => {
 		const packageJson = await readJson<PackageIdentity>('package.json');
 		const packageLock = await readJson<PackageLock>('package-lock.json');
 
-		expect(packageJson).toMatchObject({ name: PACKAGE_NAME, version: CHECKPOINT_VERSION });
-		expect(packageLock).toMatchObject({ name: PACKAGE_NAME, version: CHECKPOINT_VERSION });
+		expect(packageJson).toMatchObject({ name: PACKAGE_NAME, version: CURRENT_VERSION });
+		expect(packageLock).toMatchObject({ name: PACKAGE_NAME, version: CURRENT_VERSION });
 		expect(packageLock.packages?.['']).toMatchObject({
 			name: PACKAGE_NAME,
-			version: CHECKPOINT_VERSION,
+			version: CURRENT_VERSION,
 		});
 	});
 
@@ -59,6 +59,7 @@ describe('1.0.0-beta.1 development checkpoint metadata', () => {
 		const changelog = await readRepositoryFile('CHANGELOG.md');
 		const checkpointStart = changelog.indexOf(CHECKPOINT_HEADING);
 		const unreleasedStart = changelog.indexOf(UNRELEASED_HEADING);
+		const currentReleaseStart = changelog.indexOf('## [1.0.0-beta.2]');
 		const previousCheckpointStart = changelog.indexOf('## [0.6.0]');
 		const nextHeadingStart = changelog.indexOf(
 			'\n## ',
@@ -67,9 +68,9 @@ describe('1.0.0-beta.1 development checkpoint metadata', () => {
 
 		expect(changelog.match(/^## \[1\.0\.0-beta\.1\] - 2026-09-17$/gm) ?? []).toHaveLength(1);
 		expect(changelog.match(/^## Unreleased$/gm) ?? []).toHaveLength(1);
-		expect(changelog).toContain(`${UNRELEASED_HEADING}\n\n${CHECKPOINT_HEADING}`);
-		expect(checkpointStart).toBe(unreleasedStart + UNRELEASED_HEADING.length + 2);
-		expect(checkpointStart).toBeGreaterThanOrEqual(0);
+		expect(changelog).toContain(`${UNRELEASED_HEADING}\n\n## [1.0.0-beta.2]`);
+		expect(currentReleaseStart).toBe(unreleasedStart + UNRELEASED_HEADING.length + 2);
+		expect(checkpointStart).toBeGreaterThan(currentReleaseStart);
 		expect(previousCheckpointStart).toBeGreaterThan(checkpointStart);
 		expect(nextHeadingStart).toBe(previousCheckpointStart - 1);
 
