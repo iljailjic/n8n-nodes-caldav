@@ -11,8 +11,15 @@ const PACKAGE_NAME = '@iljailjic/n8n-nodes-caldav';
 const REPOSITORY_URL = 'git+https://github.com/iljailjic/n8n-nodes-caldav.git';
 const REPOSITORY_NAME = 'iljailjic/n8n-nodes-caldav';
 const FIRST_BETA = '1.0.0-beta.2';
-const SEMVER =
-	/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+const SEMVER_CORE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const SEMVER_IDENTIFIER = /^[0-9A-Za-z-]+$/;
+
+function validIdentifiers(value, prerelease) {
+	return value.split('.').every((identifier) => {
+		if (!SEMVER_IDENTIFIER.test(identifier)) return false;
+		return !prerelease || !/^\d+$/.test(identifier) || identifier === '0' || identifier[0] !== '0';
+	});
+}
 
 function fail(message) {
 	throw new Error(message);
@@ -34,15 +41,25 @@ export function validateVersion(tag, version) {
 	if (!tag.startsWith('v') || tag !== `v${version}`) {
 		fail('Release tag must be v-prefixed and match package version exactly');
 	}
-	const match = SEMVER.exec(version);
+	const buildIndex = version.indexOf('+');
+	const prereleaseIndex = version.indexOf('-');
+	const hasPrerelease =
+		prereleaseIndex !== -1 && (buildIndex === -1 || prereleaseIndex < buildIndex);
+	const coreEnd = hasPrerelease ? prereleaseIndex : buildIndex;
+	const match = SEMVER_CORE.exec(coreEnd === -1 ? version : version.slice(0, coreEnd));
+	const prerelease = hasPrerelease
+		? version.slice(prereleaseIndex + 1, buildIndex === -1 ? undefined : buildIndex)
+		: undefined;
 	if (
 		!match ||
 		Number(match[1]) < 1 ||
-		![match[1], match[2], match[3]].every((part) => Number.isSafeInteger(Number(part)))
+		![match[1], match[2], match[3]].every((part) => Number.isSafeInteger(Number(part))) ||
+		(prerelease !== undefined && !validIdentifiers(prerelease, true)) ||
+		(buildIndex !== -1 && !validIdentifiers(version.slice(buildIndex + 1), false))
 	) {
 		fail('Release version must be valid SemVer with base at least 1.0.0');
 	}
-	return { prerelease: match[4] !== undefined, version };
+	return { prerelease: hasPrerelease, version };
 }
 
 export function validateMetadata({ tag, phase, manifest, lock, changelog, tagCommit, mainCommit }) {

@@ -91,6 +91,38 @@ describe('release metadata gate', () => {
 		(badTag) => expect(() => validateVersion(badTag, version)).toThrow(),
 	);
 
+	it.each([
+		['1.0.0-alpha.1+build.01', true],
+		['1.2.3-0', true],
+		['1.2.3-alpha-01', true],
+		['1.2.3+001', false],
+	])('accepts SemVer identifiers in %s', (candidate, prerelease) => {
+		expect(validateVersion(`v${candidate}`, candidate)).toEqual({ prerelease, version: candidate });
+	});
+
+	it.each([
+		'0.0.0-alpha',
+		'01.0.0',
+		'1.0.0-01',
+		'1.0.0-alpha..1',
+		'1.0.0-',
+		'1.0.0+',
+		'1.0.0+build..1',
+		'1.0.0-alpha_1',
+		'1.0.0-alpha+build!',
+	])('rejects invalid SemVer identifiers in %s', (candidate) => {
+		expect(() => validateVersion(`v${candidate}`, candidate)).toThrow(/SemVer/);
+	});
+
+	it('rejects long dotted prerelease inputs without backtracking through identifier alternatives', () => {
+		for (const candidate of [
+			`0.0.0-${'0.'.repeat(4096)}${'--.'.repeat(4096)}`,
+			`1.0.0-${'--.'.repeat(4096)}`,
+		]) {
+			expect(() => validateVersion(`v${candidate}`, candidate)).toThrow(/SemVer/);
+		}
+	});
+
 	it('rejects package, repository, lock, changelog, and checked-out commit mismatches', () => {
 		const baseline = metadata();
 		const invalid = [
