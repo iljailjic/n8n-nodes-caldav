@@ -9,7 +9,7 @@ export default mergeConfig(
 		test: {
 			reporters: ['default', issue53ExecutionReporter('unit')],
 			include: ['test/unit/**/*.test.ts'],
-			exclude: ['test/integration/**', 'test/e2e/**'],
+			exclude: ['test/integration/**', 'test/e2e/**', '.codex-runtime/**'],
 		},
 	}),
 );

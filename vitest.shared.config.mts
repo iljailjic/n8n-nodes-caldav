@@ -6,5 +6,6 @@ export default defineConfig({
 		environment: 'node',
 		globals: false,
 		passWithNoTests: false,
+		exclude: ['.codex-runtime/**'],
 	},
 });

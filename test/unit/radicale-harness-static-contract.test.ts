@@ -88,11 +88,18 @@ describe('Radicale harness public commands and test discovery', () => {
 		async () => {
 			const unitConfig = await readRepositoryFile('vitest.config.mts');
 			const integrationConfig = await readRepositoryFile('vitest.integration.config.mts');
+			const e2eConfig = await readRepositoryFile('vitest.e2e.config.mts');
+			const sharedConfig = await readRepositoryFile('vitest.shared.config.mts');
 
 			expect(unitConfig).toContain("include: ['test/unit/**/*.test.ts']");
-			expect(unitConfig).toContain("exclude: ['test/integration/**', 'test/e2e/**']");
+			expect(unitConfig).toContain(
+				"exclude: ['test/integration/**', 'test/e2e/**', '.codex-runtime/**']",
+			);
 			expect(integrationConfig).toContain("include: ['test/integration/**/*.integration.test.ts']");
 			expect(integrationConfig).toContain("exclude: ['test/unit/**'");
+			expect(e2eConfig).toContain("include: ['test/e2e/**/*.e2e.test.ts']");
+			expect(e2eConfig).toContain("exclude: ['test/unit/**', 'test/integration/**'");
+			expect(sharedConfig).toContain("exclude: ['.codex-runtime/**']");
 		},
 	);
 

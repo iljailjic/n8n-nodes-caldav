@@ -5,6 +5,14 @@ documented in this file.
 
 ## Unreleased
 
+## [1.0.0-beta.2] - 2026-09-24
+
+### Release infrastructure
+
+- Added reviewed-archive publication with package identity, contents, checksum,
+  and provenance checks; the first beta uses a one-time npm token, then later
+  releases use npm trusted publishing with OIDC.
+
 ## [1.0.0-beta.1] - 2026-09-17
 
 ### Development checkpoint

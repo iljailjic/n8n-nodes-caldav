@@ -1,0 +1,93 @@
+name: Publish first beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Reviewed first beta tag
+        required: true
+        type: choice
+        options:
+          - v1.0.0-beta.2
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && inputs.tag == 'v1.0.0-beta.2'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Check out existing beta tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+
+      - name: Validate tag and draft prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          node scripts/release-gate.mjs metadata first-beta "$RELEASE_TAG"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > "$RUNNER_TEMP/release.json"
+          node scripts/release-gate.mjs release first-beta "$RELEASE_TAG" "$RUNNER_TEMP/release.json"
+
+      - name: Download and verify reviewed archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          archive="iljailjic-n8n-nodes-caldav-${RELEASE_TAG#v}.tgz"
+          mkdir -p "$RUNNER_TEMP/release-archive"
+          gh release download "$RELEASE_TAG" --pattern "$archive" --dir "$RUNNER_TEMP/release-archive"
+          gh release download "$RELEASE_TAG" --pattern "$archive.sha256" --dir "$RUNNER_TEMP/release-archive"
+          node scripts/release-gate.mjs archive "$RELEASE_TAG" "$RUNNER_TEMP/release-archive/$archive" "$RUNNER_TEMP/release-archive/$archive.sha256" "$RUNNER_TEMP/release.json"
+
+      - name: Install release guard
+        run: npm ci
+
+      - name: Publish exact beta archive with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_MODE: 'true'
+        run: |
+          set -euo pipefail
+          test -n "$NODE_AUTH_TOKEN"
+          npm run prepublishOnly
+          npm publish "$RUNNER_TEMP/release-archive/iljailjic-n8n-nodes-caldav-1.0.0-beta.2.tgz" --provenance --access public --tag beta
+
+      - name: Verify registry result
+        run: |
+          set -euo pipefail
+          npm view '@iljailjic/n8n-nodes-caldav@1.0.0-beta.2' dist --json > "$RUNNER_TEMP/npm-dist.json"
+          npm view '@iljailjic/n8n-nodes-caldav' dist-tags --json > "$RUNNER_TEMP/npm-tags.json"
+          node scripts/release-gate.mjs registry "$RUNNER_TEMP/release-archive/iljailjic-n8n-nodes-caldav-1.0.0-beta.2.tgz" "$RUNNER_TEMP/npm-dist.json" "$RUNNER_TEMP/npm-tags.json"
+
+      - name: Publish reviewed GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit v1.0.0-beta.2 --draft=false --prerelease
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v1.0.0-beta.2" > "$RUNNER_TEMP/release-published.json"
+          node scripts/release-gate.mjs release first-beta-published v1.0.0-beta.2 "$RUNNER_TEMP/release-published.json"

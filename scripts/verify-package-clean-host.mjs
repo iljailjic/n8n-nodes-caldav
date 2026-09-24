@@ -63,6 +63,10 @@ function packageArchiveFrom(packOutput, archiveDirectory) {
 }
 
 async function main() {
+	const arguments_ = process.argv.slice(2);
+	if (arguments_.length !== 0 && (arguments_.length !== 2 || arguments_[0] !== '--archive')) {
+		throw new Error('Usage: verify-package-clean-host.mjs [--archive <path>]');
+	}
 	await mkdir(RUNTIME_ROOT, { recursive: true });
 	const cleanHostRoot = await mkdtemp(join(RUNTIME_ROOT, 'package-clean-host-'));
 	const archiveDirectory = join(cleanHostRoot, 'archive');
@@ -71,12 +75,13 @@ async function main() {
 	await mkdir(installDirectory);
 
 	const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-	const packOutput = run(
-		npmCommand,
-		['pack', '--json', '--pack-destination', archiveDirectory],
-		PACKAGE_ROOT,
-	);
-	const packageArchive = packageArchiveFrom(packOutput, archiveDirectory);
+	const packageArchive =
+		arguments_.length === 2
+			? resolve(arguments_[1])
+			: packageArchiveFrom(
+					run(npmCommand, ['pack', '--json', '--pack-destination', archiveDirectory], PACKAGE_ROOT),
+					archiveDirectory,
+				);
 
 	await writeFile(
 		join(installDirectory, 'package.json'),
