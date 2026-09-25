@@ -2,7 +2,7 @@
 /* eslint-disable @n8n/community-nodes/require-node-api-error -- Stable test-harness errors are deliberately independent of n8n execution. */
 
 export const ICLOUD_E2E_EVIDENCE_PREFIX = 'ICLOUD_E2E_EVIDENCE';
-export const ICLOUD_E2E_SCHEMA_VERSION = 'icloud-e2e-evidence/v4';
+export const ICLOUD_E2E_SCHEMA_VERSION = 'icloud-e2e-evidence/v5';
 export const ICLOUD_E2E_CLEANUP_DELETE_ATTEMPTS = 3;
 
 export const IcloudE2eErrorCode = Object.freeze({
@@ -12,6 +12,7 @@ export const IcloudE2eErrorCode = Object.freeze({
 	CAPABILITY_FAILED: 'E2E_CAPABILITY_FAILED',
 	DISCOVERY_FAILED: 'E2E_DISCOVERY_FAILED',
 	EVENT_SEED_FAILED: 'E2E_EVENT_SEED_FAILED',
+	READ_VISIBILITY_FAILED: 'E2E_READ_VISIBILITY_FAILED',
 	TIME_RANGE_CONVERGENCE_FAILED: 'E2E_TIME_RANGE_CONVERGENCE_FAILED',
 	EVENT_CLEANUP_FAILED: 'E2E_EVENT_CLEANUP_FAILED',
 	MANUAL_CLEANUP_REQUIRED: 'E2E_MANUAL_CLEANUP_REQUIRED',
@@ -20,6 +21,7 @@ export const IcloudE2eErrorCode = Object.freeze({
 	CALENDAR_NOT_FOUND: 'E2E_CALENDAR_NOT_FOUND',
 	CALENDAR_AMBIGUOUS: 'E2E_CALENDAR_AMBIGUOUS',
 	ASSERTION_FAILED: 'E2E_ASSERTION_FAILED',
+	REMOTE_COOLDOWN: 'E2E_REMOTE_COOLDOWN',
 } as const);
 
 export type IcloudE2eErrorCode = (typeof IcloudE2eErrorCode)[keyof typeof IcloudE2eErrorCode];
@@ -48,6 +50,27 @@ export interface IcloudE2eEvidence {
 		'OPTIONS' | 'PROPFIND' | 'REPORT' | 'GET' | 'PUT' | 'DELETE'
 	)[];
 	readonly errorCodes: readonly IcloudE2eErrorCode[];
+	readonly requestDiagnostics?: {
+		readonly requestCount: number;
+		readonly minStartGapMs?: number;
+		readonly statusCounts: Readonly<Record<string, number>>;
+		readonly phaseStatusCounts?: Readonly<Record<string, number>>;
+	};
+	readonly firstFailure?: {
+		readonly stage: string;
+		readonly category: 'harness' | 'transport' | 'node' | 'other';
+		readonly method?: 'OPTIONS' | 'PROPFIND' | 'REPORT' | 'GET' | 'PUT' | 'DELETE';
+		readonly httpStatus?: number;
+		readonly etagPresent?: boolean;
+		readonly retryAfterPresent?: boolean;
+		readonly retryAfterSeconds?: number;
+		readonly transportCode?: string;
+	};
+	readonly cleanupOutcome?: 'not-required' | 'cleaned' | 'manual-cleanup-required';
+	readonly suppliedUidLookup?: {
+		readonly result: 'created' | 'incomplete' | 'other-error';
+		readonly writeAttempts: number;
+	};
 }
 
 export function canonicalizeIcloudE2eUrl(value: string): string {
@@ -94,7 +117,51 @@ export function assertE2e(condition: unknown): asserts condition {
 	if (!condition) throw new IcloudE2eHarnessError(IcloudE2eErrorCode.ASSERTION_FAILED);
 }
 
+/** A cleanup failure is terminal but must not replace an earlier operation error. */
+export function throwIfCleanupOnlyFailure(
+	cleanupFailed: boolean,
+	operationFailed: boolean,
+	code: IcloudE2eErrorCode,
+): void {
+	if (cleanupFailed && !operationFailed) throw new IcloudE2eHarnessError(code);
+}
+
+/** Test-only convergence for an expected missing/empty post-write read. */
+export async function waitForE2eVisibility<T>(
+	read: () => Promise<T | undefined>,
+	delay: () => Promise<void>,
+	attempts = 4,
+): Promise<T> {
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
+		const value = await read();
+		if (value !== undefined) return value;
+		if (attempt + 1 < attempts) await delay();
+	}
+	throw new IcloudE2eHarnessError(IcloudE2eErrorCode.READ_VISIBILITY_FAILED);
+}
+
 export type IcloudE2eCleanupDeleteOutcome = 'deleted' | 'preconditionFailed' | 'failed';
+
+export type IcloudE2eOwnedRead =
+	| { readonly kind: 'missing' }
+	| { readonly kind: 'found'; readonly uid: string; readonly etag: string };
+
+/** A cleanup DELETE is permitted only after an exact UID read with a fresh ETag. */
+export async function recoverRunOwnedE2eEvent(
+	expectedUid: string,
+	read: () => Promise<IcloudE2eOwnedRead>,
+	deleteWithEtag: (etag: string) => Promise<IcloudE2eCleanupDeleteOutcome>,
+): Promise<'cleaned' | 'manual-cleanup-required'> {
+	for (let attempt = 0; attempt < ICLOUD_E2E_CLEANUP_DELETE_ATTEMPTS; attempt += 1) {
+		const current = await read();
+		if (current.kind === 'missing') return 'cleaned';
+		if (current.uid !== expectedUid || current.etag.length === 0) return 'manual-cleanup-required';
+		const outcome = await deleteWithEtag(current.etag);
+		if (outcome === 'deleted') return 'cleaned';
+		if (outcome !== 'preconditionFailed') return 'manual-cleanup-required';
+	}
+	return 'manual-cleanup-required';
+}
 
 /**
  * Harness-only recovery: product paths never call this helper. Each retry begins

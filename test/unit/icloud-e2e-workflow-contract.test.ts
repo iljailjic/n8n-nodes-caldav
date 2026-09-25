@@ -58,7 +58,7 @@ describe('iCloud E2E workflow contract', () => {
 			readFile(resolve(cwd(), 'test/e2e/icloud-e2e-harness.e2e.test.ts'), 'utf8'),
 		]);
 		expect(workflow).not.toMatch(/actions\/(upload|download)-artifact@/);
-		expect(e2eTest).toContain("schemaVersion: 'icloud-e2e-evidence/v4'");
+		expect(e2eTest).toContain("schemaVersion: 'icloud-e2e-evidence/v5'");
 		expect(e2eTest).toContain('assertPrivateRawIcs');
 		expect(e2eTest).toContain('run-owned-seed');
 	});
