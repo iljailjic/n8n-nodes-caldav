@@ -5,6 +5,10 @@ documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Show the Calendar locator for Calendar Get and all Event operations, including Get Many, while keeping it hidden for Calendar Get Many (#149).
+
 ## [1.0.0-beta.2] - 2026-09-24
 
 ### Release infrastructure

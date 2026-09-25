@@ -129,7 +129,7 @@ function createProperties(): readonly INodeProperties[] {
 	return new CalDav().description.properties.filter((candidate) => {
 		const show = candidate.displayOptions?.show;
 		return (
-			candidate.name === 'calendar' ||
+			(candidate.name === 'calendar' && show?.resource?.includes('event') === true) ||
 			(show?.resource?.includes('event') === true && show.operation?.includes('create') === true)
 		);
 	});

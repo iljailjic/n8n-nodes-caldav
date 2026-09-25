@@ -135,10 +135,10 @@ function event(
 
 function eventProperties(operation: string): readonly INodeProperties[] {
 	return new CalDav().description.properties.filter((property) => {
-		if (property.name === 'calendar') return true;
 		const show = property.displayOptions?.show;
 		return (
-			show?.resource?.includes('event') === true && show.operation?.includes(operation) === true
+			(property.name === 'calendar' && show?.resource?.includes('event') === true) ||
+			(show?.resource?.includes('event') === true && show.operation?.includes(operation) === true)
 		);
 	});
 }

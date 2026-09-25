@@ -55,11 +55,15 @@ describe('release metadata and 1.0.0-beta.1 development checkpoint', () => {
 		});
 	});
 
-	it('documents the exact dated checkpoint immediately after Unreleased without claiming a release', async () => {
+	it('keeps the released headings ordered after Unreleased and preserves the dated checkpoint', async () => {
 		const changelog = await readRepositoryFile('CHANGELOG.md');
 		const checkpointStart = changelog.indexOf(CHECKPOINT_HEADING);
 		const unreleasedStart = changelog.indexOf(UNRELEASED_HEADING);
 		const currentReleaseStart = changelog.indexOf('## [1.0.0-beta.2]');
+		const nextUnreleasedHeadingStart = changelog.indexOf(
+			'\n## ',
+			unreleasedStart + UNRELEASED_HEADING.length,
+		);
 		const previousCheckpointStart = changelog.indexOf('## [0.6.0]');
 		const nextHeadingStart = changelog.indexOf(
 			'\n## ',
@@ -68,8 +72,9 @@ describe('release metadata and 1.0.0-beta.1 development checkpoint', () => {
 
 		expect(changelog.match(/^## \[1\.0\.0-beta\.1\] - 2026-09-17$/gm) ?? []).toHaveLength(1);
 		expect(changelog.match(/^## Unreleased$/gm) ?? []).toHaveLength(1);
-		expect(changelog).toContain(`${UNRELEASED_HEADING}\n\n## [1.0.0-beta.2]`);
-		expect(currentReleaseStart).toBe(unreleasedStart + UNRELEASED_HEADING.length + 2);
+		expect(changelog.match(/^## \[1\.0\.0-beta\.2\] - 2026-09-24$/gm) ?? []).toHaveLength(1);
+		expect(currentReleaseStart).toBeGreaterThan(unreleasedStart);
+		expect(nextUnreleasedHeadingStart).toBe(currentReleaseStart - 1);
 		expect(checkpointStart).toBeGreaterThan(currentReleaseStart);
 		expect(previousCheckpointStart).toBeGreaterThan(checkpointStart);
 		expect(nextHeadingStart).toBe(previousCheckpointStart - 1);

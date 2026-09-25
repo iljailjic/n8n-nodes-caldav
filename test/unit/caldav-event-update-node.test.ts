@@ -235,7 +235,9 @@ describe('CalDAV Event Update metadata', () => {
 
 	it('reuses Calendar/identifier/ETag fields and defines the exact ordered patch collection', () => {
 		const properties = new CalDav().description.properties;
-		expect(property(properties, 'calendar').displayOptions?.show?.operation).toContain('update');
+		expect(property(properties, 'calendar', 'update').displayOptions?.show?.operation).toContain(
+			'update',
+		);
 		expect(property(properties, 'identifierMode').displayOptions?.show?.operation).toEqual([
 			'get',
 			'update',

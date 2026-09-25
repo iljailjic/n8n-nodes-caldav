@@ -179,6 +179,7 @@ describe('Calendar Get Many node description', () => {
 			'returnAll',
 			'limit',
 			'calendar',
+			'calendar',
 			'inputMode',
 			'rawIcs',
 			'uid',
@@ -250,17 +251,13 @@ describe('Calendar Get Many node description', () => {
 			},
 		});
 		expect(property(description, 'limit').typeOptions).not.toHaveProperty('maxValue');
-		expect(property(description, 'calendar')).toMatchObject({
+		expect(property(description, 'calendar', 'calendar')).toMatchObject({
 			displayName: 'Calendar',
 			type: 'resourceLocator',
 			required: true,
 			default: { mode: 'url', value: '' },
 			displayOptions: {
-				show: {
-					resource: ['calendar', 'event'],
-					operation: ['create', 'get', 'getMany', 'update', 'upsert', 'delete'],
-				},
-				hide: { resource: ['calendar'], operation: ['getMany'] },
+				show: { resource: ['calendar'], operation: ['get'] },
 			},
 			modes: [
 				{
@@ -271,6 +268,12 @@ describe('Calendar Get Many node description', () => {
 				},
 				{ displayName: 'By URL', name: 'url', type: 'string' },
 			],
+		});
+		expect(property(description, 'calendar', 'event').displayOptions).toEqual({
+			show: {
+				resource: ['event'],
+				operation: ['create', 'get', 'getMany', 'update', 'upsert', 'delete'],
+			},
 		});
 		expect(new CalDav().methods).toHaveProperty('listSearch.searchCalendars', expect.any(Function));
 	});

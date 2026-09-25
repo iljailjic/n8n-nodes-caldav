@@ -154,6 +154,30 @@ const READ_ONLY_EVENT_UPDATE_MESSAGE =
 	'The calendar event is read-only because its time representation is unsupported.';
 const GENERIC_GET_MANY_ERROR_MESSAGE = 'The Calendar Get Many operation failed.';
 const GENERIC_LIST_SEARCH_ERROR_MESSAGE = 'The calendar list could not be loaded.';
+const CALENDAR_LOCATOR_PROPERTY: INodeProperties = {
+	displayName: 'Calendar',
+	name: 'calendar',
+	type: 'resourceLocator',
+	required: true,
+	default: { mode: 'url', value: '' },
+	modes: [
+		{
+			displayName: 'From List',
+			name: 'list',
+			type: 'list',
+			typeOptions: {
+				searchListMethod: 'searchCalendars',
+				searchable: true,
+			},
+		},
+		{
+			displayName: 'By URL',
+			name: 'url',
+			type: 'string',
+			hint: 'Enter an absolute calendar collection URL',
+		},
+	],
+};
 const ZONED_ISO_INSTANT_PATTERN =
 	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:([zZ])|([+-])(\d{2}):(\d{2}))$/;
 const CALENDAR_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -3914,14 +3938,16 @@ export class CalDav implements INodeType {
 				},
 			},
 			{
-				displayName: 'Calendar',
-				name: 'calendar',
-				type: 'resourceLocator',
-				required: true,
-				default: { mode: 'url', value: '' },
+				...CALENDAR_LOCATOR_PROPERTY,
+				displayOptions: {
+					show: { resource: [CALENDAR_RESOURCE], operation: [GET_OPERATION] },
+				},
+			},
+			{
+				...CALENDAR_LOCATOR_PROPERTY,
 				displayOptions: {
 					show: {
-						resource: [CALENDAR_RESOURCE, EVENT_RESOURCE],
+						resource: [EVENT_RESOURCE],
 						operation: [
 							CREATE_OPERATION,
 							GET_OPERATION,
@@ -3931,28 +3957,7 @@ export class CalDav implements INodeType {
 							DELETE_OPERATION,
 						],
 					},
-					hide: {
-						resource: [CALENDAR_RESOURCE],
-						operation: [GET_MANY_OPERATION],
-					},
 				},
-				modes: [
-					{
-						displayName: 'From List',
-						name: 'list',
-						type: 'list',
-						typeOptions: {
-							searchListMethod: 'searchCalendars',
-							searchable: true,
-						},
-					},
-					{
-						displayName: 'By URL',
-						name: 'url',
-						type: 'string',
-						hint: 'Enter an absolute calendar collection URL',
-					},
-				],
 			},
 			{
 				displayName: 'Input Mode',
