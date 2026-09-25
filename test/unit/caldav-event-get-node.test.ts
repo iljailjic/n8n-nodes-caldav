@@ -274,7 +274,7 @@ describe('CalDAV Event Get metadata', () => {
 	});
 
 	it('reuses the exact required Calendar locator for Event read operations', () => {
-		const calendar = property(new CalDav().description.properties, 'calendar');
+		const calendar = property(new CalDav().description.properties, 'calendar', 'event', 'get');
 
 		expect(calendar).toMatchObject({
 			displayName: 'Calendar',
@@ -284,10 +284,9 @@ describe('CalDAV Event Get metadata', () => {
 			default: { mode: 'url', value: '' },
 			displayOptions: {
 				show: {
-					resource: expect.arrayContaining(['calendar', 'event']),
+					resource: ['event'],
 					operation: ['create', 'get', 'getMany', 'update', 'upsert', 'delete'],
 				},
-				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
 			modes: [
 				{

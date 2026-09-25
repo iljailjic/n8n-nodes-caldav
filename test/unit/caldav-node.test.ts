@@ -1,5 +1,5 @@
 import type { IExecuteFunctions, INode, INodeExecutionData } from 'n8n-workflow';
-import { NodeApiError, NodeOperationError } from 'n8n-workflow';
+import { displayParameter, NodeApiError, NodeOperationError } from 'n8n-workflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -143,6 +143,7 @@ describe('CalDAV Calendar Get UI', () => {
 			'returnAll',
 			'limit',
 			'calendar',
+			'calendar',
 			'inputMode',
 			'rawIcs',
 			'uid',
@@ -269,11 +270,37 @@ describe('CalDAV Calendar Get UI', () => {
 				required: true,
 				default: { mode: 'url', value: '' },
 				displayOptions: {
+					show: { resource: ['calendar'], operation: ['get'] },
+				},
+				modes: [
+					{
+						displayName: 'From List',
+						name: 'list',
+						type: 'list',
+						typeOptions: {
+							searchListMethod: 'searchCalendars',
+							searchable: true,
+						},
+					},
+					{
+						displayName: 'By URL',
+						name: 'url',
+						type: 'string',
+						hint: expect.stringMatching(/absolute.*collection.*URL/i),
+					},
+				],
+			},
+			{
+				displayName: 'Calendar',
+				name: 'calendar',
+				type: 'resourceLocator',
+				required: true,
+				default: { mode: 'url', value: '' },
+				displayOptions: {
 					show: {
-						resource: ['calendar', 'event'],
+						resource: ['event'],
 						operation: ['create', 'get', 'getMany', 'update', 'upsert', 'delete'],
 					},
-					hide: { resource: ['calendar'], operation: ['getMany'] },
 				},
 				modes: [
 					{
@@ -297,6 +324,26 @@ describe('CalDAV Calendar Get UI', () => {
 		expect(node.methods).toHaveProperty('listSearch.searchCalendars', expect.any(Function));
 	});
 
+	it.each([
+		['calendar', 'get', 1],
+		['calendar', 'getMany', 0],
+		['event', 'create', 1],
+		['event', 'get', 1],
+		['event', 'getMany', 1],
+		['event', 'update', 1],
+		['event', 'upsert', 1],
+		['event', 'delete', 1],
+	] as const)('shows Calendar locator for %s/%s', (resource, operation, count) => {
+		const node = new CalDav();
+		const visible = node.description.properties.filter(
+			(property) =>
+				property.name === 'calendar' &&
+				displayParameter({ resource, operation }, property, NODE, node.description),
+		);
+
+		expect(visible).toHaveLength(count);
+	});
+
 	it('keeps the locator additive without exposing unrelated operations', () => {
 		const node = new CalDav();
 		const operation = node.description.properties.find(
@@ -316,6 +363,19 @@ describe('CalDAV Calendar Get UI', () => {
 
 describe('CalDAV Calendar Get execution', () => {
 	it('reads all parameters per item and returns top-level paired calendar objects in order', async () => {
+		const node = new CalDav();
+		expect(
+			node.description.properties.filter(
+				(property) =>
+					property.name === 'calendar' &&
+					displayParameter(
+						{ resource: 'calendar', operation: 'get' },
+						property,
+						NODE,
+						node.description,
+					),
+			),
+		).toHaveLength(1);
 		mocks.getCalendarCollection
 			.mockResolvedValueOnce(CALENDARS[0])
 			.mockResolvedValueOnce(CALENDARS[1]);

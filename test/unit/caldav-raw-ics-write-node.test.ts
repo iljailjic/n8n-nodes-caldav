@@ -94,7 +94,10 @@ beforeEach(() => {
 describe('Raw ICS node descriptor and active extraction', () => {
 	it('publishes exact mode/raw descriptors immediately after Calendar and hides structured controls', () => {
 		const properties = new CalDav().description.properties;
-		const calendarIndex = properties.findIndex(({ name }) => name === 'calendar');
+		const calendarIndex = properties.findIndex(
+			({ name, displayOptions }) =>
+				name === 'calendar' && displayOptions?.show?.resource?.includes('event'),
+		);
 		const mode = properties[calendarIndex + 1]!;
 		const raw = properties[calendarIndex + 2]!;
 		expect(mode).toMatchObject({
