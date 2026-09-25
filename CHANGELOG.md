@@ -5,9 +5,15 @@ documented in this file.
 
 ## Unreleased
 
+## [1.0.0-beta.3] - 2026-09-25
+
 ### Fixed
 
 - Show the Calendar locator for Calendar Get and all Event operations, including Get Many, while keeping it hidden for Calendar Get Many (#149).
+
+### Changed
+
+- Clarified that Calendar Get Many returns results per input item and added deterministic tests for that contract (#150).
 
 ## [1.0.0-beta.2] - 2026-09-24
 
