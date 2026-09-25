@@ -21,6 +21,7 @@ export const IcloudE2eErrorCode = Object.freeze({
 	CALENDAR_NOT_FOUND: 'E2E_CALENDAR_NOT_FOUND',
 	CALENDAR_AMBIGUOUS: 'E2E_CALENDAR_AMBIGUOUS',
 	ASSERTION_FAILED: 'E2E_ASSERTION_FAILED',
+	REMOTE_COOLDOWN: 'E2E_REMOTE_COOLDOWN',
 } as const);
 
 export type IcloudE2eErrorCode = (typeof IcloudE2eErrorCode)[keyof typeof IcloudE2eErrorCode];
@@ -49,12 +50,20 @@ export interface IcloudE2eEvidence {
 		'OPTIONS' | 'PROPFIND' | 'REPORT' | 'GET' | 'PUT' | 'DELETE'
 	)[];
 	readonly errorCodes: readonly IcloudE2eErrorCode[];
+	readonly requestDiagnostics?: {
+		readonly requestCount: number;
+		readonly minStartGapMs?: number;
+		readonly statusCounts: Readonly<Record<string, number>>;
+		readonly phaseStatusCounts?: Readonly<Record<string, number>>;
+	};
 	readonly firstFailure?: {
 		readonly stage: string;
 		readonly category: 'harness' | 'transport' | 'node' | 'other';
 		readonly method?: 'OPTIONS' | 'PROPFIND' | 'REPORT' | 'GET' | 'PUT' | 'DELETE';
 		readonly httpStatus?: number;
 		readonly etagPresent?: boolean;
+		readonly retryAfterPresent?: boolean;
+		readonly retryAfterSeconds?: number;
 		readonly transportCode?: string;
 	};
 	readonly cleanupOutcome?: 'not-required' | 'cleaned' | 'manual-cleanup-required';
