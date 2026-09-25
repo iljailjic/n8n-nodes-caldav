@@ -1,5 +1,5 @@
 import type { IExecuteFunctions, INode, INodeExecutionData, INodeProperties } from 'n8n-workflow';
-import { NodeApiError, NodeOperationError } from 'n8n-workflow';
+import { displayParameter, NodeApiError, NodeOperationError } from 'n8n-workflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -171,15 +171,14 @@ describe('CalDAV Event Get Many metadata', () => {
 				},
 			],
 		});
-		expect(property(properties, 'calendar')).toMatchObject({
+		expect(property(properties, 'calendar', 'event', 'getMany')).toMatchObject({
 			required: true,
 			default: { mode: 'url', value: '' },
 			displayOptions: {
 				show: {
-					resource: ['calendar', 'event'],
+					resource: ['event'],
 					operation: ['create', 'get', 'getMany', 'update', 'upsert', 'delete'],
 				},
-				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
 		});
 		expect(property(properties, 'start', 'event', 'getMany')).toMatchObject({
@@ -215,6 +214,32 @@ describe('CalDAV Event Get Many metadata', () => {
 });
 
 describe('CalDAV Event Get Many execution', () => {
+	it('keeps the required locator visible and reaches the query with its URL', async () => {
+		const node = new CalDav();
+		const input = parameters();
+		const visibleLocators = node.description.properties.filter(
+			(candidate) =>
+				candidate.name === 'calendar' &&
+				displayParameter(
+					{ resource: 'event', operation: 'getMany' },
+					candidate,
+					NODE,
+					node.description,
+				),
+		);
+		expect(visibleLocators).toHaveLength(1);
+		mocks.queryCalendarEventsByTimeRange.mockResolvedValue([]);
+
+		await expect(execute(context([input]))).resolves.toEqual([[]]);
+		expect(mocks.createN8nCalDavTransport).toHaveBeenCalledOnce();
+		expect(mocks.queryCalendarEventsByTimeRange).toHaveBeenCalledWith(
+			TRANSPORT,
+			'https://calendar.example.test/calendars/work/',
+			expect.objectContaining({ start: expect.any(Date), end: expect.any(Date) }),
+			expect.anything(),
+		);
+	});
+
 	it('accepts the inclusive four-digit UTC year boundaries', async () => {
 		mocks.queryCalendarEventsByTimeRange.mockResolvedValue([]);
 

@@ -238,15 +238,14 @@ describe('CalDAV Event Delete metadata', () => {
 	it('reuses the Calendar and identifier fields for Delete and exposes one optional ETag', () => {
 		const properties = new CalDav().description.properties;
 
-		expect(property(properties, 'calendar')).toMatchObject({
+		expect(property(properties, 'calendar', 'event', 'delete')).toMatchObject({
 			required: true,
 			default: { mode: 'url', value: '' },
 			displayOptions: {
 				show: {
-					resource: ['calendar', 'event'],
+					resource: ['event'],
 					operation: expect.arrayContaining(['get', 'getMany', 'delete']),
 				},
-				hide: { resource: ['calendar'], operation: ['getMany'] },
 			},
 		});
 		expect(property(properties, 'identifierMode')).toMatchObject({
