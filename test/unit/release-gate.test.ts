@@ -243,6 +243,32 @@ describe('release and archive gate', () => {
 });
 
 describe('publishing workflow contract', () => {
+	function step(workflow: string, name: string) {
+		const start = workflow.indexOf(`      - name: ${name}\n`);
+		expect(start).toBeGreaterThanOrEqual(0);
+		const end = workflow.indexOf('\n      - name:', start + 1);
+		return workflow.slice(start, end < 0 ? undefined : end);
+	}
+
+	it.each([
+		['prepare-release.yml', 'Validate tag and empty draft release', 'release prepare'],
+		['prepare-release.yml', 'Attach reviewed archive to draft release', 'release prepare-uploaded'],
+		['publish-first-beta.yml', 'Validate tag and draft prerelease', 'release first-beta'],
+	])('finds the exact draft release by list and ID in %s: %s', (file, name, gate) => {
+		const workflow = readFileSync(`.github/workflows/${file}`, 'utf8');
+		const lookup = step(workflow, name);
+		expect(lookup).toMatch(
+			/gh api --paginate [^\n]*repos\/\$\{GITHUB_REPOSITORY\}\/releases\?per_page=100/,
+		);
+		expect(lookup).toMatch(/\.tag_name\s*==\s*\$tag\b/);
+		expect(lookup).toMatch(/if length == 1 then \.\[0\] else error\(/);
+		expect(lookup).toMatch(
+			/gh api [^\n]*repos\/\$\{GITHUB_REPOSITORY\}\/releases\/\$\{?release_id\}?/i,
+		);
+		expect(lookup).not.toContain('/releases/tags/');
+		expect(lookup).toContain(`node scripts/release-gate.mjs ${gate} `);
+	});
+
 	it('prepares one archive and installs that exact file before upload', () => {
 		const workflow = readFileSync('.github/workflows/prepare-release.yml', 'utf8');
 		expect(workflow).toContain('git fetch --no-tags origin main:refs/remotes/origin/main');

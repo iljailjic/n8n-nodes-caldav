@@ -44,7 +44,9 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin main:refs/remotes/origin/main
           node scripts/release-gate.mjs metadata prepare "$RELEASE_TAG"
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > "$RUNNER_TEMP/release.json"
+          release_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+            jq -ser --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag) | .id] | if length == 1 then .[0] else error("Expected exactly one release for tag " + $tag) end')"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "$RUNNER_TEMP/release.json"
           node scripts/release-gate.mjs release prepare "$RELEASE_TAG" "$RUNNER_TEMP/release.json"
 
       - name: Install dependencies and check source
@@ -77,6 +79,8 @@ jobs:
           set -euo pipefail
           archive="$RUNNER_TEMP/release-archive/iljailjic-n8n-nodes-caldav-${RELEASE_TAG#v}.tgz"
           gh release upload "$RELEASE_TAG" "$archive" "$archive.sha256"
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > "$RUNNER_TEMP/release-uploaded.json"
+          release_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+            jq -ser --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag) | .id] | if length == 1 then .[0] else error("Expected exactly one release for tag " + $tag) end')"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "$RUNNER_TEMP/release-uploaded.json"
           node scripts/release-gate.mjs release prepare-uploaded "$RELEASE_TAG" "$RUNNER_TEMP/release-uploaded.json"
           node scripts/release-gate.mjs archive "$RELEASE_TAG" "$archive" "$archive.sha256" "$RUNNER_TEMP/release-uploaded.json"
