@@ -556,7 +556,7 @@ describe('calendar-collection URL, deduplication, and security behavior', () => 
 				'/calendars/shared',
 				'<d:displayname>First</d:displayname>' + privilegeSet('read'),
 			) +
-				calendarResponse('/calendars/other/', '<d:displayname>Other</d:displayname>') +
+				calendarResponse('/calendars/other/', '<d:displayname>First</d:displayname>') +
 				calendarResponse(
 					'https://partition.example.test/calendars/shared/',
 					'<d:displayname>Ignored duplicate</d:displayname>' + privilegeSet('all'),
@@ -577,7 +577,7 @@ describe('calendar-collection URL, deduplication, and security behavior', () => 
 			},
 			{
 				url: 'https://partition.example.test/calendars/other/',
-				displayName: 'Other',
+				displayName: 'First',
 				canRead: null,
 				canWrite: null,
 			},

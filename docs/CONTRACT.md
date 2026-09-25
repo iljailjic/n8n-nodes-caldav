@@ -87,6 +87,13 @@ The node UI maps to these operation-specific parameters:
 | Event Upsert      | `Calendar`, `Input Mode`; Structured adds optional `UID`, `Time Mode`, time fields, `Summary`, and `Additional Fields`; Raw adds `Raw ICS`                                            | `action` (`create` or `update`) plus normalized event; update includes `rawIcs`                                                   |
 | Event Delete      | `Calendar`, `Identifier Mode`, `Resource URL` or `UID`, optional `ETag`                                                                                                               | `calendarUrl`, `resourceUrl`, `uid`, `deleted: true`                                                                              |
 
+Calendar **Get Many** discovers calendars separately for each input item.
+Its `Limit` applies to that input's discovered calendars, and every output is
+paired with the input that triggered the discovery. Within one discovery,
+entries with the same normalized collection URL are returned once; different
+URLs remain separate results even when their descriptive fields match. Results
+from separate input items are not deduplicated across the execution.
+
 `Additional Fields` for structured Create are `Description`, `Location`, `URL`,
 `Categories`, `Status`, `Transparency`, `Recurrence`, and `Alarms`. Structured
 Update and Upsert expose explicit Set/Remove patches for optional fields;
@@ -208,6 +215,13 @@ caused it. Get Many operations produce multiple output items, each paired with
 the originating input. With **Continue on Fail**, invalid input and remote
 failures become an item containing `{ "error": "..." }`; without it, the node
 raises an item-aware n8n error.
+
+For Calendar **Get Many**, deterministic mocked-response checks confirm this
+per-input behavior, including separate results for repeated input items and
+per-input limits. They also confirm that same-URL duplicates collapse within
+one discovery while distinct URLs are retained when their display fields
+match. No live-provider response has established a one-input duplicate
+regression.
 
 Errors are sanitized and branchable. These representative messages preserve
 the public behavior without exposing credentials or response bodies:

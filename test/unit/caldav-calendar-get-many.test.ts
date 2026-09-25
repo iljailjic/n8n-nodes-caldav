@@ -280,6 +280,55 @@ describe('Calendar Get Many node description', () => {
 });
 
 describe('Calendar Get Many successful execution', () => {
+	it('returns the same discovered calendars once for one input and once per input for two inputs', async () => {
+		const first = collection('/first/', { displayName: 'First' });
+		const second = collection('/second/', { displayName: 'Second' });
+		const syntheticResponse = [second, first];
+		dependencyMocks.discoverCollections.mockResolvedValue(syntheticResponse);
+
+		const [oneInputOutput] = await execute(executionContext([defaultParameters()]));
+		expect(oneInputOutput).toHaveLength(2);
+		expect(oneInputOutput).toEqual([
+			{ json: first, pairedItem: { item: 0 } },
+			{ json: second, pairedItem: { item: 0 } },
+		]);
+		expect(dependencyMocks.discoverCollections).toHaveBeenCalledTimes(1);
+
+		dependencyMocks.discoverCollections.mockClear();
+		const [twoInputOutput] = await execute(
+			executionContext([defaultParameters(), defaultParameters()]),
+		);
+		expect(twoInputOutput).toHaveLength(4);
+		expect(twoInputOutput).toEqual([
+			{ json: first, pairedItem: { item: 0 } },
+			{ json: second, pairedItem: { item: 0 } },
+			{ json: first, pairedItem: { item: 1 } },
+			{ json: second, pairedItem: { item: 1 } },
+		]);
+		expect(dependencyMocks.discoverCollections).toHaveBeenCalledTimes(2);
+	});
+
+	it('applies each input Limit independently to the same discovered calendars', async () => {
+		const first = collection('/first/', { displayName: 'First' });
+		const second = collection('/second/', { displayName: 'Second' });
+		const third = collection('/third/', { displayName: 'Third' });
+		dependencyMocks.discoverCollections.mockResolvedValue([third, first, second]);
+
+		const [output] = await execute(
+			executionContext([
+				defaultParameters({ returnAll: false, limit: 2 }),
+				defaultParameters({ returnAll: false, limit: 1 }),
+			]),
+		);
+		expect(output).toHaveLength(3);
+		expect(output).toEqual([
+			{ json: first, pairedItem: { item: 0 } },
+			{ json: second, pairedItem: { item: 0 } },
+			{ json: first, pairedItem: { item: 1 } },
+		]);
+		expect(dependencyMocks.discoverCollections).toHaveBeenCalledTimes(2);
+	});
+
 	it('uses exact ordinal display-name and canonical-URL ordering independent of server order', async () => {
 		const expected = [
 			collection('/empty/', { displayName: '' }),
