@@ -408,6 +408,7 @@ function liveNodeContext(
 	return {
 		getInputData: () => [{ json: {} }],
 		getNodeParameter: (name: string) => parameters[name],
+		getTimezone: () => 'UTC',
 		getCredentials: async () => ({
 			serverUrl: input.serverUrl,
 			username: input.username,
@@ -652,6 +653,46 @@ async function waitForTimeRangeConvergence(
 }
 
 describe('iCloud E2E discovery contract (fictional synthetic regressions)', () => {
+	it('supplies the live execution timezone and normalizes fractional and local UTC query bounds before REPORT', async () => {
+		const input = {
+			serverUrl: 'https://calendar.example.test/',
+			username: 'fictional-user',
+			appPassword: 'fictional-password',
+			calendarDisplayName: 'Fictional Calendar',
+		};
+		const reports: N8nCalDavRequestOptions[] = [];
+		const adapter: CalDavRequestHelperAdapter = {
+			async request(options) {
+				expect(options.method).toBe(CalDavMethod.REPORT);
+				reports.push(options);
+				return {
+					statusCode: 207,
+					headers: {},
+					body: Readable.from(Buffer.from('<d:multistatus xmlns:d="DAV:"/>')),
+				};
+			},
+		};
+		for (const [start, end] of [
+			['2040-04-15T10:00:00.999Z', '2040-04-15T14:00:00.999Z'],
+			['2040-04-15T10:00:00.999', '2040-04-15T14:00:00.999'],
+		]) {
+			const execution = liveNodeContext(input, adapter, {
+				resource: 'event',
+				operation: 'getMany',
+				calendar: { __rl: true, mode: 'url', value: 'https://calendar.example.test/dav/' },
+				start,
+				end,
+				returnAll: true,
+			});
+			expect(await new CalDav().execute.call(execution)).toEqual([[]]);
+			expect(execution.getTimezone()).toBe('UTC');
+		}
+		expect(reports).toHaveLength(2);
+		expect(reports[0].body).toBe(reports[1].body);
+		expect(reports[0].body).toContain('start="20400415T100000Z"');
+		expect(reports[0].body).toContain('end="20400415T140000Z"');
+	});
+
 	it('reuses only the matching successful discovery and falls back for standalone or changed selection', async () => {
 		const selected = { displayName: 'Fictional', url: 'https://example.test/a/' };
 		const fallbackSelected = { displayName: 'Other', url: 'https://example.test/b/' };
