@@ -14,6 +14,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/CalDav.node.js.map',
 	'dist/nodes/CalDav/CalDav.node.json',
 	'dist/nodes/CalDav/caldav.svg',
+	'dist/nodes/CalDav/temporalInputs.d.ts',
+	'dist/nodes/CalDav/temporalInputs.js',
+	'dist/nodes/CalDav/temporalInputs.js.map',
 	'dist/nodes/CalDav/actions/calendar/get.d.ts',
 	'dist/nodes/CalDav/actions/calendar/get.js',
 	'dist/nodes/CalDav/actions/calendar/get.js.map',
@@ -234,7 +237,7 @@ function createPackOutput(paths: string[], overrides: PackResultOverrides = {}) 
 	return JSON.stringify([
 		{
 			name: '@iljailjic/n8n-nodes-caldav',
-			version: '1.0.0-beta.3',
+			version: '1.0.0-beta.4',
 			files: paths.map((path) => ({ path })),
 			entryCount: paths.length,
 			bundled: [],
@@ -247,7 +250,7 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(139);
+		expect(expectedPackageFiles).toHaveLength(142);
 		expect(expectedPackageFiles.filter((path) => path.includes('/icalendar/alarms.'))).toEqual(
 			alarmArtifactPaths,
 		);

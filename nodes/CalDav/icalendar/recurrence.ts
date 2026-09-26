@@ -646,6 +646,11 @@ export function normalizeRecurrenceRule(
 	return normalizeInternal(input, start);
 }
 
+/** Validate caller-controlled selectors before a lookup when DTSTART is not yet known. */
+export function validateRecurrenceRuleInput(input: unknown): RecurrenceRule {
+	return normalizeInternal(input);
+}
+
 function recurrenceUntilWire(until: RecurrenceUntil): string {
 	return until.kind === 'date'
 		? until.date.replace(/-/g, '')

@@ -22,6 +22,13 @@ parameter, including its default, visibility, validation, error text, and
 output shape. New optional fields or operations must not change the behavior
 of an existing v1 export when those fields are absent.
 
+Issue #154 adds accepted temporal input forms while retaining the meaning of
+previously successful zoned and object inputs and all output fields. Newly
+accepted local and fractional inputs do not change saved workflows that use
+the prior forms; invalid inputs continue to fail, with field-specific guidance
+where temporal validation can identify the field. The approved #154 contract
+does not require a node-version increment.
+
 A change is breaking when it changes the meaning of an existing parameter or
 omission, a default, a visible/hidden condition, an identifier mode, an error
 branch or message relied on by workflows, or an output field's presence,
@@ -134,6 +141,57 @@ before writing. Unbounded IANA recurrence authoring requires a verified server
 reference. Reads treat an embedded `VTIMEZONE` as authoritative. Unsupported
 time representations are readable and deletable but are read-only for
 structured Update.
+
+### Structured temporal inputs
+
+Every structured timed value accepts a strict ISO date-time with a four-digit
+Gregorian year (`0001`–`9999`), `T`, seconds, an optional decimal fraction, and
+an optional `Z` or numeric `+/-HH:mm` offset. Calendar components and offsets
+are validated before conversion. Date-only strings, locale/display text,
+minute-only strings, named-zone suffixes, numeric epochs, and arbitrary values
+are invalid timed inputs. Valid JavaScript `Date` and Luxon `DateTime` values
+are also accepted. Inputs from Fixed fields, expressions, mapped items, and
+nested structured fields use the same rules; n8n may serialize nested Luxon
+values to ISO strings before the node receives them.
+
+A date-time string without an offset is interpreted as a local wall time in
+the effective zone. A value with an offset, a `Date`, or a valid Luxon value
+represents an absolute instant; the effective zone controls its local
+representation and serialization. Event Get Many uses the execution/workflow
+time zone for local Start and End query bounds. Create and both Upsert branches
+use the selected action zone: UTC mode means UTC, and IANA mode means the
+selected IANA zone, independently of the workflow zone. Update uses an
+explicit time-zone patch when supplied, otherwise the existing event's zone
+and authoritative embedded rules. Omitted bounds and zone-only changes
+preserve existing bound instants.
+
+Fractions are accepted but normalized by flooring the represented instant to
+whole seconds, including for negative-epoch instants. They are never rounded
+into the next second. Range ordering is checked after normalization, so bounds
+that collapse to the same second are invalid. All-day Start Date, End Date,
+and Until accept literal strict `YYYY-MM-DD` values, preserved as dates. An
+explicit instant supplied to one of these date-only fields is projected to a
+date in the effective workflow time zone, including when received as a
+`Date`, Luxon value, or serialized ISO string. A zone-less date-time string is
+not valid in a date-only field. Start Date is inclusive, End Date is exclusive
+and later than Start Date, and all-day Until is inclusive and may equal Start
+Date.
+
+New local timed bounds and timed Until values that fall in a daylight-saving
+gap or fold are rejected with field-specific correction guidance. For a gap,
+provide a valid local time; for a fold, provide an explicit instant or offset.
+An explicit instant remains that instant, subject to the existing IANA
+representability checks. All-day-to-timed conversion requires an explicit time
+zone when the target bounds are local. Timed Until follows the same grammar,
+precision, and final event-zone context as other timed values, then is stored
+as canonical whole-second UTC. It is inclusive and cannot precede DTSTART.
+
+Structured relative alarm controls accept integer values from 1 through
+2147483647 with minute, hour, day, or week units for Before/After; At uses
+zero. Day and week retain RFC calendar-duration semantics. Numeric strings,
+fractions, and duration coercions are invalid. Raw ICS retains its independent
+RFC contract: structured zone interpretation and whole-second normalization
+do not rewrite its temporal properties or generated system-managed clocks.
 
 ## Event output
 

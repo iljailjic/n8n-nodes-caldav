@@ -1531,3 +1531,70 @@ export function resolveLocalDateTimeInTimeZone(
 	}
 	return invalidInstant();
 }
+
+/** Structured authoring requires one unique instant; RFC decoding above stays unchanged. */
+export function resolveStructuredLocalDateTimeInTimeZone(
+	localDateTime: string,
+	timeZone: IanaTimeZoneId,
+	definition?: ICalendarComponent,
+): Date {
+	const parts = parseLocal(localDateTime);
+	const wall = wallTimestamp(parts);
+	const offsets = new Set<number>();
+	const localFormatter = definition === undefined ? formatter(timeZone) : undefined;
+	let transitions: readonly DefinitionTransition[] | undefined;
+	if (definition !== undefined) {
+		transitions = definitionTransitions(definition, timeZone, [parts.year]);
+		if (transitions.length === 0) throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+		for (const transition of transitions) {
+			offsets.add(transition.offsetFromMilliseconds);
+			offsets.add(transition.offsetToMilliseconds);
+		}
+	} else {
+		// Sample both sides of non-hour transitions and date-line changes, including second offsets.
+		for (let hours = -48; hours <= 48; hours += 1) {
+			const timestamp = wall + hours * 3_600_000;
+			const year = new Date(timestamp).getUTCFullYear();
+			if (year >= 1 && year <= 9999) {
+				try {
+					offsets.add(
+						wallTimestamp(projectedPartsWithFormatter(timestamp, localFormatter!)) - timestamp,
+					);
+				} catch (error) {
+					if (
+						!(error instanceof CalDavIanaTimeZoneError) ||
+						error.code !== 'UNREPRESENTABLE_INSTANT'
+					)
+						// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- This pure time-zone helper retains typed domain failures outside execute.
+						throw error;
+				}
+			}
+		}
+	}
+	const matching = [...offsets]
+		.map((offset) => wall - offset)
+		.filter((candidate) => {
+			const year = new Date(candidate).getUTCFullYear();
+			if (year < 1 || year > 9999) return false;
+			return transitions === undefined
+				? wallTimestamp(projectedPartsWithFormatter(candidate, localFormatter!)) === wall
+				: transitionOffsetAtInstant(transitions, candidate) === wall - candidate;
+		});
+	if (matching.length !== 1) {
+		throw new CalDavStructuredLocalTimeError(matching.length === 0 ? 'gap' : 'fold');
+	}
+	return new Date(matching[0]!);
+}
+
+export class CalDavStructuredLocalTimeError extends Error {
+	readonly reason: 'gap' | 'fold';
+	constructor(reason: 'gap' | 'fold') {
+		super(
+			reason === 'gap'
+				? 'Choose a valid local time outside the time-zone gap.'
+				: 'Supply an explicit instant or offset for this ambiguous local time.',
+		);
+		this.name = 'CalDavStructuredLocalTimeError';
+		this.reason = reason;
+	}
+}

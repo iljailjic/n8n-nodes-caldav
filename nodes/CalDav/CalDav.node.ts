@@ -74,10 +74,14 @@ import type { CalendarEventUpsertInput } from './events/upsert';
 import { bindCalendarEventTimeZoneExecutionContext } from './events/timeZoneExecutionContext';
 import { CalDavCalendarEventTimeZoneAuthoringError } from './events/timeZoneAuthoring';
 import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
-import { CalDavCalendarEventReadModelError } from './icalendar/eventReadModel';
+import {
+	CalDavCalendarEventReadModelError,
+	calendarEventPreservationTimeZoneDefinition,
+} from './icalendar/eventReadModel';
 import type {
 	CalendarDateString,
 	CalendarEvent,
+	CalendarEventReadResult,
 	CalendarEventStatus,
 	CalendarEventTransparency,
 	UtcDateTimeString,
@@ -95,7 +99,11 @@ import type {
 	CalendarAlarmSelector,
 	CalendarAlarmTrigger,
 } from './icalendar/alarms';
-import { CalDavRecurrenceRuleError, normalizeRecurrenceRule } from './icalendar/recurrence';
+import {
+	CalDavRecurrenceRuleError,
+	normalizeRecurrenceRule,
+	validateRecurrenceRuleInput,
+} from './icalendar/recurrence';
 import type {
 	RecurrenceField,
 	RecurrenceRule,
@@ -116,6 +124,11 @@ import {
 	resolveLocalDateTimeInTimeZone,
 } from './icalendar/timeZones';
 import type { CalendarEventTimeZone } from './icalendar/timeZones';
+import {
+	CalDavTemporalInputError,
+	normalizeStructuredTimedInput,
+	parseStructuredTimedInput,
+} from './temporalInputs';
 import { isAbsoluteICalendarUri } from './icalendar/uri';
 import { CalDavRawCalendarEventError } from './icalendar/rawEventWrite';
 import { testCalDavApiCredentials } from './methods/credentialTest';
@@ -178,8 +191,6 @@ const CALENDAR_LOCATOR_PROPERTY: INodeProperties = {
 		},
 	],
 };
-const ZONED_ISO_INSTANT_PATTERN =
-	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:([zZ])|([+-])(\d{2}):(\d{2}))$/;
 const CALENDAR_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 const RECURRENCE_WEEKDAY_OPTIONS = [
@@ -266,6 +277,10 @@ export function recurrenceRuleDescriptor(
 					{
 						displayName: 'Until',
 						name: 'until',
+						description:
+							timeMode === 'allDay'
+								? 'Inclusive final date. Literal YYYY-MM-DD dates stay unchanged; explicit instants, Date and Luxon values project in the workflow time zone.'
+								: 'Inclusive final instant in the event time zone. Use ISO date/time with seconds; fractions are floored to whole seconds. Local gaps and folds require correction.',
 						type: 'dateTime',
 						...(timeMode === 'allDay' ? { typeOptions: { dateOnly: true } } : {}),
 						default: '',
@@ -467,14 +482,26 @@ function recurrenceRows(
 	);
 }
 
+interface RecurrenceTemporalContext {
+	readonly execution?: IExecuteFunctions;
+	readonly zone?: string;
+	readonly definition?: ICalendarComponent;
+	readonly requireExplicitZone?: boolean;
+}
+
 export function normalizeRecurrenceParameter(
 	value: unknown,
 	start: RecurrenceStartContext,
+	context: RecurrenceTemporalContext = {},
 ): RecurrenceRule {
-	return normalizeRecurrenceRule(recurrenceParameterValue(value, start.timeMode), start);
+	return normalizeRecurrenceRule(recurrenceParameterValue(value, start.timeMode, context), start);
 }
 
-function recurrenceParameterValue(value: unknown, timeMode: 'timed' | 'allDay'): RecurrenceRule {
+function recurrenceParameterValue(
+	value: unknown,
+	timeMode: 'timed' | 'allDay',
+	context: RecurrenceTemporalContext = {},
+): RecurrenceRule {
 	const outer = recurrenceUiRecord(value, ['rule']);
 	if (outer.rule === undefined) return recurrenceUiError('INVALID_INPUT');
 	const rule = recurrenceUiRecord(outer.rule.value, [
@@ -502,10 +529,38 @@ function recurrenceParameterValue(value: unknown, timeMode: 'timed' | 'allDay'):
 	} else if (endMode === 'until') {
 		if (rule.until === undefined || rule.count !== undefined)
 			return recurrenceUiError('INVALID_END', 'end');
-		normalized.end =
-			timeMode === 'allDay'
-				? { kind: 'until', value: { kind: 'date', date: rule.until.value } }
-				: { kind: 'until', value: { kind: 'dateTime', dateTime: rule.until.value } };
+		if (timeMode === 'allDay') {
+			const date =
+				context.execution === undefined
+					? typeof rule.until.value === 'string'
+						? strictCalendarDate(rule.until.value)
+						: undefined
+					: workflowCalendarDate(context.execution, rule.until.value);
+			if (date === undefined) return recurrenceUiError('INVALID_UNTIL', 'end');
+			normalized.end = { kind: 'until', value: { kind: 'date', date } };
+		} else {
+			if (
+				context.requireExplicitZone &&
+				parseStructuredTimedInput(rule.until.value)?.kind === 'local'
+			) {
+				// eslint-disable-next-line n8n-nodes-base/node-execute-block-wrong-error-thrown -- Pure extraction errors are mapped to item-aware n8n errors by temporalInput.
+				throw new CalDavTemporalInputError(
+					'Until',
+					'requires an explicit time-zone patch when converting an all-day event to timed.',
+				);
+			}
+			const until = parseDateTimeInstant(
+				rule.until.value,
+				context.zone ?? 'UTC',
+				'Until',
+				context.definition,
+			);
+			if (until === undefined) return recurrenceUiError('INVALID_UNTIL', 'end');
+			normalized.end = {
+				kind: 'until',
+				value: { kind: 'dateTime', dateTime: until.toISOString().replace('.000Z', 'Z') },
+			};
+		}
 	} else {
 		return recurrenceUiError('INVALID_END', 'end');
 	}
@@ -535,7 +590,7 @@ function recurrenceParameterValue(value: unknown, timeMode: 'timed' | 'allDay'):
 	) {
 		normalized.weekStart = rule.weekStart.value;
 	}
-	return normalized as unknown as RecurrenceRule;
+	return validateRecurrenceRuleInput(normalized);
 }
 
 function recurrenceStartForInput(
@@ -967,8 +1022,10 @@ const EVENT_GET_MESSAGES = {
 const EVENT_GET_MANY_MESSAGES = {
 	INVALID_CALENDAR_URL:
 		'The Calendar URL is invalid. Enter an absolute HTTP(S) calendar collection URL.',
-	INVALID_START: 'Start must be a valid date and time with whole-second precision.',
-	INVALID_END: 'End must be a valid date and time with whole-second precision.',
+	INVALID_START:
+		'Start must be an ISO date and time with seconds; fractions are floored to whole seconds.',
+	INVALID_END:
+		'End must be an ISO date and time with seconds; fractions are floored to whole seconds.',
 	INVALID_RANGE: 'End must be later than Start.',
 	INVALID_RETURN_ALL: 'Return All must be true or false.',
 	INVALID_LIMIT: 'Limit must be an integer greater than or equal to 1.',
@@ -1021,8 +1078,10 @@ const EVENT_CREATE_MESSAGES = {
 	INVALID_UID: 'UID must be a non-empty valid iCalendar text value.',
 	INVALID_TIME_MODE: 'Time Mode must be Timed or All-Day.',
 	RESOURCE_NAME_TOO_LONG: 'UID is too long to create a safe event resource name.',
-	INVALID_START: 'Start must be a valid date and time with whole-second precision.',
-	INVALID_END: 'End must be a valid date and time with whole-second precision.',
+	INVALID_START:
+		'Start must be an ISO date and time with seconds; fractions are floored to whole seconds.',
+	INVALID_END:
+		'End must be an ISO date and time with seconds; fractions are floored to whole seconds.',
 	INVALID_START_DATE: 'Start Date must be a valid calendar date.',
 	INVALID_END_DATE: 'End Date must be a valid calendar date.',
 	MIXED_TIME_FIELDS: 'The selected Time Mode cannot use fields from the other time mode.',
@@ -1073,8 +1132,10 @@ const EVENT_UPDATE_MESSAGES = {
 	UTC_TIME_ZONE: 'Time Zone resolves to UTC. Use UTC Time Zone Mode.',
 	READ_ONLY: 'The calendar event is read-only because its time representation is unsupported.',
 	NO_CHANGES: 'The calendar event patch does not contain any changes.',
-	INVALID_START: 'Start must be a valid date and time with whole-second precision.',
-	INVALID_END: 'End must be a valid date and time with whole-second precision.',
+	INVALID_START:
+		'Start must be an ISO date and time with seconds; fractions are floored to whole seconds.',
+	INVALID_END:
+		'End must be an ISO date and time with seconds; fractions are floored to whole seconds.',
 	INVALID_START_DATE: 'Start Date must be a valid calendar date.',
 	INVALID_END_DATE: 'End Date must be a valid calendar date.',
 	INVALID_RANGE: 'End must be later than Start.',
@@ -1566,6 +1627,8 @@ function eventCreateSerializationFailure(error: CalDavICalendarSerializeError): 
 }
 
 function eventCreateFailure(error: unknown): EventCreateFailure {
+	if (error instanceof CalDavTemporalInputError)
+		return { message: error.message, configuration: true };
 	if (error instanceof CalDavRawCalendarEventError) {
 		return { message: error.message, configuration: true };
 	}
@@ -1718,6 +1781,8 @@ function eventUpdatePatchFailure(error: CalDavCalendarEventPatchError): EventUpd
 }
 
 function eventUpdateFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof CalDavTemporalInputError)
+		return { message: error.message, configuration: true };
 	if (error instanceof CalDavRawCalendarEventError) {
 		return { message: error.message, configuration: true };
 	}
@@ -1840,6 +1905,8 @@ function eventUpsertTransportFailure(error: CalDavTransportError): SafeNodeFailu
 }
 
 function eventUpsertFailure(error: unknown): EventUpdateFailure {
+	if (error instanceof CalDavTemporalInputError)
+		return { message: error.message, configuration: true };
 	if (error instanceof CalDavRawCalendarEventError) {
 		return { message: error.message, configuration: true };
 	}
@@ -2044,81 +2111,33 @@ function daysInGregorianMonth(year: number, month: number): number {
 	return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
 }
 
-function isValidWholeSecondInstant(value: Date): boolean {
-	const timestamp = value.getTime();
-	if (!Number.isFinite(timestamp) || timestamp % 1000 !== 0) return false;
-	const utcYear = value.getUTCFullYear();
-	return utcYear >= 1 && utcYear <= 9999;
+function parseDateTimeInstant(
+	value: unknown,
+	zone = 'UTC',
+	field = 'Date/time',
+	definition?: ICalendarComponent,
+): Date | undefined {
+	return normalizeStructuredTimedInput(value, zone, field, definition);
 }
 
-function parseZonedIsoInstant(value: string): Date | undefined {
-	const match = ZONED_ISO_INSTANT_PATTERN.exec(value);
-	if (match === null) return undefined;
-
-	const year = Number(match[1]);
-	const month = Number(match[2]);
-	const day = Number(match[3]);
-	const hour = Number(match[4]);
-	const minute = Number(match[5]);
-	const second = Number(match[6]);
-	const fractionalSecond = match[7];
-	const offsetHour = match[8] === undefined ? Number(match[10]) : 0;
-	const offsetMinute = match[8] === undefined ? Number(match[11]) : 0;
-	if (
-		year < 1 ||
-		month < 1 ||
-		month > 12 ||
-		day < 1 ||
-		day > daysInGregorianMonth(year, month) ||
-		hour > 23 ||
-		minute > 59 ||
-		second > 59 ||
-		(fractionalSecond !== undefined && !/^0+$/.test(fractionalSecond)) ||
-		offsetHour > 23 ||
-		offsetMinute > 59
-	) {
-		return undefined;
-	}
-
-	const localInstant = new Date(0);
-	localInstant.setUTCFullYear(year, month - 1, day);
-	localInstant.setUTCHours(hour, minute, second, 0);
-	const offsetDirection = match[9] === '-' ? -1 : 1;
-	const offsetMilliseconds = offsetDirection * (offsetHour * 60 + offsetMinute) * 60 * 1000;
-	const instant = new Date(localInstant.getTime() - offsetMilliseconds);
-	return isValidWholeSecondInstant(instant) ? instant : undefined;
-}
-
-function parseDateTimeInstant(value: unknown): Date | undefined {
-	if (value instanceof Date) {
-		return isValidWholeSecondInstant(value) ? new Date(value.getTime()) : undefined;
-	}
-	if (typeof value === 'string') {
-		return parseZonedIsoInstant(value);
-	}
-	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-		return undefined;
-	}
-
+function executionTimeZone(execution: IExecuteFunctions, field: string): string {
 	try {
-		const dateTime = value as {
-			readonly isLuxonDateTime?: unknown;
-			readonly isValid?: unknown;
-			readonly toJSDate?: unknown;
-		};
-		if (
-			dateTime.isLuxonDateTime !== true ||
-			dateTime.isValid !== true ||
-			typeof dateTime.toJSDate !== 'function'
-		) {
-			return undefined;
-		}
-		const converted = dateTime.toJSDate.call(value) as unknown;
-		return converted instanceof Date && isValidWholeSecondInstant(converted)
-			? new Date(converted.getTime())
-			: undefined;
+		const zone = execution.getTimezone();
+		if (typeof zone === 'string' && zone.length > 0) return zone;
 	} catch {
-		return undefined;
+		/* An unavailable execution zone must never become a UTC fallback. */
+	}
+	// eslint-disable-next-line n8n-nodes-base/node-execute-block-wrong-error-thrown -- Pure extraction failures are mapped to item-aware n8n errors by temporalInput.
+	throw new CalDavTemporalInputError(field, 'requires a valid workflow time zone.');
+}
+
+function temporalInput<T>(extract: () => T): T | string {
+	try {
+		return extract();
+	} catch (error) {
+		if (error instanceof CalDavTemporalInputError) return error.message;
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- Unexpected errors remain distinct from sanitized parameter failures outside execute.
+		throw error;
 	}
 }
 
@@ -2149,15 +2168,13 @@ function isValidCreateUrl(value: string): boolean {
 	return isAbsoluteICalendarUri(value);
 }
 
-function createDateTimeInstant(value: unknown): Date | undefined {
-	try {
-		const instant = parseDateTimeInstant(value);
-		if (instant === undefined) return undefined;
-		const year = instant.getUTCFullYear();
-		return year >= 1 && year <= 9999 ? instant : undefined;
-	} catch {
-		return undefined;
-	}
+function createDateTimeInstant(
+	value: unknown,
+	zone = 'UTC',
+	field = 'Date/time',
+	definition?: ICalendarComponent,
+): Date | undefined {
+	return parseDateTimeInstant(value, zone, field, definition);
 }
 
 function strictCalendarDate(value: string): CalendarDateString | undefined {
@@ -2180,37 +2197,16 @@ function strictCalendarDate(value: string): CalendarDateString | undefined {
 }
 
 function calendarDateInstant(value: unknown): Date | undefined {
-	if (value instanceof Date) {
-		return Number.isFinite(value.getTime()) ? new Date(value.getTime()) : undefined;
-	}
-	if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-	try {
-		const dateTime = value as {
-			readonly isLuxonDateTime?: unknown;
-			readonly isValid?: unknown;
-			readonly toJSDate?: unknown;
-		};
-		if (
-			dateTime.isLuxonDateTime !== true ||
-			dateTime.isValid !== true ||
-			typeof dateTime.toJSDate !== 'function'
-		) {
-			return undefined;
-		}
-		const converted = dateTime.toJSDate.call(value) as unknown;
-		return converted instanceof Date && Number.isFinite(converted.getTime())
-			? new Date(converted.getTime())
-			: undefined;
-	} catch {
-		return undefined;
-	}
+	const parsed = parseStructuredTimedInput(value);
+	return parsed?.kind === 'instant' ? parsed.instant : undefined;
 }
 
 function workflowCalendarDate(
 	execution: IExecuteFunctions,
 	value: unknown,
 ): CalendarDateString | undefined {
-	if (typeof value === 'string') return strictCalendarDate(value);
+	if (typeof value === 'string' && CALENDAR_DATE_PATTERN.test(value))
+		return strictCalendarDate(value);
 	const instant = calendarDateInstant(value);
 	if (instant === undefined) return undefined;
 	try {
@@ -2221,9 +2217,11 @@ function workflowCalendarDate(
 			year: 'numeric',
 			month: '2-digit',
 			day: '2-digit',
+			era: 'short',
 		}).formatToParts(instant);
 		const part = (type: Intl.DateTimeFormatPartTypes): string | undefined =>
 			parts.find((candidate) => candidate.type === type)?.value;
+		if (part('era') !== 'AD') return undefined;
 		const year = part('year');
 		const month = part('month');
 		const day = part('day');
@@ -2356,7 +2354,18 @@ function workflowAlarmRecipients(value: unknown): readonly string[] | undefined 
 
 function workflowAlarmTrigger(row: Record<string, unknown>): CalendarAlarmTrigger | undefined {
 	if (row.reference !== 'start' && row.reference !== 'end') return undefined;
-	if (row.direction === 'at') return { reference: row.reference, direction: 'at' };
+	if (row.direction === 'at') {
+		if (row.value !== undefined && row.value !== 0) return undefined;
+		if (
+			row.unit !== undefined &&
+			row.unit !== 'minute' &&
+			row.unit !== 'hour' &&
+			row.unit !== 'day' &&
+			row.unit !== 'week'
+		)
+			return undefined;
+		return { reference: row.reference, direction: 'at' };
+	}
 	if (row.direction !== 'before' && row.direction !== 'after') return undefined;
 	if (
 		typeof row.value !== 'number' ||
@@ -2659,9 +2668,17 @@ function eventCreateInput(
 				readonly endDate: CalendarDateString;
 		  };
 	if (timeMode === 'timed') {
-		const start = createDateTimeInstant(startValue);
+		const start = createDateTimeInstant(
+			startValue,
+			timeZone.timeZoneMode === 'utc' ? 'UTC' : timeZone.timeZone,
+			'Start',
+		);
 		if (start === undefined) return EVENT_CREATE_MESSAGES.INVALID_START;
-		const end = createDateTimeInstant(endValue);
+		const end = createDateTimeInstant(
+			endValue,
+			timeZone.timeZoneMode === 'utc' ? 'UTC' : timeZone.timeZone,
+			'End',
+		);
 		if (end === undefined) return EVENT_CREATE_MESSAGES.INVALID_END;
 		if (end.getTime() <= start.getTime()) return EVENT_CREATE_MESSAGES.INVALID_RANGE;
 		if (timeZone.timeZoneMode === 'iana') {
@@ -2804,9 +2821,16 @@ function eventCreateInput(
 			recurrence = normalizeRecurrenceParameter(
 				recurrenceField.value,
 				recurrenceStartForInput(timeInput),
+				{
+					execution,
+					zone:
+						timeInput.timeMode === 'timed' && timeInput.timeZone.timeZoneMode === 'iana'
+							? timeInput.timeZone.timeZone
+							: 'UTC',
+				},
 			);
 		} catch (error) {
-			return error instanceof CalDavRecurrenceRuleError
+			return error instanceof CalDavTemporalInputError || error instanceof CalDavRecurrenceRuleError
 				? error.message
 				: EVENT_CREATE_MESSAGES.GENERIC;
 		}
@@ -2959,9 +2983,17 @@ function eventUpsertInput(
 		} else {
 			return EVENT_UPSERT_MESSAGES.INVALID_TIME_ZONE_MODE;
 		}
-		const start = createDateTimeInstant(nodeParameter(execution, 'start', itemIndex));
+		const start = createDateTimeInstant(
+			nodeParameter(execution, 'start', itemIndex),
+			timeZone.timeZoneMode === 'utc' ? 'UTC' : timeZone.timeZone,
+			'Start',
+		);
 		if (start === undefined) return EVENT_UPSERT_MESSAGES.INVALID_START;
-		const end = createDateTimeInstant(nodeParameter(execution, 'end', itemIndex));
+		const end = createDateTimeInstant(
+			nodeParameter(execution, 'end', itemIndex),
+			timeZone.timeZoneMode === 'utc' ? 'UTC' : timeZone.timeZone,
+			'End',
+		);
 		if (end === undefined) return EVENT_UPSERT_MESSAGES.INVALID_END;
 		timeInput = { timeMode, start, end, timeZone };
 	} else {
@@ -3075,12 +3107,19 @@ function eventUpsertInput(
 			const extracted = optionalUpdatePatchValue(
 				descriptors.recurrence.value,
 				EVENT_UPSERT_MESSAGES.INVALID_ADDITIONAL_FIELDS,
-				(value) => normalizeRecurrenceParameter(value, recurrenceStartForInput(timeInput)),
+				(value) =>
+					normalizeRecurrenceParameter(value, recurrenceStartForInput(timeInput), {
+						execution,
+						zone:
+							timeInput.timeMode === 'timed' && timeInput.timeZone.timeZoneMode === 'iana'
+								? timeInput.timeZone.timeZone
+								: 'UTC',
+					}),
 			);
 			if ('error' in extracted) return extracted.error;
 			patches.recurrence = extracted.patch;
 		} catch (error) {
-			return error instanceof CalDavRecurrenceRuleError
+			return error instanceof CalDavTemporalInputError || error instanceof CalDavRecurrenceRuleError
 				? error.message
 				: EVENT_UPSERT_MESSAGES.INVALID_ADDITIONAL_FIELDS;
 		}
@@ -3124,6 +3163,7 @@ function eventUpdatePatch(
 	execution: IExecuteFunctions,
 	value: unknown,
 	timeMode: 'timed' | 'allDay',
+	current?: CalendarEventReadResult,
 ): CalendarEventPatch | string {
 	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
 		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
@@ -3222,16 +3262,61 @@ function eventUpdatePatch(
 			return EVENT_UPDATE_MESSAGES.INVALID_TIME_ZONE_MODE;
 		}
 	}
-	if (descriptors.start !== undefined) {
-		const start = createDateTimeInstant(descriptors.start.value);
-		if (start === undefined) return EVENT_UPDATE_MESSAGES.INVALID_START;
-		patch.start = { kind: 'set', value: start };
+	const existingZone =
+		current?.event.timeMode === 'timed' && current.event.timeZoneMode === 'iana'
+			? current.event.timeZone
+			: undefined;
+	const zone = patch.timeZone?.value;
+	const effectiveZone =
+		zone === undefined
+			? (existingZone ?? 'UTC')
+			: zone.timeZoneMode === 'iana'
+				? zone.timeZone
+				: 'UTC';
+	const definition =
+		zone === undefined && current !== undefined
+			? calendarEventPreservationTimeZoneDefinition(current.context)
+			: undefined;
+	const requireExplicitZone =
+		current?.event.timeMode === 'allDay' && timeMode === 'timed' && zone === undefined;
+	for (const field of ['start', 'end'] as const) {
+		if (descriptors[field] === undefined) continue;
+		if (
+			requireExplicitZone &&
+			parseStructuredTimedInput(descriptors[field].value)?.kind === 'local'
+		) {
+			return `${field === 'start' ? 'Start' : 'End'} requires an explicit time-zone patch when converting an all-day event to timed.`;
+		}
+		const instant = createDateTimeInstant(
+			descriptors[field].value,
+			effectiveZone,
+			field === 'start' ? 'Start' : 'End',
+			definition,
+		);
+		if (instant === undefined)
+			return field === 'start'
+				? EVENT_UPDATE_MESSAGES.INVALID_START
+				: EVENT_UPDATE_MESSAGES.INVALID_END;
+		patch[field] = { kind: 'set', value: instant };
 	}
-	if (descriptors.end !== undefined) {
-		const end = createDateTimeInstant(descriptors.end.value);
-		if (end === undefined) return EVENT_UPDATE_MESSAGES.INVALID_END;
-		patch.end = { kind: 'set', value: end };
-	}
+	const localStart = parseStructuredTimedInput(descriptors.start?.value);
+	const localEnd = parseStructuredTimedInput(descriptors.end?.value);
+	if (
+		localStart?.kind === 'local' &&
+		localEnd?.kind === 'local' &&
+		localEnd.local <= localStart.local
+	)
+		return EVENT_UPDATE_MESSAGES.INVALID_RANGE;
+	if (
+		patch.start !== undefined &&
+		patch.end !== undefined &&
+		(current !== undefined ||
+			zone !== undefined ||
+			(parseStructuredTimedInput(descriptors.start?.value)?.kind === 'instant' &&
+				parseStructuredTimedInput(descriptors.end?.value)?.kind === 'instant')) &&
+		patch.end.value.getTime() <= patch.start.value.getTime()
+	)
+		return EVENT_UPDATE_MESSAGES.INVALID_RANGE;
 	if (descriptors.startDate !== undefined) {
 		const startDate = workflowCalendarDate(execution, descriptors.startDate.value);
 		if (startDate === undefined) return EVENT_UPDATE_MESSAGES.INVALID_START_DATE;
@@ -3242,6 +3327,12 @@ function eventUpdatePatch(
 		if (endDate === undefined) return EVENT_UPDATE_MESSAGES.INVALID_END_DATE;
 		patch.endDate = { kind: 'set', value: endDate };
 	}
+	if (
+		patch.startDate !== undefined &&
+		patch.endDate !== undefined &&
+		patch.endDate.value <= patch.startDate.value
+	)
+		return EVENT_UPDATE_MESSAGES.INVALID_RANGE;
 	if (descriptors.summary !== undefined) {
 		const summary = descriptors.summary.value;
 		if (typeof summary !== 'string' || !isValidICalendarText(summary)) {
@@ -3316,12 +3407,18 @@ function eventUpdatePatch(
 			const extracted = optionalUpdatePatchValue(
 				descriptors.recurrence.value,
 				EVENT_UPDATE_MESSAGES.INVALID_FIELDS,
-				(value) => recurrenceParameterValue(value, timeMode),
+				(value) =>
+					recurrenceParameterValue(value, timeMode, {
+						execution,
+						zone: effectiveZone,
+						definition,
+						requireExplicitZone,
+					}),
 			);
 			if ('error' in extracted) return extracted.error;
 			patch.recurrence = extracted.patch;
 		} catch (error) {
-			return error instanceof CalDavRecurrenceRuleError
+			return error instanceof CalDavTemporalInputError || error instanceof CalDavRecurrenceRuleError
 				? error.message
 				: EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
 		}
@@ -3404,6 +3501,20 @@ function eventUpdateInput(
 		calendarUrl,
 		identifier,
 		patch,
+		...(timeMode === 'timed' &&
+		('start' in patch || 'end' in patch || patch.recurrence?.kind === 'set')
+			? {
+					resolveTemporalPatch: (current: CalendarEventReadResult): CalendarEventPatch => {
+						const resolved = temporalInput(() =>
+							eventUpdatePatch(execution, fieldsToUpdate, timeMode, current),
+						);
+						if (typeof resolved === 'string')
+							// eslint-disable-next-line n8n-nodes-base/node-execute-block-wrong-error-thrown -- The coordinator propagates this pure extraction error to the item-aware Update boundary.
+							throw new CalDavTemporalInputError('Fields to Update:', resolved);
+						return resolved;
+					},
+				}
+			: {}),
 		...(typeof etag === 'string' && etag.length > 0 ? { etag } : {}),
 	});
 }
@@ -3430,9 +3541,17 @@ function eventGetManyInput(
 	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
 	if (calendarUrl === undefined) return EVENT_GET_MANY_MESSAGES.INVALID_CALENDAR_URL;
 
-	const start = parseDateTimeInstant(nodeParameter(execution, 'start', itemIndex));
+	const start = parseDateTimeInstant(
+		nodeParameter(execution, 'start', itemIndex),
+		executionTimeZone(execution, 'Start'),
+		'Start',
+	);
 	if (start === undefined) return EVENT_GET_MANY_MESSAGES.INVALID_START;
-	const end = parseDateTimeInstant(nodeParameter(execution, 'end', itemIndex));
+	const end = parseDateTimeInstant(
+		nodeParameter(execution, 'end', itemIndex),
+		executionTimeZone(execution, 'End'),
+		'End',
+	);
 	if (end === undefined) return EVENT_GET_MANY_MESSAGES.INVALID_END;
 	if (start.getTime() >= end.getTime()) return EVENT_GET_MANY_MESSAGES.INVALID_RANGE;
 
@@ -3993,7 +4112,7 @@ export class CalDav implements INodeType {
 				required: true,
 				default: '',
 				description:
-					'Complete VCALENDAR event object. Raw Update and the update branch of Raw Upsert replace the entire stored calendar object.',
+					'Complete VCALENDAR event object using RFC iCalendar temporal syntax. Structured time-zone interpretation and precision normalization do not apply here. Raw Update and the update branch of Raw Upsert replace the entire stored calendar object.',
 				displayOptions: {
 					show: {
 						resource: [EVENT_RESOURCE],
@@ -4077,6 +4196,8 @@ export class CalDav implements INodeType {
 			{
 				displayName: 'Start',
 				name: 'start',
+				description:
+					'ISO date/time with seconds. Local input uses the action time zone (the existing event zone for Update); offsets preserve the instant. Fractions are floored to whole seconds. Reject local gaps and folds.',
 				type: 'dateTime',
 				required: true,
 				default: '',
@@ -4092,6 +4213,8 @@ export class CalDav implements INodeType {
 			{
 				displayName: 'End',
 				name: 'end',
+				description:
+					'ISO date/time with seconds. Local input uses the action time zone (the existing event zone for Update); offsets preserve the instant. Fractions are floored to whole seconds. Reject local gaps and folds.',
 				type: 'dateTime',
 				required: true,
 				default: '',
@@ -4107,6 +4230,8 @@ export class CalDav implements INodeType {
 			{
 				displayName: 'Start Date',
 				name: 'startDate',
+				description:
+					'Literal YYYY-MM-DD dates stay unchanged; explicit instants, Date and Luxon values project in the workflow time zone. Start is inclusive and End is exclusive.',
 				type: 'dateTime',
 				typeOptions: { dateOnly: true },
 				required: true,
@@ -4123,6 +4248,8 @@ export class CalDav implements INodeType {
 			{
 				displayName: 'End Date',
 				name: 'endDate',
+				description:
+					'Literal YYYY-MM-DD dates stay unchanged; explicit instants, Date and Luxon values project in the workflow time zone. Start is inclusive and End is exclusive.',
 				type: 'dateTime',
 				typeOptions: { dateOnly: true },
 				required: true,
@@ -4267,6 +4394,8 @@ export class CalDav implements INodeType {
 			{
 				displayName: 'Start',
 				name: 'start',
+				description:
+					'ISO date/time with seconds. Local input uses the action time zone (the existing event zone for Update); offsets preserve the instant. Fractions are floored to whole seconds. Reject local gaps and folds.',
 				type: 'dateTime',
 				required: true,
 				default: '',
@@ -4282,6 +4411,8 @@ export class CalDav implements INodeType {
 			{
 				displayName: 'End',
 				name: 'end',
+				description:
+					'ISO date/time with seconds. Local input uses the action time zone (the existing event zone for Update); offsets preserve the instant. Fractions are floored to whole seconds. Reject local gaps and folds.',
 				type: 'dateTime',
 				required: true,
 				default: '',
@@ -4297,6 +4428,8 @@ export class CalDav implements INodeType {
 			{
 				displayName: 'Start Date',
 				name: 'startDate',
+				description:
+					'Literal YYYY-MM-DD dates stay unchanged; explicit instants, Date and Luxon values project in the workflow time zone. Start is inclusive and End is exclusive.',
 				type: 'dateTime',
 				typeOptions: { dateOnly: true },
 				required: true,
@@ -4313,6 +4446,8 @@ export class CalDav implements INodeType {
 			{
 				displayName: 'End Date',
 				name: 'endDate',
+				description:
+					'Literal YYYY-MM-DD dates stay unchanged; explicit instants, Date and Luxon values project in the workflow time zone. Start is inclusive and End is exclusive.',
 				type: 'dateTime',
 				typeOptions: { dateOnly: true },
 				required: true,
@@ -4439,7 +4574,8 @@ export class CalDav implements INodeType {
 				type: 'dateTime',
 				required: true,
 				default: '',
-				description: 'Inclusive start of the date range',
+				description:
+					'Inclusive range start. Local ISO date/time uses the workflow time zone; offsets preserve the instant. Seconds are required; fractions are floored to whole seconds. Reject local gaps and folds.',
 				displayOptions: {
 					show: { resource: [EVENT_RESOURCE], operation: [GET_MANY_OPERATION] },
 				},
@@ -4450,7 +4586,8 @@ export class CalDav implements INodeType {
 				type: 'dateTime',
 				required: true,
 				default: '',
-				description: 'Exclusive end of the date range',
+				description:
+					'Exclusive range end. Local ISO date/time uses the workflow time zone; offsets preserve the instant. Seconds are required; fractions are floored to whole seconds. Reject local gaps and folds.',
 				displayOptions: {
 					show: { resource: [EVENT_RESOURCE], operation: [GET_MANY_OPERATION] },
 				},
@@ -4613,6 +4750,8 @@ export class CalDav implements INodeType {
 					{
 						displayName: 'Start',
 						name: 'start',
+						description:
+							'ISO date/time with seconds. Local input uses the action time zone (the existing event zone for Update); offsets preserve the instant. Fractions are floored to whole seconds. Reject local gaps and folds.',
 						type: 'dateTime',
 						default: '',
 						displayOptions: { show: { timeMode: ['timed'] } },
@@ -4620,6 +4759,8 @@ export class CalDav implements INodeType {
 					{
 						displayName: 'End',
 						name: 'end',
+						description:
+							'ISO date/time with seconds. Local input uses the action time zone (the existing event zone for Update); offsets preserve the instant. Fractions are floored to whole seconds. Reject local gaps and folds.',
 						type: 'dateTime',
 						default: '',
 						displayOptions: { show: { timeMode: ['timed'] } },
@@ -4627,6 +4768,8 @@ export class CalDav implements INodeType {
 					{
 						displayName: 'Start Date',
 						name: 'startDate',
+						description:
+							'Literal YYYY-MM-DD dates stay unchanged; explicit instants, Date and Luxon values project in the workflow time zone. Start is inclusive and End is exclusive.',
 						type: 'dateTime',
 						typeOptions: { dateOnly: true },
 						default: '',
@@ -4635,6 +4778,8 @@ export class CalDav implements INodeType {
 					{
 						displayName: 'End Date',
 						name: 'endDate',
+						description:
+							'Literal YYYY-MM-DD dates stay unchanged; explicit instants, Date and Luxon values project in the workflow time zone. Start is inclusive and End is exclusive.',
 						type: 'dateTime',
 						typeOptions: { dateOnly: true },
 						default: '',
@@ -4837,7 +4982,7 @@ export class CalDav implements INodeType {
 							(nodeParameter(this, 'timeZoneMode', index) ?? 'utc') === 'iana',
 					);
 				}
-				const input = eventCreateInput(this, itemIndex);
+				const input = temporalInput(() => eventCreateInput(this, itemIndex));
 				if (typeof input === 'string') {
 					if (this.continueOnFail()) {
 						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
@@ -4878,7 +5023,7 @@ export class CalDav implements INodeType {
 			}
 
 			if (isEventUpsert) {
-				const input = eventUpsertInput(this, itemIndex);
+				const input = temporalInput(() => eventUpsertInput(this, itemIndex));
 				if (typeof input === 'string') {
 					if (this.continueOnFail()) {
 						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
@@ -4933,7 +5078,7 @@ export class CalDav implements INodeType {
 			}
 
 			if (isEventGetMany) {
-				const input = eventGetManyInput(this, itemIndex);
+				const input = temporalInput(() => eventGetManyInput(this, itemIndex));
 				if (typeof input === 'string') {
 					if (this.continueOnFail()) {
 						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
@@ -4981,7 +5126,7 @@ export class CalDav implements INodeType {
 			}
 
 			if (isEventUpdate) {
-				const input = eventUpdateInput(this, itemIndex);
+				const input = temporalInput(() => eventUpdateInput(this, itemIndex));
 				if (typeof input === 'string') {
 					if (this.continueOnFail()) {
 						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });

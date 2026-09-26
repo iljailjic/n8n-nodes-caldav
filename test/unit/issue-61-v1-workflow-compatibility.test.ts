@@ -72,6 +72,7 @@ function fixtureExecutionContext(node: INode): IExecuteFunctions {
 	return {
 		getInputData: () => [{ json: {} }],
 		getNodeParameter: (name: string) => parameters[name],
+		getTimezone: () => 'UTC',
 		getNode: () => node,
 		continueOnFail: () => node.continueOnFail === true,
 	} as unknown as IExecuteFunctions;

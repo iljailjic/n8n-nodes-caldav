@@ -5,6 +5,14 @@ documented in this file.
 
 ## Unreleased
 
+## [1.0.0-beta.4] - 2026-09-26
+
+### Changed
+
+- Normalize structured timed and date-only inputs consistently across Fixed fields, expressions, nested values, mapped items, and native or serialized Date/Luxon values; preserve Raw ICS temporal semantics.
+- Interpret local timed values in the operation's effective zone, floor fractions to whole seconds, and reject DST gaps and folds that need an explicit correction.
+- Document the structured temporal input contract and clarify that the additive input support keeps node version 1.
+
 ## [1.0.0-beta.3] - 2026-09-25
 
 ### Fixed

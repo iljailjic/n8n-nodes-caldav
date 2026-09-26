@@ -179,6 +179,10 @@ const UTC_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
 const DATE_PATTERN = /^(\d{4})(\d{2})(\d{2})$/;
 const LOCAL_DATE_TIME_PATTERN = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/;
 const PRESERVATION_CONTEXT_PROVENANCE = new WeakSet<object>();
+const PRESERVATION_CONTEXT_TIME_ZONE_DEFINITIONS = new WeakMap<
+	CalendarEventPreservationContext,
+	ICalendarComponent
+>();
 const PRESERVATION_CONTEXT_PROVENANCE_VERIFIER = '__isCanonicalCalendarEventPreservationContext';
 
 function fail(code: CalendarEventReadModelErrorCode): never {
@@ -355,6 +359,7 @@ function validateExceptionIdentities(
 
 export function createCalendarEventPreservationContext(
 	resource: ICalendarResource,
+	timeZoneDefinition?: ICalendarComponent,
 ): CalendarEventPreservationContext {
 	const objectComponents = directComponents(resource.calendar).filter(
 		(component) => asciiUpperCase(component.name) !== 'VTIMEZONE',
@@ -377,7 +382,33 @@ export function createCalendarEventPreservationContext(
 	};
 	const frozenContext = Object.freeze(context);
 	PRESERVATION_CONTEXT_PROVENANCE.add(frozenContext);
+	if (timeZoneDefinition !== undefined) {
+		PRESERVATION_CONTEXT_TIME_ZONE_DEFINITIONS.set(frozenContext, timeZoneDefinition);
+	}
 	return frozenContext;
+}
+
+/** Select the event's exact source TZID before falling back to retained referenced rules. */
+export function calendarEventPreservationTimeZoneDefinition(
+	context: CalendarEventPreservationContext,
+): ICalendarComponent | undefined {
+	if (!PRESERVATION_CONTEXT_PROVENANCE.has(context)) return undefined;
+	const starts = directProperties(context.master, 'DTSTART');
+	const ends = directProperties(context.master, 'DTEND');
+	if (starts.length !== 1 || ends.length !== 1) return undefined;
+	const startTzid = onlyTzid(starts[0]!);
+	const endTzid = onlyTzid(ends[0]!);
+	if (startTzid === undefined || startTzid !== endTzid) return undefined;
+	const definitions = directComponents(context.resource.calendar).filter(
+		(component) =>
+			asciiUpperCase(component.name) === 'VTIMEZONE' &&
+			directProperties(component, 'TZID').some((property) => singleText(property) === startTzid),
+	);
+	return definitions.length === 1
+		? definitions[0]
+		: definitions.length === 0
+			? PRESERVATION_CONTEXT_TIME_ZONE_DEFINITIONS.get(context)
+			: undefined;
 }
 
 Object.defineProperty(
@@ -756,7 +787,7 @@ function snapshotExtensions(
 export function mapCalendarEventResource(
 	input: CalendarEventResourceInput,
 ): CalendarEventReadResult {
-	const context = createCalendarEventPreservationContext(input.resource);
+	const context = createCalendarEventPreservationContext(input.resource, input.timeZoneDefinition);
 	const { master } = context;
 	const uid = singleText(directProperties(master, 'UID')[0]!)!;
 	validateMasterSingletons(master);

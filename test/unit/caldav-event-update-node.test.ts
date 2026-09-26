@@ -392,6 +392,7 @@ describe('CalDAV Event Update extraction and output', () => {
 		expect(input).toEqual({
 			calendarUrl: CALENDAR_URL,
 			identifier: { kind: 'resourceUrl', resourceUrl: RESOURCE_URL },
+			resolveTemporalPatch: expect.any(Function),
 			patch: {
 				timeMode: 'timed',
 				start: { kind: 'set', value: new Date('2040-01-02T10:00:00Z') },
@@ -473,13 +474,13 @@ describe('CalDAV Event Update local validation', () => {
 		],
 		[
 			'invalid Start',
-			{ fieldsToUpdate: { start: '2040-01-02T10:00:00' } },
-			'Start must be a valid date and time with whole-second precision.',
+			{ fieldsToUpdate: { start: '2040-01-02T10:00' } },
+			'Start must be an ISO date and time with seconds; fractions are floored to whole seconds.',
 		],
 		[
 			'invalid End',
 			{ fieldsToUpdate: { end: 2_208_988_800_000 } },
-			'End must be a valid date and time with whole-second precision.',
+			'End must be an ISO date and time with seconds; fractions are floored to whole seconds.',
 		],
 		[
 			'invalid Summary',

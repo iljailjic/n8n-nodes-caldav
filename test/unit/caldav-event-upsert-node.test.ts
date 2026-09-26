@@ -483,8 +483,8 @@ describe('CalDAV Event Upsert local validation and item behavior', () => {
 		],
 		[
 			'Start',
-			{ start: '2040-01-02T10:00:00' },
-			'Start must be a valid date and time with whole-second precision.',
+			{ start: '2040-01-02T10:00' },
+			'Start must be an ISO date and time with seconds; fractions are floored to whole seconds.',
 		],
 		['Summary', { summary: '\u0000private' }, 'Summary must be a valid iCalendar text value.'],
 		['Additional Fields', { additionalFields: [] }, 'Additional Fields must be an object.'],

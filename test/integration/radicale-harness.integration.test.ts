@@ -1580,14 +1580,15 @@ describe('Radicale collision-safe Event Create', () => {
 					calendar: { __rl: true, mode: 'url', value: calendarUrl },
 					uid: `invalid-${run.identity}`,
 					timeMode: 'timed',
-					start: '2040-02-03T10:00:00',
+					start: '2040-02-03T10:00',
 					end: '2040-02-03T11:00:00Z',
-					summary: 'Invalid timezone-less input',
+					summary: 'Invalid missing seconds',
 					additionalFields: {},
 				});
 				const invalidError = await captureNodeExecutionError(invalid.context);
 				expect(invalidError).toMatchObject({
-					message: 'Start must be a valid date and time with whole-second precision.',
+					message:
+						'Start must be an ISO date and time with seconds; fractions are floored to whole seconds.',
 					context: { itemIndex: 0 },
 				});
 				expect(invalid.requests).not.toHaveBeenCalled();
@@ -3339,4 +3340,119 @@ describe('Radicale mandatory failure cleanup', () => {
 			}
 		},
 	);
+});
+
+describe('issue #154 r3 temporal normalization through Radicale', () => {
+	it('round-trips picker/fraction inputs through query, Create, Update and both Upsert branches', async () => {
+		const run = await startRun();
+		try {
+			const calendarUrl = await createSyntheticCalendar(
+				run,
+				'temporal-r3',
+				'Synthetic temporal r3',
+			);
+			const adapter = requestAdapter(run);
+			const requests = vi.fn(
+				async (options: N8nCalDavRequestOptions) => await adapter.request(options),
+			);
+			const executeTemporal = async (operation: string, values: Record<string, unknown>) => {
+				const parameters = {
+					resource: 'event',
+					operation,
+					calendar: { __rl: true, mode: 'url', value: calendarUrl },
+					timeMode: 'timed',
+					timeZoneMode: 'utc',
+					summary: 'Synthetic temporal r3',
+					additionalFields: {},
+					returnAll: true,
+					etag: '',
+					...values,
+				};
+				const execution = {
+					getInputData: () => [{ json: { oracle: 'temporal-r3' } }],
+					getNodeParameter: (name: string) => Reflect.get(parameters, name),
+					getTimezone: () => 'Europe/Prague',
+					getNode: () => workflowNode(),
+					continueOnFail: () => false,
+					getCredentials: async () => ({
+						serverUrl: run.endpoint,
+						username: run.username,
+						password: run.password,
+						allowUnauthorizedCerts: false,
+					}),
+					helpers: {
+						async httpRequestWithAuthentication(
+							_credentialType: string,
+							options: IHttpRequestOptions,
+						) {
+							return requests(options as N8nCalDavRequestOptions);
+						},
+					},
+				} as unknown as IExecuteFunctions;
+				return (await new CalDav().execute.call(execution))[0];
+			};
+			const uid = `temporal-r3-${run.identity}@example.test`;
+			const created = await executeTemporal('create', {
+				uid,
+				start: '2026-09-30T02:00:00.999',
+				end: '2026-09-30T03:00:00.999',
+				additionalFields: {
+					recurrence: {
+						rule: { frequency: 'daily', endMode: 'until', until: '2026-09-30T02:00:00.999' },
+					},
+				},
+			});
+			expect(created[0].json).toMatchObject({
+				start: '2026-09-30T02:00:00Z',
+				end: '2026-09-30T03:00:00Z',
+				recurrence: { end: { value: { dateTime: '2026-09-30T02:00:00Z' } } },
+			});
+			const queried = await executeTemporal('getMany', {
+				start: '2026-09-30T04:00:00',
+				end: '2026-09-30T05:00:00',
+			});
+			expect(queried.map(({ json }) => json.uid)).toContain(uid);
+			const updated = await executeTemporal('update', {
+				identifierMode: 'resourceUrl',
+				resourceUrl: created[0].json.resourceUrl,
+				fieldsToUpdate: { start: '2026-09-30T02:00:00.100Z', end: '2026-09-30T03:30:00.999Z' },
+			});
+			expect(updated[0].json).toMatchObject({
+				start: '2026-09-30T02:00:00Z',
+				end: '2026-09-30T03:30:00Z',
+			});
+			const upsertValues = {
+				uid: `upsert-${uid}`,
+				start: '2026-10-01T02:00:00.999',
+				end: '2026-10-01T03:00:00.999',
+			};
+			expect((await executeTemporal('upsert', upsertValues))[0].json).toMatchObject({
+				action: 'create',
+				start: '2026-10-01T02:00:00Z',
+			});
+			expect(
+				(await executeTemporal('upsert', { ...upsertValues, end: '2026-10-01T04:00:00.999' }))[0]
+					.json,
+			).toMatchObject({ action: 'update', end: '2026-10-01T04:00:00Z' });
+			const beforeNoop = requests.mock.calls.filter(([request]) => request.method === 'PUT').length;
+			await executeTemporal('upsert', { ...upsertValues, end: '2026-10-01T04:00:00.001' });
+			expect(requests.mock.calls.filter(([request]) => request.method === 'PUT')).toHaveLength(
+				beforeNoop,
+			);
+			const beforeInvalid = requests.mock.calls.length;
+			await expect(
+				executeTemporal('getMany', { start: '2026-03-29T02:30:00', end: '2026-03-29T04:00:00' }),
+			).rejects.toThrow(/Start.*nonexistent/);
+			expect(requests).toHaveBeenCalledTimes(beforeInvalid);
+			const allDay = await executeTemporal('create', {
+				uid: `date-${uid}`,
+				timeMode: 'allDay',
+				startDate: '2026-09-30T23:30:00.999-04:00',
+				endDate: '2026-10-02',
+			});
+			expect(allDay[0].json).toMatchObject({ startDate: '2026-10-01', endDate: '2026-10-02' });
+		} finally {
+			await teardownRun(run);
+		}
+	});
 });
