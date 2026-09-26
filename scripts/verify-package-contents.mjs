@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const EXPECTED_PACKAGE_NAME = '@iljailjic/n8n-nodes-caldav';
-const EXPECTED_PACKAGE_VERSION = '1.0.0-beta.3';
+const EXPECTED_PACKAGE_VERSION = '1.0.0-beta.4';
 export const EXPECTED_PACKAGE_FILES = new Set([
 	'LICENSE.md',
 	'README.md',
@@ -18,6 +18,9 @@ export const EXPECTED_PACKAGE_FILES = new Set([
 	'dist/nodes/CalDav/CalDav.node.js.map',
 	'dist/nodes/CalDav/CalDav.node.json',
 	'dist/nodes/CalDav/caldav.svg',
+	'dist/nodes/CalDav/temporalInputs.d.ts',
+	'dist/nodes/CalDav/temporalInputs.js',
+	'dist/nodes/CalDav/temporalInputs.js.map',
 	'dist/nodes/CalDav/actions/calendar/get.d.ts',
 	'dist/nodes/CalDav/actions/calendar/get.js',
 	'dist/nodes/CalDav/actions/calendar/get.js.map',

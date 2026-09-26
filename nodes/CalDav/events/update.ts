@@ -18,6 +18,7 @@ import {
 	resolveCalendarEventByUid,
 } from './resolveByUid';
 import { effectiveCalendarUrlForResolvedUid } from './resolvedUidIdentity';
+import { calendarEventPreservationTimeZoneDefinition } from '../icalendar/eventReadModel';
 import type {
 	CalendarEvent,
 	CalendarEventReadResult,
@@ -84,6 +85,7 @@ interface ExistingCalendarEventUpdateInput {
 
 export type StructuredCalendarEventUpdateInput = ExistingCalendarEventUpdateInput & {
 	readonly inputMode?: 'structured';
+	readonly resolveTemporalPatch?: (current: CalendarEventReadResult) => CalendarEventPatch;
 };
 
 export interface RawCalendarEventUpdateInput {
@@ -152,6 +154,7 @@ function snapshotInput(
 		const identifier = input.identifier;
 		const patch = input.patch;
 		const etag = input.etag;
+		const resolveTemporalPatch = input.resolveTemporalPatch;
 		if (
 			typeof calendarUrl !== 'string' ||
 			typeof identifier !== 'object' ||
@@ -160,6 +163,7 @@ function snapshotInput(
 			typeof patch !== 'object' ||
 			patch === null ||
 			Array.isArray(patch) ||
+			(resolveTemporalPatch !== undefined && typeof resolveTemporalPatch !== 'function') ||
 			(etag !== undefined && typeof etag !== 'string')
 		) {
 			return invalidInput();
@@ -173,6 +177,7 @@ function snapshotInput(
 				calendarUrl,
 				identifier: { kind: 'resourceUrl', resourceUrl: identifier.resourceUrl },
 				patch,
+				...(resolveTemporalPatch === undefined ? {} : { resolveTemporalPatch }),
 				...(etag === undefined ? {} : { etag }),
 			};
 		}
@@ -182,6 +187,7 @@ function snapshotInput(
 				calendarUrl,
 				identifier: { kind: 'uid', uid: identifier.uid },
 				patch,
+				...(resolveTemporalPatch === undefined ? {} : { resolveTemporalPatch }),
 				...(etag === undefined ? {} : { etag }),
 			};
 		}
@@ -300,6 +306,7 @@ function currentRecurrenceStart(event: CalendarEvent): RecurrenceStartContext | 
 function finalRecurrenceStart(
 	event: CalendarEvent,
 	patch: CalendarEventPatch,
+	definition?: ICalendarComponent,
 ): RecurrenceStartContext | undefined {
 	const mode = patch.timeMode ?? event.timeMode;
 	if (mode === 'allDay') {
@@ -325,7 +332,11 @@ function finalRecurrenceStart(
 				timeMode: 'timed',
 				timeZoneMode: 'iana',
 				start: startUtc,
-				startLocal: projectInstantInTimeZone(start, zone.timeZone),
+				startLocal: projectInstantInTimeZone(
+					start,
+					zone.timeZone,
+					requestedZone === undefined ? definition : undefined,
+				),
 			}
 		: { timeMode: 'timed', timeZoneMode: 'utc', start: startUtc };
 }
@@ -771,7 +782,7 @@ async function updateCalendarEventInternal(
 	resolvedCurrent?: CalendarEventReadResult,
 	alarmUidFactory: CalendarAlarmUidGenerator = randomUUID,
 ): Promise<UpdatedCalendarEvent> {
-	const snapshot = snapshotInput(input);
+	let snapshot = snapshotInput(input);
 	const current =
 		resolvedCurrent ??
 		(snapshot.identifier.kind === 'resourceUrl'
@@ -802,6 +813,9 @@ async function updateCalendarEventInternal(
 	if (current.event.accessMode === 'readOnly') {
 		throw new CalDavCalendarEventUpdateError(CalendarEventUpdateFailureCode.READ_ONLY);
 	}
+	if (snapshot.resolveTemporalPatch !== undefined) {
+		snapshot = { ...snapshot, patch: snapshot.resolveTemporalPatch(current) };
+	}
 	const timedCurrent = current.event.timeMode === 'timed' ? current.event : undefined;
 	const patchTimeMode = snapshot.patch.timeMode ?? current.event.timeMode;
 	const requestedTimeZone =
@@ -811,7 +825,18 @@ async function updateCalendarEventInternal(
 	const requestedStart = 'start' in snapshot.patch ? snapshot.patch.start : undefined;
 	const requestedEnd = 'end' in snapshot.patch ? snapshot.patch.end : undefined;
 	const currentRecurrenceStartValue = currentRecurrenceStart(current.event);
-	const finalRecurrenceStartValue = finalRecurrenceStart(current.event, snapshot.patch);
+	const finalDefinition =
+		current.event.timeMode === 'timed' && current.event.timeZoneMode === 'iana'
+			? (embeddedTimeZoneDefinition(
+					current.context.resource,
+					sourceTimeZoneId(current.context.master) ?? '',
+				) ?? calendarEventPreservationTimeZoneDefinition(current.context))
+			: undefined;
+	const finalRecurrenceStartValue = finalRecurrenceStart(
+		current.event,
+		snapshot.patch,
+		finalDefinition,
+	);
 	const recurrenceContext: CalendarEventRecurrencePatchContext = {
 		...(currentRecurrenceStartValue === undefined ? {} : { current: currentRecurrenceStartValue }),
 		...(finalRecurrenceStartValue === undefined ? {} : { final: finalRecurrenceStartValue }),

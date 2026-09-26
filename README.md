@@ -114,6 +114,15 @@ For Event Create, supply a UID to preserve that exact event identity, or leave
 UID blank to generate a standards-compliant UUID. Each separate Create with a
 blank UID generates a new identity; omission is not an idempotency mechanism.
 
+Timed inputs accept strict ISO date-times with seconds and an optional
+fraction, `Z`, or numeric offset. Zone-less values are local wall times:
+Get Many interprets them in the workflow time zone, while Create and Upsert
+interpret them in the selected UTC or IANA action zone. Explicit offsets,
+JavaScript `Date` values, and valid Luxon `DateTime` values keep their instant.
+Fractions are floored to whole seconds, never rounded. Nonexistent or
+ambiguous local times are rejected; supply a valid local time for a DST gap or
+an explicit instant/offset for a DST overlap.
+
 Timed events default to UTC. In IANA mode, choose a canonical zone from the
 node's bundled IANA TZDB 2026c list. Instants are serialized as local
 `DTSTART`/`DTEND` values with one canonical `TZID`. The node first tries the
@@ -124,14 +133,22 @@ bounds before writing. Unbounded IANA recurrence authoring still requires a
 verified server reference. Requests to the time-zone distribution service are
 anonymous and never reuse CalDAV credentials.
 
+All-day Start Date, End Date, and recurrence Until accept strict `YYYY-MM-DD`
+values. Explicit instants supplied to these date-only fields are projected to
+a Gregorian date in the workflow time zone; zone-less date-time strings are
+not accepted there. End Date is exclusive, and recurrence Until is inclusive.
+These structured rules do not rewrite Raw ICS, which retains its RFC time-zone,
+precision, and date semantics.
+
 For existing events, an embedded `VTIMEZONE` is authoritative. Time
 representations that cannot be interpreted safely remain available as
 read-only output and can still be deleted, but cannot be updated. UTC-equivalent
-identifiers belong in UTC mode. During a daylight-saving overlap, use UTC mode
-for the second occurrence of an ambiguous local time. Non-time updates preserve
-the original time-zone spelling and definition without performing reference
-lookup or generation. Explicit representation changes remove an old embedded
-definition only when no preserved calendar content still references it.
+identifiers belong in UTC mode. An explicit instant disambiguates a daylight-
+saving overlap; use UTC representation if the selected IANA rules cannot
+represent that occurrence safely. Non-time updates preserve the original
+time-zone spelling and definition without performing reference lookup or
+generation. Explicit representation changes remove an old embedded definition
+only when no preserved calendar content still references it.
 
 See [docs/MVP.md](docs/MVP.md) for the complete version 1.0.0 scope and
 acceptance criteria. The supported fixed validation baseline for the shipped

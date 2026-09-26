@@ -69,6 +69,7 @@ function context(
 			.fn()
 			.mockReturnValue(itemParameters.map((_, index) => ({ json: { privateInput: index } }))),
 		getNodeParameter: vi.fn((name: keyof Parameters, index: number) => itemParameters[index][name]),
+		getTimezone: vi.fn().mockReturnValue('UTC'),
 		getNode: vi.fn().mockReturnValue(NODE),
 		continueOnFail: vi.fn().mockReturnValue(options.continueOnFail ?? false),
 	} as unknown as IExecuteFunctions;
@@ -373,22 +374,24 @@ describe('CalDAV Event Get Many validation and failures', () => {
 	] as const)('rejects year zero from a %s before transport or query', async (_label, start) => {
 		const error = await captureError(execute(context([parameters({ start })])));
 		expect(error).toBeInstanceOf(NodeOperationError);
-		expect(error.message).toBe('Start must be a valid date and time with whole-second precision.');
+		expect(error.message).toBe(
+			'Start must be an ISO date and time with seconds; fractions are floored to whole seconds.',
+		);
 		expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
 		expect(mocks.queryCalendarEventsByTimeRange).not.toHaveBeenCalled();
 	});
 
 	it.each([
-		['start', '2040-01-02T10:00:00'],
-		['start', '2040-01-02T10:00:00.123Z'],
+		['start', '2040-01-02T10:00'],
+		['start', '2040-02-30T10:00:00.123Z'],
 		['end', 'not-a-date'],
 	] as const)('rejects invalid %s before transport or query', async (field, value) => {
 		const error = await captureError(execute(context([parameters({ [field]: value })])));
 		expect(error).toBeInstanceOf(NodeOperationError);
 		expect(error.message).toBe(
 			field === 'start'
-				? 'Start must be a valid date and time with whole-second precision.'
-				: 'End must be a valid date and time with whole-second precision.',
+				? 'Start must be an ISO date and time with seconds; fractions are floored to whole seconds.'
+				: 'End must be an ISO date and time with seconds; fractions are floored to whole seconds.',
 		);
 		expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
 		expect(mocks.queryCalendarEventsByTimeRange).not.toHaveBeenCalled();

@@ -64,6 +64,7 @@ function context(
 	return {
 		getInputData: vi.fn().mockReturnValue([{ json: { input: 'synthetic' } }]),
 		getNodeParameter: vi.fn((name: string) => Reflect.get(parameters, name)),
+		getTimezone: vi.fn().mockReturnValue('UTC'),
 		getNode: vi.fn().mockReturnValue(NODE),
 		continueOnFail: vi.fn().mockReturnValue(options.continueOnFail ?? false),
 	} as unknown as IExecuteFunctions;
@@ -241,11 +242,11 @@ describe('Raw ICS public type, compatibility, documentation, and package contrac
 		};
 		const verifier = await repositoryFile('scripts/verify-package-contents.mjs');
 
-		expect(packageJson.version).toBe('1.0.0-beta.3');
+		expect(packageJson.version).toBe('1.0.0-beta.4');
 		expect(packageJson.n8n.nodes).toHaveLength(1);
 		expect(packageJson.n8n.credentials).toHaveLength(1);
 		expect(packageJson.dependencies).toBeUndefined();
-		expect(verifier.match(/^\s*'[^']+',$/gm)).toHaveLength(139);
+		expect(verifier.match(/^\s*'[^']+',$/gm)).toHaveLength(142);
 		expect(verifier).toContain('EXPECTED_PACKAGE_FILES.size');
 		expect(verifier.match(/rawEventWrite\.(?:d\.ts|js|js\.map)/g)).toHaveLength(3);
 		expect(verifier.match(/resolvedUidIdentity\.(?:d\.ts|js|js\.map)/g)).toHaveLength(3);

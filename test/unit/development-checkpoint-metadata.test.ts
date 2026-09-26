@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 const PACKAGE_NAME = '@iljailjic/n8n-nodes-caldav';
 const UNRELEASED_HEADING = '## Unreleased';
-const CURRENT_VERSION = '1.0.0-beta.3';
+const CURRENT_VERSION = '1.0.0-beta.4';
 const CHECKPOINT_HEADING = '## [1.0.0-beta.1] - 2026-09-17';
 const CHECKPOINT_SECTION = `## [1.0.0-beta.1] - 2026-09-17
 
@@ -43,7 +43,7 @@ async function readJson<T>(path: string): Promise<T> {
 }
 
 describe('release metadata and 1.0.0-beta.1 development checkpoint', () => {
-	it('synchronizes the package and root lockfile identities at exactly 1.0.0-beta.3', async () => {
+	it('synchronizes the package and root lockfile identities at exactly 1.0.0-beta.4', async () => {
 		const packageJson = await readJson<PackageIdentity>('package.json');
 		const packageLock = await readJson<PackageLock>('package-lock.json');
 
@@ -59,7 +59,7 @@ describe('release metadata and 1.0.0-beta.1 development checkpoint', () => {
 		const changelog = await readRepositoryFile('CHANGELOG.md');
 		const checkpointStart = changelog.indexOf(CHECKPOINT_HEADING);
 		const unreleasedStart = changelog.indexOf(UNRELEASED_HEADING);
-		const currentReleaseStart = changelog.indexOf('## [1.0.0-beta.3]');
+		const currentReleaseStart = changelog.indexOf('## [1.0.0-beta.4]');
 		const previousReleaseStart = changelog.indexOf('## [1.0.0-beta.2]');
 		const nextUnreleasedHeadingStart = changelog.indexOf(
 			'\n## ',
@@ -73,6 +73,7 @@ describe('release metadata and 1.0.0-beta.1 development checkpoint', () => {
 
 		expect(changelog.match(/^## \[1\.0\.0-beta\.1\] - 2026-09-17$/gm) ?? []).toHaveLength(1);
 		expect(changelog.match(/^## Unreleased$/gm) ?? []).toHaveLength(1);
+		expect(changelog.match(/^## \[1\.0\.0-beta\.4\] - 2026-09-26$/gm) ?? []).toHaveLength(1);
 		expect(changelog.match(/^## \[1\.0\.0-beta\.3\] - 2026-09-25$/gm) ?? []).toHaveLength(1);
 		expect(changelog.match(/^## \[1\.0\.0-beta\.2\] - 2026-09-24$/gm) ?? []).toHaveLength(1);
 		expect(currentReleaseStart).toBeGreaterThan(unreleasedStart);

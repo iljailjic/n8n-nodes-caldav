@@ -435,10 +435,10 @@ describe('issue #41 validation, privacy, pairing, and Get Many projection', () =
 		['equal range', { endDate: '2024-02-29' }, /later|range/i],
 		['mixed families', { start: '2024-02-29T00:00:00Z' }, /mixed|time/i],
 		[
-			'unzoned timed string',
+			'timed string missing seconds',
 			{
 				timeMode: 'timed',
-				start: '2024-02-29T00:00:00',
+				start: '2024-02-29T00:00',
 				end: '2024-02-29T01:00:00Z',
 				startDate: undefined,
 				endDate: undefined,
@@ -457,10 +457,10 @@ describe('issue #41 validation, privacy, pairing, and Get Many projection', () =
 			/start/i,
 		],
 		[
-			'nonzero timed fraction',
+			'invalid date with timed fraction',
 			{
 				timeMode: 'timed',
-				start: '2024-02-29T00:00:00.001Z',
+				start: '2024-02-30T00:00:00.001Z',
 				end: '2024-02-29T01:00:00Z',
 				startDate: undefined,
 				endDate: undefined,

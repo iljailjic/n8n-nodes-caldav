@@ -206,6 +206,7 @@ describe('event read-model public contract', () => {
 		expect(Object.keys(eventReadModelModule).sort()).toEqual([
 			'CalDavCalendarEventReadModelError',
 			'CalendarEventReadModelErrorCode',
+			'calendarEventPreservationTimeZoneDefinition',
 			'createCalendarEventPreservationContext',
 			'mapCalendarEventResource',
 			'mapCalendarEventResourceWithTimeZoneContext',
@@ -234,7 +235,7 @@ describe('event read-model public contract', () => {
 		expect(error).not.toHaveProperty('offset');
 	});
 
-	it('satisfies the accepted compile-time model while exposing only four runtime exports', () => {
+	it('satisfies the accepted compile-time model with the accepted runtime exports', () => {
 		const result = mapLines(event('typed-contract', ['DTSTART:20260812T090000Z']));
 		const eventModel: CalendarEvent = result.event;
 		const context: CalendarEventPreservationContext = result.context;
