@@ -1007,8 +1007,11 @@ describe('Radicale authenticated discovery', () => {
 				expect(resolveReference).toHaveBeenCalledOnce();
 				expect(
 					request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method),
-				).toEqual(['PUT']);
-				let storedBody = await (await authenticatedFetch(run, created.resourceUrl)).text();
+				).toEqual(['PUT', 'GET']);
+				expect((request.mock.calls[1][0] as CalDavTransportRequest).url).toBe(created.resourceUrl);
+				const createdResponse = await authenticatedFetch(run, created.resourceUrl);
+				expect(created.etag).toBe(createdResponse.headers.get('etag'));
+				let storedBody = await createdResponse.text();
 				expect(storedBody.match(/BEGIN:VTIMEZONE/g)).toHaveLength(1);
 				expect(storedBody).toContain('TZID:Europe/Prague');
 				expect(storedBody).toContain('DTSTART;TZID=Europe/Prague:20400715T100000');
@@ -2333,10 +2336,16 @@ describe('Radicale issue #41 all-day event interoperability', () => {
 				const createMethods = requests.mock.calls.map(
 					([options]) => (options as N8nCalDavRequestOptions).method,
 				);
-				expect(createMethods).toEqual(['PUT', 'PUT']);
+				expect(createMethods).toEqual(['PUT', 'GET', 'PUT', 'GET']);
+				expect(
+					requests.mock.calls
+						.filter(([options]) => (options as N8nCalDavRequestOptions).method === 'GET')
+						.map(([options]) => (options as N8nCalDavRequestOptions).url),
+				).toEqual([leap.resourceUrl, year.resourceUrl]);
 
 				for (const created of [leap, year]) {
 					const raw = await authenticatedFetch(run, created.resourceUrl);
+					expect(created.etag).toBe(raw.headers.get('etag'));
 					const rawBody = await raw.text();
 					expect(rawBody).toContain(`DTSTART;VALUE=DATE:${created.startDate.replaceAll('-', '')}`);
 					expect(rawBody).toContain(`DTEND;VALUE=DATE:${created.endDate.replaceAll('-', '')}`);
@@ -2528,7 +2537,8 @@ describe('Radicale extended VEVENT metadata round trip', () => {
 				});
 				expect(
 					request.mock.calls.map(([input]) => (input as CalDavTransportRequest).method),
-				).toEqual(['PUT']);
+				).toEqual(['PUT', 'GET']);
+				expect((request.mock.calls[1][0] as CalDavTransportRequest).url).toBe(expectedResourceUrl);
 
 				const direct = await getCalendarEventByResourceUrl(
 					inspectedTransport,
@@ -2540,6 +2550,7 @@ describe('Radicale extended VEVENT metadata round trip', () => {
 					status: 'tentative',
 					transparency: 'opaque',
 				});
+				expect(created.etag).toBe(direct.event.etag);
 				const directStoredBody = await (await authenticatedFetch(run, expectedResourceUrl)).text();
 				expect(direct.rawIcs).toBe(directStoredBody);
 				const many = await queryCalendarEventsByTimeRange(inspectedTransport, calendarUrl, {
@@ -2849,13 +2860,15 @@ describe('Radicale deterministic Event Upsert', () => {
 				expect(resolveReference).toHaveBeenCalledOnce();
 				expect(uidFactory).not.toHaveBeenCalled();
 				const createRequests = request.mock.calls.map(([input]) => input as CalDavTransportRequest);
-				expect(createRequests.map(({ method }) => method)).toEqual(['REPORT', 'PUT']);
+				expect(createRequests.map(({ method }) => method)).toEqual(['REPORT', 'PUT', 'GET']);
 				expect(createRequests[1]).toMatchObject({
 					url: expectedResourceUrl,
 					headers: { 'If-None-Match': '*' },
 				});
+				expect(createRequests[2]).toMatchObject({ url: expectedResourceUrl });
 
 				const seeded = await authenticatedFetch(run, expectedResourceUrl);
+				expect(created.event.etag).toBe(seeded.headers.get('etag'));
 				const seededBody = (await seeded.text()).replace(
 					'END:VEVENT',
 					'X-UNKNOWN;X-SOURCE=IANA:preserved-by-upsert\r\nEND:VEVENT',
