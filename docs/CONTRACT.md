@@ -142,6 +142,15 @@ reference. Reads treat an embedded `VTIMEZONE` as authoritative. Unsupported
 time representations are readable and deletable but are read-only for
 structured Update.
 
+For structured Create and the create branch of Upsert, a verified governing
+definition for the selected IANA zone is used to interpret local input when
+available. After writing, the node reads the event back and returns that
+authoritative event only when its UID, resource URL, ETag, editable time mode,
+and authored time bounds match. A failed or mismatched confirmation is
+reported as partial success because the remote resource may already exist.
+This confirms the stored event state; it does not establish live-provider
+coverage for every historical time-zone rule.
+
 ### Structured temporal inputs
 
 Every structured timed value accepts a strict ISO date-time with a four-digit
@@ -185,6 +194,31 @@ representability checks. All-day-to-timed conversion requires an explicit time
 zone when the target bounds are local. Timed Until follows the same grammar,
 precision, and final event-zone context as other timed values, then is stored
 as canonical whole-second UTC. It is inclusive and cannot precede DTSTART.
+
+For recurring IANA events, an embedded `VTIMEZONE` is interpreted using its
+source `TZID`. Equivalent duplicate historical transition occurrences are
+collapsed; conflicting occurrences remain unsupported. A UTC `UNTIL` is
+inclusive: a transition at that instant is retained, and later occurrences
+are excluded. After the final included transition, its resulting offset
+continues as the terminal offset for subsequent instants. These rules apply to
+interpretation of the embedded definition; they do not expand recurring event
+instances.
+
+Some provider-specific historical definitions still need validation. In
+particular, behavior for Lord Howe's half-hour transitions, Apia's date-line
+history, and Casablanca's fixed `+01:00` history remains unresolved and is
+tracked in [issue #162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162).
+Synthetic provider-shaped fixtures are not evidence of the live response
+semantics for these cases.
+
+Structured Update and the update branch of Upsert preserve existing timed
+bounds and the source `TZID` definition when only metadata changes, even when
+the server's embedded identifier is an alias rather than the canonical IANA
+option value. A semantically unchanged patch is a no-op and does not issue a
+write. A mutation is returned as successful only after an authoritative read
+back confirms an editable event in the selected calendar with the expected
+identity and semantically equivalent content. Upsert reports `action:
+"update"` for a resolved event even when that update is a no-op.
 
 Structured relative alarm controls accept integer values from 1 through
 2147483647 with minute, hour, day, or week units for Before/After; At uses

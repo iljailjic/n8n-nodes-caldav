@@ -63,7 +63,7 @@ function dependencies(): CalendarEventUpsertDependencies {
 }
 
 describe('Raw ICS mutation result and request matrix contract', () => {
-	it('Create returns authored metadata without rawIcs and does not add a read solely for Raw ICS', async () => {
+	it('Structured Create returns authoritative metadata without rawIcs after GET', async () => {
 		const requests = transport(async (request) => {
 			if (request.method === CalDavMethod.PUT) {
 				return response(201, request.url!, { etag: ' W/"created" ' });
@@ -87,13 +87,18 @@ describe('Raw ICS mutation result and request matrix contract', () => {
 			() => CLOCK,
 		);
 
-		expect(methods(requests)).toEqual([CalDavMethod.PUT]);
+		expect(methods(requests)).toEqual([CalDavMethod.PUT, CalDavMethod.GET]);
 		expect(result).not.toHaveProperty('rawIcs');
 	});
 
-	it('Upsert Create remains raw-free and performs only its authored PUT when UID is omitted', async () => {
+	it('Upsert structured Create remains raw-free and confirms its authored PUT by GET', async () => {
 		const requests = transport(async (request) =>
-			response(201, request.url!, { etag: ' W/"created" ' }),
+			request.method === CalDavMethod.PUT
+				? response(201, request.url!, { etag: ' W/"created" ' })
+				: response(200, request.url!, {
+						body: compactEventIcs(GENERATED_UID, SUMMARY),
+						etag: ' W/"confirmed" ',
+					}),
 		);
 
 		const result = await upsertCalendarEvent(
@@ -108,7 +113,7 @@ describe('Raw ICS mutation result and request matrix contract', () => {
 			dependencies(),
 		);
 
-		expect(methods(requests)).toEqual([CalDavMethod.PUT]);
+		expect(methods(requests)).toEqual([CalDavMethod.PUT, CalDavMethod.GET]);
 		expect(result).toMatchObject({ action: 'create' });
 		expect(result.event).not.toHaveProperty('rawIcs');
 	});

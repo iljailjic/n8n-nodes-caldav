@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createCalendarEvent } from '../../nodes/CalDav/events/create';
+import { CalendarEventCreateFailureCode } from '../../nodes/CalDav/events/createErrors';
 import type { CalendarEventCreateInput } from '../../nodes/CalDav/events/create';
 import type { RecurrenceRule } from '../../nodes/CalDav/icalendar/recurrence';
 import { CalDavMethod } from '../../nodes/CalDav/transport/http';
@@ -45,11 +46,16 @@ function recurringInput(): CalendarEventCreateInput {
 }
 
 describe('recurrence Create request ordering', () => {
-	it('validates and authors recurrence before one conditional PUT and uses its authoritative ETag', async () => {
+	it('validates and authors recurrence before conditional PUT and confirms it by GET', async () => {
+		let submitted = '';
 		const requests: MockTransport = {
 			serverUrl: 'https://calendar.example.test/',
 			request: vi.fn(async (request: CalDavTransportRequest) => {
-				if (request.method === CalDavMethod.PUT) return response(201, request.url);
+				if (request.method === CalDavMethod.PUT) {
+					submitted = request.body!;
+					return response(201, request.url);
+				}
+				if (request.method === CalDavMethod.GET) return response(200, request.url, submitted);
 				throw new Error(`Unexpected method ${request.method}.`);
 			}),
 		};
@@ -60,7 +66,7 @@ describe('recurrence Create request ordering', () => {
 		const history = requests.request.mock.calls.map(
 			([request]) => request as CalDavTransportRequest,
 		);
-		expect(history.map(({ method }) => method)).toEqual([CalDavMethod.PUT]);
+		expect(history.map(({ method }) => method)).toEqual([CalDavMethod.PUT, CalDavMethod.GET]);
 		expect(history.every(({ url }) => url === RESOURCE_URL)).toBe(true);
 		expect(history[0]).toMatchObject({
 			headers: {
@@ -80,5 +86,31 @@ describe('recurrence Create request ordering', () => {
 			recurrence: RECURRENCE,
 		});
 		expect(clock).toHaveBeenCalledOnce();
+	});
+	it('rejects authoritative read-back with changed recurrence without retrying the write', async () => {
+		let submitted = '';
+		const requests: MockTransport = {
+			serverUrl: 'https://calendar.example.test/',
+			request: vi.fn(async (request: CalDavTransportRequest) => {
+				if (request.method === CalDavMethod.PUT) {
+					submitted = request.body!;
+					return response(201, request.url);
+				}
+				if (request.method === CalDavMethod.GET) {
+					return response(200, request.url, submitted.replace('COUNT=3', 'COUNT=4'));
+				}
+				throw new Error(`Unexpected method ${request.method}.`);
+			}),
+		};
+
+		await expect(
+			createCalendarEvent(requests, recurringInput(), () => new Date('2040-01-01T00:00:00Z')),
+		).rejects.toMatchObject({
+			code: CalendarEventCreateFailureCode.CONFIRMATION_FAILED,
+		});
+		expect(requests.request.mock.calls.map(([request]) => request.method)).toEqual([
+			CalDavMethod.PUT,
+			CalDavMethod.GET,
+		]);
 	});
 });

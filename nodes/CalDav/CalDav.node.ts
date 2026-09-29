@@ -72,7 +72,10 @@ import {
 } from './events/upsert';
 import type { CalendarEventUpsertInput } from './events/upsert';
 import { bindCalendarEventTimeZoneExecutionContext } from './events/timeZoneExecutionContext';
-import { CalDavCalendarEventTimeZoneAuthoringError } from './events/timeZoneAuthoring';
+import {
+	CalDavCalendarEventTimeZoneAuthoringError,
+	resolveVerifiedCalendarEventTimeZoneDefinition,
+} from './events/timeZoneAuthoring';
 import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
 import {
 	CalDavCalendarEventReadModelError,
@@ -123,9 +126,10 @@ import {
 	projectInstantInTimeZone,
 	resolveLocalDateTimeInTimeZone,
 } from './icalendar/timeZones';
-import type { CalendarEventTimeZone } from './icalendar/timeZones';
+import type { CalendarEventTimeZone, IanaTimeZoneId } from './icalendar/timeZones';
 import {
 	CalDavTemporalInputError,
+	normalizeParsedStructuredTimedInput,
 	normalizeStructuredTimedInput,
 	parseStructuredTimedInput,
 } from './temporalInputs';
@@ -487,6 +491,7 @@ interface RecurrenceTemporalContext {
 	readonly zone?: string;
 	readonly definition?: ICalendarComponent;
 	readonly requireExplicitZone?: boolean;
+	readonly preflightOnly?: boolean;
 }
 
 export function normalizeRecurrenceParameter(
@@ -549,12 +554,16 @@ function recurrenceParameterValue(
 					'requires an explicit time-zone patch when converting an all-day event to timed.',
 				);
 			}
-			const until = parseDateTimeInstant(
-				rule.until.value,
-				context.zone ?? 'UTC',
-				'Until',
-				context.definition,
-			);
+			const parsedUntil = parseStructuredTimedInput(rule.until.value);
+			const until =
+				context.preflightOnly && context.zone !== 'UTC' && parsedUntil?.kind === 'local'
+					? new Date('9999-12-31T23:59:59Z')
+					: parseDateTimeInstant(
+							rule.until.value,
+							context.zone ?? 'UTC',
+							'Until',
+							context.definition,
+						);
 			if (until === undefined) return recurrenceUiError('INVALID_UNTIL', 'end');
 			normalized.end = {
 				kind: 'until',
@@ -601,6 +610,7 @@ function recurrenceStartForInput(
 				readonly timeZone: CalendarEventTimeZone;
 		  }
 		| { readonly timeMode: 'allDay'; readonly startDate: CalendarDateString },
+	definition?: ICalendarComponent,
 ): RecurrenceStartContext {
 	if (timeInput.timeMode === 'allDay') {
 		return { timeMode: 'allDay', startDate: timeInput.startDate };
@@ -612,7 +622,11 @@ function recurrenceStartForInput(
 				timeMode: 'timed',
 				timeZoneMode: 'iana',
 				start,
-				startLocal: projectInstantInTimeZone(timeInput.start, timeInput.timeZone.timeZone),
+				startLocal: projectInstantInTimeZone(
+					timeInput.start,
+					timeInput.timeZone.timeZone,
+					definition,
+				),
 			};
 }
 
@@ -1115,6 +1129,8 @@ const EVENT_CREATE_MESSAGES = {
 	NETWORK: 'The CalDAV server could not be reached.',
 	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event creation response.',
 	PARTIAL_SUCCESS: 'The event was created, but its required ETag could not be retrieved.',
+	CONFIRMATION_PARTIAL_SUCCESS:
+		'The event was created, but its current state could not be verified.',
 	GENERIC: 'Event Create failed.',
 } as const;
 
@@ -1189,6 +1205,8 @@ const EVENT_UPSERT_MESSAGES = {
 	RESPONSE_LIMIT: 'The Event Upsert response exceeded the size limit.',
 	INVALID_RESPONSE: 'The CalDAV server returned an invalid calendar-event upsert response.',
 	CREATE_PARTIAL_SUCCESS: 'The event was created, but its required ETag could not be retrieved.',
+	CREATE_CONFIRMATION_PARTIAL_SUCCESS:
+		'The event was created, but its current state could not be verified.',
 	UPDATE_PARTIAL_SUCCESS: 'The event was updated, but its current state could not be verified.',
 	GENERIC: 'Event Upsert failed.',
 } as const;
@@ -1654,6 +1672,12 @@ function eventCreateFailure(error: unknown): EventCreateFailure {
 					configuration: false,
 					...(error.statusCode === undefined ? {} : { httpCode: String(error.statusCode) }),
 				};
+			case CalendarEventCreateFailureCode.CONFIRMATION_FAILED:
+				return {
+					message: EVENT_CREATE_MESSAGES.CONFIRMATION_PARTIAL_SUCCESS,
+					configuration: false,
+					...(error.statusCode === undefined ? {} : { httpCode: String(error.statusCode) }),
+				};
 			case CalendarEventCreateFailureCode.NORMALIZATION_FAILED:
 				return { message: EVENT_CREATE_MESSAGES.INVALID_RESPONSE, configuration: false };
 			case CalendarEventCreateFailureCode.INVALID_CLOCK:
@@ -1933,6 +1957,13 @@ function eventUpsertFailure(error: unknown): EventUpdateFailure {
 				...(error.statusCode === undefined ? {} : { httpCode: String(error.statusCode) }),
 			};
 		}
+		if (error.code === CalendarEventCreateFailureCode.CONFIRMATION_FAILED) {
+			return {
+				message: EVENT_UPSERT_MESSAGES.CREATE_CONFIRMATION_PARTIAL_SUCCESS,
+				configuration: false,
+				...(error.statusCode === undefined ? {} : { httpCode: String(error.statusCode) }),
+			};
+		}
 		if (error.code === CalendarEventCreateFailureCode.INVALID_CLOCK) {
 			return { message: EVENT_UPSERT_MESSAGES.GENERIC, configuration: false };
 		}
@@ -2137,6 +2168,16 @@ function temporalInput<T>(extract: () => T): T | string {
 	} catch (error) {
 		if (error instanceof CalDavTemporalInputError) return error.message;
 		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- Unexpected errors remain distinct from sanitized parameter failures outside execute.
+		throw error;
+	}
+}
+
+async function temporalInputAsync<T>(extract: () => Promise<T>): Promise<T | string> {
+	try {
+		return await extract();
+	} catch (error) {
+		if (error instanceof CalDavTemporalInputError) return error.message;
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- The item-aware operation boundary maps non-temporal failures.
 		throw error;
 	}
 }
@@ -2595,10 +2636,14 @@ export function normalizeAlarmMutationParameter(value: unknown): readonly Calend
 }
 /* eslint-enable n8n-nodes-base/node-execute-block-wrong-error-thrown */
 
-function eventCreateInput(
+async function eventCreateInput(
 	execution: IExecuteFunctions,
 	itemIndex: number,
-): CalendarEventCreateInput | string {
+	resolveDefinition?: (
+		calendarUrl: AbsoluteHttpUrl,
+		timeZone: IanaTimeZoneId,
+	) => Promise<ICalendarComponent | undefined>,
+): Promise<CalendarEventCreateInput | string> {
 	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
 	if (calendarUrl === undefined) return EVENT_CREATE_MESSAGES.INVALID_CALENDAR_URL;
 	const inputMode = nodeParameter(execution, 'inputMode', itemIndex) ?? STRUCTURED_INPUT_MODE;
@@ -2667,31 +2712,51 @@ function eventCreateInput(
 				readonly startDate: CalendarDateString;
 				readonly endDate: CalendarDateString;
 		  };
+	let definition: ICalendarComponent | undefined;
 	if (timeMode === 'timed') {
-		const start = createDateTimeInstant(
-			startValue,
+		const parsedStart = parseStructuredTimedInput(startValue);
+		const parsedEnd = parseStructuredTimedInput(endValue);
+		if (parsedStart === undefined) return EVENT_CREATE_MESSAGES.INVALID_START;
+		if (parsedEnd === undefined) return EVENT_CREATE_MESSAGES.INVALID_END;
+		if (
+			(parsedStart.kind === 'instant' &&
+				parsedEnd.kind === 'instant' &&
+				parsedEnd.instant.getTime() <= parsedStart.instant.getTime()) ||
+			(parsedStart.kind === 'local' &&
+				parsedEnd.kind === 'local' &&
+				parsedEnd.local <= parsedStart.local)
+		)
+			return EVENT_CREATE_MESSAGES.INVALID_RANGE;
+		if (timeZone.timeZoneMode === 'iana') {
+			definition = await resolveDefinition?.(calendarUrl, timeZone.timeZone);
+		}
+		const start = normalizeParsedStructuredTimedInput(
+			parsedStart,
 			timeZone.timeZoneMode === 'utc' ? 'UTC' : timeZone.timeZone,
 			'Start',
+			definition,
 		);
 		if (start === undefined) return EVENT_CREATE_MESSAGES.INVALID_START;
-		const end = createDateTimeInstant(
-			endValue,
+		const end = normalizeParsedStructuredTimedInput(
+			parsedEnd,
 			timeZone.timeZoneMode === 'utc' ? 'UTC' : timeZone.timeZone,
 			'End',
+			definition,
 		);
 		if (end === undefined) return EVENT_CREATE_MESSAGES.INVALID_END;
 		if (end.getTime() <= start.getTime()) return EVENT_CREATE_MESSAGES.INVALID_RANGE;
 		if (timeZone.timeZoneMode === 'iana') {
-			const projectedStart = projectInstantInTimeZone(start, timeZone.timeZone);
+			const projectedStart = projectInstantInTimeZone(start, timeZone.timeZone, definition);
 			if (
-				resolveLocalDateTimeInTimeZone(projectedStart, timeZone.timeZone).getTime() !==
+				resolveLocalDateTimeInTimeZone(projectedStart, timeZone.timeZone, definition).getTime() !==
 				start.getTime()
 			) {
 				return EVENT_CREATE_MESSAGES.UNREPRESENTABLE_START;
 			}
-			const projectedEnd = projectInstantInTimeZone(end, timeZone.timeZone);
+			const projectedEnd = projectInstantInTimeZone(end, timeZone.timeZone, definition);
 			if (
-				resolveLocalDateTimeInTimeZone(projectedEnd, timeZone.timeZone).getTime() !== end.getTime()
+				resolveLocalDateTimeInTimeZone(projectedEnd, timeZone.timeZone, definition).getTime() !==
+				end.getTime()
 			) {
 				return EVENT_CREATE_MESSAGES.UNREPRESENTABLE_END;
 			}
@@ -2820,13 +2885,14 @@ function eventCreateInput(
 		try {
 			recurrence = normalizeRecurrenceParameter(
 				recurrenceField.value,
-				recurrenceStartForInput(timeInput),
+				recurrenceStartForInput(timeInput, definition),
 				{
 					execution,
 					zone:
 						timeInput.timeMode === 'timed' && timeInput.timeZone.timeZoneMode === 'iana'
 							? timeInput.timeZone.timeZone
 							: 'UTC',
+					definition,
 				},
 			);
 		} catch (error) {
@@ -2924,10 +2990,15 @@ function optionalUpdatePatch(
 	);
 }
 
-function eventUpsertInput(
+async function eventUpsertInput(
 	execution: IExecuteFunctions,
 	itemIndex: number,
-): CalendarEventUpsertInput | string {
+	resolveDefinition?: (
+		calendarUrl: AbsoluteHttpUrl,
+		uid: string | undefined,
+		timeZone: IanaTimeZoneId,
+	) => Promise<ICalendarComponent | undefined>,
+): Promise<CalendarEventUpsertInput | string> {
 	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
 	if (calendarUrl === undefined) return EVENT_UPSERT_MESSAGES.INVALID_CALENDAR_URL;
 	const inputMode = nodeParameter(execution, 'inputMode', itemIndex) ?? STRUCTURED_INPUT_MODE;
@@ -2964,6 +3035,7 @@ function eventUpsertInput(
 				readonly startDate: CalendarDateString;
 				readonly endDate: CalendarDateString;
 		  };
+	let definition: ICalendarComponent | undefined;
 	if (timeMode === 'timed') {
 		const timeZoneMode = nodeParameter(execution, 'timeZoneMode', itemIndex);
 		let timeZone: CalendarEventTimeZone;
@@ -2983,16 +3055,44 @@ function eventUpsertInput(
 		} else {
 			return EVENT_UPSERT_MESSAGES.INVALID_TIME_ZONE_MODE;
 		}
-		const start = createDateTimeInstant(
-			nodeParameter(execution, 'start', itemIndex),
+		const startValue = nodeParameter(execution, 'start', itemIndex);
+		const endValue = nodeParameter(execution, 'end', itemIndex);
+		const parsedStart = parseStructuredTimedInput(startValue);
+		const parsedEnd = parseStructuredTimedInput(endValue);
+		if (parsedStart === undefined) return EVENT_UPSERT_MESSAGES.INVALID_START;
+		if (parsedEnd === undefined) return EVENT_UPSERT_MESSAGES.INVALID_END;
+		const earlySummary = nodeParameter(execution, 'summary', itemIndex);
+		if (typeof earlySummary !== 'string' || !isValidICalendarText(earlySummary)) {
+			return EVENT_UPSERT_MESSAGES.INVALID_SUMMARY;
+		}
+		if (
+			(parsedStart.kind === 'instant' &&
+				parsedEnd.kind === 'instant' &&
+				parsedEnd.instant.getTime() <= parsedStart.instant.getTime()) ||
+			(parsedStart.kind === 'local' &&
+				parsedEnd.kind === 'local' &&
+				parsedEnd.local <= parsedStart.local)
+		)
+			return EVENT_UPSERT_MESSAGES.INVALID_RANGE;
+		if (timeZone.timeZoneMode === 'iana') {
+			definition = await resolveDefinition?.(
+				calendarUrl,
+				uidValue.length === 0 ? undefined : uidValue,
+				timeZone.timeZone,
+			);
+		}
+		const start = normalizeParsedStructuredTimedInput(
+			parsedStart,
 			timeZone.timeZoneMode === 'utc' ? 'UTC' : timeZone.timeZone,
 			'Start',
+			definition,
 		);
 		if (start === undefined) return EVENT_UPSERT_MESSAGES.INVALID_START;
-		const end = createDateTimeInstant(
-			nodeParameter(execution, 'end', itemIndex),
+		const end = normalizeParsedStructuredTimedInput(
+			parsedEnd,
 			timeZone.timeZoneMode === 'utc' ? 'UTC' : timeZone.timeZone,
 			'End',
+			definition,
 		);
 		if (end === undefined) return EVENT_UPSERT_MESSAGES.INVALID_END;
 		timeInput = { timeMode, start, end, timeZone };
@@ -3108,12 +3208,13 @@ function eventUpsertInput(
 				descriptors.recurrence.value,
 				EVENT_UPSERT_MESSAGES.INVALID_ADDITIONAL_FIELDS,
 				(value) =>
-					normalizeRecurrenceParameter(value, recurrenceStartForInput(timeInput), {
+					normalizeRecurrenceParameter(value, recurrenceStartForInput(timeInput, definition), {
 						execution,
 						zone:
 							timeInput.timeMode === 'timed' && timeInput.timeZone.timeZoneMode === 'iana'
 								? timeInput.timeZone.timeZone
 								: 'UTC',
+						definition,
 					}),
 			);
 			if ('error' in extracted) return extracted.error;
@@ -3131,16 +3232,18 @@ function eventUpsertInput(
 		if (timeInput.timeZone.timeZoneMode === 'iana') {
 			if (
 				resolveLocalDateTimeInTimeZone(
-					projectInstantInTimeZone(timeInput.start, timeInput.timeZone.timeZone),
+					projectInstantInTimeZone(timeInput.start, timeInput.timeZone.timeZone, definition),
 					timeInput.timeZone.timeZone,
+					definition,
 				).getTime() !== timeInput.start.getTime()
 			) {
 				return EVENT_UPSERT_MESSAGES.UNREPRESENTABLE_START;
 			}
 			if (
 				resolveLocalDateTimeInTimeZone(
-					projectInstantInTimeZone(timeInput.end, timeInput.timeZone.timeZone),
+					projectInstantInTimeZone(timeInput.end, timeInput.timeZone.timeZone, definition),
 					timeInput.timeZone.timeZone,
+					definition,
 				).getTime() !== timeInput.end.getTime()
 			) {
 				return EVENT_UPSERT_MESSAGES.UNREPRESENTABLE_END;
@@ -3164,6 +3267,8 @@ function eventUpdatePatch(
 	value: unknown,
 	timeMode: 'timed' | 'allDay',
 	current?: CalendarEventReadResult,
+	definitionOverride?: ICalendarComponent,
+	preflightOnly = false,
 ): CalendarEventPatch | string {
 	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
 		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
@@ -3274,25 +3379,34 @@ function eventUpdatePatch(
 				? zone.timeZone
 				: 'UTC';
 	const definition =
-		zone === undefined && current !== undefined
+		definitionOverride ??
+		(current?.event.timeMode === 'timed' &&
+		current.event.timeZoneMode === 'iana' &&
+		(zone === undefined ||
+			(zone.timeZoneMode === 'iana' && zone.timeZone === current.event.timeZone))
 			? calendarEventPreservationTimeZoneDefinition(current.context)
-			: undefined;
+			: undefined);
 	const requireExplicitZone =
 		current?.event.timeMode === 'allDay' && timeMode === 'timed' && zone === undefined;
 	for (const field of ['start', 'end'] as const) {
 		if (descriptors[field] === undefined) continue;
-		if (
-			requireExplicitZone &&
-			parseStructuredTimedInput(descriptors[field].value)?.kind === 'local'
-		) {
+		const parsed = parseStructuredTimedInput(descriptors[field].value);
+		if (parsed === undefined)
+			return field === 'start'
+				? EVENT_UPDATE_MESSAGES.INVALID_START
+				: EVENT_UPDATE_MESSAGES.INVALID_END;
+		if (requireExplicitZone && parsed.kind === 'local') {
 			return `${field === 'start' ? 'Start' : 'End'} requires an explicit time-zone patch when converting an all-day event to timed.`;
 		}
-		const instant = createDateTimeInstant(
-			descriptors[field].value,
-			effectiveZone,
-			field === 'start' ? 'Start' : 'End',
-			definition,
-		);
+		const instant =
+			preflightOnly && effectiveZone !== 'UTC' && parsed.kind === 'local'
+				? new Date('2000-01-01T00:00:00Z')
+				: createDateTimeInstant(
+						descriptors[field].value,
+						effectiveZone,
+						field === 'start' ? 'Start' : 'End',
+						definition,
+					);
 		if (instant === undefined)
 			return field === 'start'
 				? EVENT_UPDATE_MESSAGES.INVALID_START
@@ -3308,6 +3422,7 @@ function eventUpdatePatch(
 	)
 		return EVENT_UPDATE_MESSAGES.INVALID_RANGE;
 	if (
+		!preflightOnly &&
 		patch.start !== undefined &&
 		patch.end !== undefined &&
 		(current !== undefined ||
@@ -3413,6 +3528,7 @@ function eventUpdatePatch(
 						zone: effectiveZone,
 						definition,
 						requireExplicitZone,
+						preflightOnly,
 					}),
 			);
 			if ('error' in extracted) return extracted.error;
@@ -3429,6 +3545,11 @@ function eventUpdatePatch(
 function eventUpdateInput(
 	execution: IExecuteFunctions,
 	itemIndex: number,
+	resolveDefinition?: (
+		calendarUrl: AbsoluteHttpUrl,
+		current: CalendarEventReadResult,
+		timeZone: IanaTimeZoneId,
+	) => Promise<ICalendarComponent | undefined>,
 ): CalendarEventUpdateInput | string {
 	const calendarUrl = calendarLocatorUrl(nodeParameter(execution, 'calendar', itemIndex));
 	if (calendarUrl === undefined) return EVENT_UPDATE_MESSAGES.INVALID_CALENDAR_URL;
@@ -3494,7 +3615,7 @@ function eventUpdateInput(
 	} catch {
 		return EVENT_UPDATE_MESSAGES.INVALID_FIELDS;
 	}
-	const patch = eventUpdatePatch(execution, fieldsToUpdate, timeMode);
+	const patch = eventUpdatePatch(execution, fieldsToUpdate, timeMode, undefined, undefined, true);
 	if (typeof patch === 'string') return patch;
 
 	return Object.freeze({
@@ -3504,9 +3625,16 @@ function eventUpdateInput(
 		...(timeMode === 'timed' &&
 		('start' in patch || 'end' in patch || patch.recurrence?.kind === 'set')
 			? {
-					resolveTemporalPatch: (current: CalendarEventReadResult): CalendarEventPatch => {
+					resolveTemporalPatch: async (
+						current: CalendarEventReadResult,
+					): Promise<CalendarEventPatch> => {
+						const targetZone = 'timeZone' in patch ? patch.timeZone?.value : undefined;
+						const definition =
+							targetZone?.timeZoneMode === 'iana'
+								? await resolveDefinition?.(calendarUrl, current, targetZone.timeZone)
+								: undefined;
 						const resolved = temporalInput(() =>
-							eventUpdatePatch(execution, fieldsToUpdate, timeMode, current),
+							eventUpdatePatch(execution, fieldsToUpdate, timeMode, current, definition),
 						);
 						if (typeof resolved === 'string')
 							// eslint-disable-next-line n8n-nodes-base/node-execute-block-wrong-error-thrown -- The coordinator propagates this pure extraction error to the item-aware Update boundary.
@@ -4982,16 +5110,28 @@ export class CalDav implements INodeType {
 							(nodeParameter(this, 'timeZoneMode', index) ?? 'utc') === 'iana',
 					);
 				}
-				const input = temporalInput(() => eventCreateInput(this, itemIndex));
-				if (typeof input === 'string') {
-					if (this.continueOnFail()) {
-						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
-						continue;
-					}
-					throw new NodeOperationError(this.getNode(), input, { itemIndex });
-				}
-
 				try {
+					let governingDefinition: ICalendarComponent | undefined;
+					const input = await temporalInputAsync(() =>
+						eventCreateInput(this, itemIndex, async (calendarUrl, timeZone) => {
+							const transport = getTransport ?? (await createN8nCalDavTransport(this));
+							getTransport = transport;
+							const context = ensureTimeZoneContext(transport);
+							governingDefinition = await resolveVerifiedCalendarEventTimeZoneDefinition(
+								context,
+								calendarUrl,
+								timeZone,
+							);
+							return governingDefinition;
+						}),
+					);
+					if (typeof input === 'string') {
+						if (this.continueOnFail()) {
+							returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
+							continue;
+						}
+						throw new NodeOperationError(this.getNode(), input, { itemIndex });
+					}
 					if (getTransport === undefined) {
 						getTransport = await createN8nCalDavTransport(this);
 					}
@@ -5003,9 +5143,12 @@ export class CalDav implements INodeType {
 						input,
 						() => new Date(),
 						timeZoneContext,
+						governingDefinition,
 					);
 					returnData.push({ json: eventJson(created), pairedItem: { item: itemIndex } });
 				} catch (error) {
+					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- Preserve the already item-aware validation error.
+					if (error instanceof NodeOperationError) throw error;
 					const failure = eventCreateFailure(error);
 					if (this.continueOnFail()) {
 						returnData.push({
@@ -5023,16 +5166,60 @@ export class CalDav implements INodeType {
 			}
 
 			if (isEventUpsert) {
-				const input = temporalInput(() => eventUpsertInput(this, itemIndex));
-				if (typeof input === 'string') {
-					if (this.continueOnFail()) {
-						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
-						continue;
-					}
-					throw new NodeOperationError(this.getNode(), input, { itemIndex });
-				}
-
 				try {
+					let preResolvedCurrent: CalendarEventReadResult | undefined;
+					let governingDefinition: ICalendarComponent | undefined;
+					const input = await temporalInputAsync(() =>
+						eventUpsertInput(this, itemIndex, async (calendarUrl, uid, timeZone) => {
+							const transport = getTransport ?? (await createN8nCalDavTransport(this));
+							getTransport = transport;
+							const context = ensureTimeZoneContext(transport);
+							bindCalendarEventTimeZoneExecutionContext(transport, context);
+							if (uid !== undefined) {
+								try {
+									preResolvedCurrent = await resolveCalendarEventByUid(
+										transport,
+										calendarUrl,
+										uid,
+										{
+											allowMissingEtag: true,
+											timeZoneContext: context,
+										},
+									);
+								} catch (error) {
+									if (
+										!(error instanceof CalDavCalendarEventUidResolutionError) ||
+										error.code !== CalendarEventUidResolutionFailureCode.NOT_FOUND
+									) {
+										// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- The Upsert item boundary maps lookup failures.
+										throw error;
+									}
+								}
+								if (
+									preResolvedCurrent?.event.timeMode === 'timed' &&
+									preResolvedCurrent.event.timeZoneMode === 'iana' &&
+									preResolvedCurrent.event.timeZone === timeZone
+								) {
+									governingDefinition = calendarEventPreservationTimeZoneDefinition(
+										preResolvedCurrent.context,
+									);
+								}
+							}
+							governingDefinition ??= await resolveVerifiedCalendarEventTimeZoneDefinition(
+								context,
+								calendarUrl,
+								timeZone,
+							);
+							return governingDefinition;
+						}),
+					);
+					if (typeof input === 'string') {
+						if (this.continueOnFail()) {
+							returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });
+							continue;
+						}
+						throw new NodeOperationError(this.getNode(), input, { itemIndex });
+					}
 					if (getTransport === undefined) {
 						getTransport = await createN8nCalDavTransport(this);
 					}
@@ -5049,6 +5236,10 @@ export class CalDav implements INodeType {
 					const result = await upsertCalendarEvent(getTransport, input, {
 						clock: () => new Date(),
 						uidFactory: () => resolveCalendarEventUid(undefined),
+						...(governingDefinition === undefined
+							? {}
+							: { governingTimeZoneDefinition: governingDefinition }),
+						...(preResolvedCurrent === undefined ? {} : { preResolvedCurrent }),
 					});
 					returnData.push({
 						json: {
@@ -5061,6 +5252,8 @@ export class CalDav implements INodeType {
 						pairedItem: { item: itemIndex },
 					});
 				} catch (error) {
+					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- Preserve the already item-aware validation error.
+					if (error instanceof NodeOperationError) throw error;
 					const failure = eventUpsertFailure(error);
 					if (this.continueOnFail()) {
 						returnData.push({
@@ -5126,7 +5319,24 @@ export class CalDav implements INodeType {
 			}
 
 			if (isEventUpdate) {
-				const input = temporalInput(() => eventUpdateInput(this, itemIndex));
+				const input = temporalInput(() =>
+					eventUpdateInput(this, itemIndex, async (calendarUrl, current, timeZone) => {
+						if (
+							current.event.timeMode === 'timed' &&
+							current.event.timeZoneMode === 'iana' &&
+							current.event.timeZone === timeZone
+						) {
+							return calendarEventPreservationTimeZoneDefinition(current.context);
+						}
+						const transport = getTransport ?? (await createN8nCalDavTransport(this));
+						getTransport = transport;
+						return await resolveVerifiedCalendarEventTimeZoneDefinition(
+							ensureTimeZoneContext(transport),
+							calendarUrl,
+							timeZone,
+						);
+					}),
+				);
 				if (typeof input === 'string') {
 					if (this.continueOnFail()) {
 						returnData.push({ json: { error: input }, pairedItem: { item: itemIndex } });

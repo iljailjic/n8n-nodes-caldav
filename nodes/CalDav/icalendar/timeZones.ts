@@ -1286,7 +1286,8 @@ function yearlyDefinitionOccurrence(
 	rrule: string,
 	start: string,
 	year: number,
-): string | undefined {
+	offsetFrom: number,
+): string | null | undefined {
 	const startMatch = COMPACT_LOCAL_DATE_TIME_PATTERN.exec(start);
 	if (startMatch === null) return undefined;
 	const parts = new Map<string, string>();
@@ -1298,8 +1299,23 @@ function yearlyDefinitionOccurrence(
 		parts.set(key, part.slice(delimiter + 1));
 	}
 	if (parts.get('FREQ') !== 'YEARLY') return undefined;
-	const supported = new Set(['FREQ', 'BYMONTH', 'BYMONTHDAY', 'BYDAY']);
+	const supported = new Set(['FREQ', 'BYMONTH', 'BYMONTHDAY', 'BYDAY', 'UNTIL']);
 	if ([...parts.keys()].some((key) => !supported.has(key))) return undefined;
+	const until = parts.get('UNTIL');
+	const untilTimestamp =
+		until === undefined
+			? undefined
+			: /^\d{8}T\d{6}Z$/.test(until)
+				? compactLocalTimestamp(until.slice(0, -1))
+				: undefined;
+	if (until !== undefined && untilTimestamp === undefined) return undefined;
+	const startTimestamp = compactLocalTimestamp(start);
+	if (
+		startTimestamp === undefined ||
+		(untilTimestamp !== undefined && startTimestamp - offsetFrom > untilTimestamp)
+	) {
+		return undefined;
+	}
 	const month = Number(parts.get('BYMONTH') ?? startMatch[2]);
 	if (!Number.isInteger(month) || month < 1 || month > 12) return undefined;
 	let day = Number(parts.get('BYMONTHDAY') ?? startMatch[3]);
@@ -1321,7 +1337,12 @@ function yearlyDefinitionOccurrence(
 		}
 	}
 	if (day < 1 || day > monthLength(year, month)) return undefined;
-	return `${pad(year, 4)}${pad(month)}${pad(day)}T${startMatch[4]}${startMatch[5]}${startMatch[6]}`;
+	const occurrence = `${pad(year, 4)}${pad(month)}${pad(day)}T${startMatch[4]}${startMatch[5]}${startMatch[6]}`;
+	const localTimestamp = compactLocalTimestamp(occurrence);
+	if (localTimestamp === undefined) return undefined;
+	return untilTimestamp !== undefined && localTimestamp - offsetFrom > untilTimestamp
+		? null
+		: occurrence;
 }
 
 function definitionTransitions(
@@ -1349,7 +1370,6 @@ function definitionTransitions(
 		throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
 	}
 	const transitions: DefinitionTransition[] = [];
-	let everyObservanceRecurs = true;
 	for (const observance of observances) {
 		const start = definitionRaw(observance, 'DTSTART');
 		const offsetFrom = definitionOffset(definitionRaw(observance, 'TZOFFSETFROM') ?? '');
@@ -1364,22 +1384,25 @@ function definitionTransitions(
 			}
 			dates.push(...property.value.raw.split(','));
 		}
-		if (new Set(dates).size !== dates.length) {
-			throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
-		}
 		const rules = definitionProperties(observance, 'RRULE');
 		if (rules.length > 1 || (rules[0] !== undefined && rules[0].value.textValues !== null)) {
 			throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
 		}
-		if (rules[0] === undefined) everyObservanceRecurs = false;
 		if (rules[0] !== undefined) {
-			for (const year of new Set(targetYears.flatMap((value) => [value - 1, value, value + 1]))) {
+			const rule = rules[0].value.raw;
+			const untilYear = /(?:^|;)UNTIL=(\d{4})\d{4}T\d{6}Z(?:;|$)/.exec(rule)?.[1];
+			const years = new Set([
+				Number(start.slice(0, 4)),
+				...targetYears.flatMap((value) => [value - 1, value, value + 1]),
+				...(untilYear === undefined ? [] : [Number(untilYear) - 1, Number(untilYear)]),
+			]);
+			for (const year of years) {
 				if (year < Number(start.slice(0, 4)) || year < 1 || year > 9999) continue;
-				const occurrence = yearlyDefinitionOccurrence(rules[0].value.raw, start, year);
+				const occurrence = yearlyDefinitionOccurrence(rule, start, year, offsetFrom);
 				if (occurrence === undefined) {
 					throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
 				}
-				if (!dates.includes(occurrence)) dates.push(occurrence);
+				if (occurrence !== null) dates.push(occurrence);
 			}
 		}
 		for (const date of dates) {
@@ -1394,45 +1417,133 @@ function definitionTransitions(
 			});
 		}
 	}
-	transitions.sort((left, right) => left.localMilliseconds - right.localMilliseconds);
-	if (
-		transitions.some(
-			(transition, index) =>
-				index > 0 && transition.localMilliseconds === transitions[index - 1]!.localMilliseconds,
-		)
-	) {
-		throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
-	}
-	if (observances.length > 1 && !everyObservanceRecurs) {
-		for (const year of new Set(targetYears)) {
-			if (year < 1 || year > 9999) {
-				throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
-			}
-			const yearStart = wallTimestamp({
-				year,
-				month: 1,
-				day: 1,
-				hour: 0,
-				minute: 0,
-				second: 0,
-			});
-			const nextYearStart = wallTimestamp({
-				year: year + 1,
-				month: 1,
-				day: 1,
-				hour: 0,
-				minute: 0,
-				second: 0,
-			});
+	const unique = new Map<number, DefinitionTransition>();
+	const byLocal = new Map<number, DefinitionTransition>();
+	for (const transition of transitions) {
+		const sameLocal = byLocal.get(transition.localMilliseconds);
+		if (
+			sameLocal !== undefined &&
+			(sameLocal.offsetFromMilliseconds !== transition.offsetFromMilliseconds ||
+				sameLocal.offsetToMilliseconds !== transition.offsetToMilliseconds)
+		) {
+			throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+		}
+		byLocal.set(transition.localMilliseconds, transition);
+		const instant = transition.localMilliseconds - transition.offsetFromMilliseconds;
+		const previous = unique.get(instant);
+		if (previous !== undefined) {
 			if (
-				!transitions.some((transition) => transition.localMilliseconds <= yearStart) ||
-				!transitions.some((transition) => transition.localMilliseconds >= nextYearStart)
+				previous.offsetFromMilliseconds !== transition.offsetFromMilliseconds ||
+				previous.offsetToMilliseconds !== transition.offsetToMilliseconds ||
+				previous.localMilliseconds !== transition.localMilliseconds
 			) {
 				throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
 			}
+			continue;
+		}
+		unique.set(instant, transition);
+	}
+	return [...unique.values()].sort(
+		(left, right) => left.localMilliseconds - right.localMilliseconds,
+	);
+}
+
+/** Compare the supported governing rules rather than serialized line and property order. */
+export function vTimeZoneRulesAreSemanticallyEqual(
+	expected: ICalendarComponent,
+	actual: ICalendarComponent | undefined,
+	timeZone: IanaTimeZoneId,
+	coverage?: FiniteTimeZoneCoverage,
+): boolean {
+	if (actual === undefined) return false;
+	if (coverage !== undefined) {
+		try {
+			const { start, end, startYear, endYear } = finiteCoverageTimestamps(coverage);
+			assertVTimeZoneCovers(expected, timeZone, coverage);
+			// Read-back may legitimately use a terminal historical offset beyond its last transition.
+			// definitionTransitions still rejects malformed or conflicting provider rules below.
+			const years = Array.from(
+				{ length: endYear - startYear + 1 },
+				(_, index) => startYear + index,
+			);
+			const expectedTransitions = definitionTransitions(expected, timeZone, years);
+			const actualTransitions = definitionTransitions(actual, timeZone, years);
+			const probes = new Set([start, end]);
+			for (const transition of [...expectedTransitions, ...actualTransitions]) {
+				const instant = transition.localMilliseconds - transition.offsetFromMilliseconds;
+				if (instant >= start && instant <= end) probes.add(instant);
+			}
+			const orderedProbes = [...probes].sort((left, right) => left - right);
+			const offsets = (transitions: readonly DefinitionTransition[]): readonly number[] => {
+				const ordered = transitions
+					.map((transition) => ({
+						instant: transition.localMilliseconds - transition.offsetFromMilliseconds,
+						offsetFrom: transition.offsetFromMilliseconds,
+						offsetTo: transition.offsetToMilliseconds,
+					}))
+					.sort((left, right) => left.instant - right.instant);
+				let offset = ordered[0]!.offsetFrom;
+				let index = 0;
+				return orderedProbes.map((probe) => {
+					while (index < ordered.length && ordered[index]!.instant <= probe) {
+						offset = ordered[index]!.offsetTo;
+						index += 1;
+					}
+					return offset;
+				});
+			};
+			return (
+				JSON.stringify(offsets(expectedTransitions)) === JSON.stringify(offsets(actualTransitions))
+			);
+		} catch {
+			return false;
 		}
 	}
-	return transitions;
+	const signatures = (definition: ICalendarComponent): readonly string[] => {
+		// Parse every supported observance before comparing it. This also rejects conflicting transitions.
+		definitionTransitions(definition, timeZone, [2000, 2026, 2050]);
+		return definition.entries
+			.filter((entry): entry is ICalendarComponent => entry.kind === 'component')
+			.map((observance) => {
+				const start = definitionRaw(observance, 'DTSTART');
+				const from = definitionOffset(definitionRaw(observance, 'TZOFFSETFROM') ?? '');
+				const to = definitionOffset(definitionRaw(observance, 'TZOFFSETTO') ?? '');
+				if (start === undefined || from === undefined || to === undefined)
+					throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+				const dates = definitionProperties(observance, 'RDATE')
+					.flatMap((property) => property.value.raw.split(','))
+					.map((date) => compactLocalTimestamp(date));
+				if (dates.some((date) => date === undefined))
+					throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+				const rules = definitionProperties(observance, 'RRULE');
+				const rule = rules[0]?.value.raw;
+				const normalizedRule =
+					rule === undefined
+						? undefined
+						: rule
+								.split(';')
+								.map((part) => {
+									const delimiter = part.indexOf('=');
+									if (delimiter <= 0) throw new CalDavIanaTimeZoneError('UNSUPPORTED_DEFINITION');
+									return `${part.slice(0, delimiter).toUpperCase()}=${part.slice(delimiter + 1).toUpperCase()}`;
+								})
+								.sort();
+				return JSON.stringify([
+					observance.name.toUpperCase(),
+					compactLocalTimestamp(start),
+					from,
+					to,
+					[...new Set(dates)].sort((left, right) => left! - right!),
+					normalizedRule,
+				]);
+			})
+			.sort();
+	};
+	try {
+		return JSON.stringify(signatures(expected)) === JSON.stringify(signatures(actual));
+	} catch {
+		return false;
+	}
 }
 
 function transitionOffsetAtInstant(

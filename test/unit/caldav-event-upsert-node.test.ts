@@ -554,7 +554,7 @@ describe('CalDAV Event Upsert local validation and item behavior', () => {
 		expect(mocks.upsertCalendarEvent).not.toHaveBeenCalled();
 	});
 
-	it('reports Summary before the deferred final range consistency check', async () => {
+	it('reports invalid Summary before the final range check when bounds are absolute', async () => {
 		const error = await captureError(
 			context([
 				parameters({

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createCalendarEvent } from '../../nodes/CalDav/events/create';
+import {
+	CalendarEventCreateFailureCode,
+	createCalendarEvent,
+} from '../../nodes/CalDav/events/create';
 import { getCalendarEventByResourceUrl } from '../../nodes/CalDav/events/getByResourceUrl';
 import { deleteCalendarEventResource } from '../../nodes/CalDav/events/mutations';
 import { queryCalendarEventsByTimeRange } from '../../nodes/CalDav/events/timeRangeQuery';
@@ -99,7 +102,7 @@ function issue41Patch(value: Record<string, unknown>): CalendarEventPatch {
 }
 
 describe('issue #41 authoritative Create request flow', () => {
-	it('performs exactly one conditional PUT and returns the authored state with its ETag', async () => {
+	it('performs conditional PUT and authoritative GET before returning the stored state', async () => {
 		const requests = transport(async (request) => {
 			if (request.method === CalDavMethod.PUT) {
 				return response(201, request.url, { etag: '"provisional-put-etag"' });
@@ -119,11 +122,11 @@ describe('issue #41 authoritative Create request flow', () => {
 			() => new Date('2040-01-01T00:00:00.987Z'),
 		);
 
-		expect(requests.request).toHaveBeenCalledOnce();
+		expect(requests.request).toHaveBeenCalledTimes(2);
 		const observed = requests.request.mock.calls.map(
 			([request]) => request as CalDavTransportRequest,
 		);
-		expect(observed.map(({ method }) => method)).toEqual([CalDavMethod.PUT]);
+		expect(observed.map(({ method }) => method)).toEqual([CalDavMethod.PUT, CalDavMethod.GET]);
 		expect(observed[0]).toMatchObject({
 			headers: {
 				'If-None-Match': '*',
@@ -135,9 +138,9 @@ describe('issue #41 authoritative Create request flow', () => {
 		expect(result).toEqual({
 			calendarUrl: CALENDAR_URL,
 			resourceUrl: observed[0]?.url,
-			etag: '"provisional-put-etag"',
+			etag: ' W/"authoritative-etag" ',
 			uid: 'authoritative-create',
-			summary: 'Authoritative Create',
+			summary: 'Server authoritative summary',
 			timeMode: 'allDay',
 			accessMode: 'editable',
 			startDate: '2024-02-29',
@@ -145,7 +148,7 @@ describe('issue #41 authoritative Create request flow', () => {
 		});
 	});
 
-	it('does not add a read to discover a server-side representation change', async () => {
+	it('rejects a server-side representation change on authoritative GET', async () => {
 		const requests = transport(async (request) =>
 			request.method === CalDavMethod.PUT
 				? response(201, request.url)
@@ -164,15 +167,11 @@ describe('issue #41 authoritative Create request flow', () => {
 				issue41CreateInput('timed') as never,
 				() => new Date('2040-01-01T00:00:00Z'),
 			),
-		).resolves.toMatchObject({
-			uid: 'authoritative-create',
-			timeMode: 'timed',
-			accessMode: 'editable',
-		});
-		expect(requests.request).toHaveBeenCalledOnce();
+		).rejects.toMatchObject({ code: CalendarEventCreateFailureCode.CONFIRMATION_FAILED });
+		expect(requests.request).toHaveBeenCalledTimes(2);
 	});
 
-	it('does not fetch or expose a private confirmation body after PUT metadata succeeds', async () => {
+	it('fetches confirmation and fails without exposing a private malformed body', async () => {
 		const privateSentinels = [
 			'private-create-uid',
 			'https://private.example.test/path/event.ics',
@@ -198,21 +197,22 @@ describe('issue #41 authoritative Create request flow', () => {
 					}),
 		);
 
-		const created = await createCalendarEvent(
+		const error = await createCalendarEvent(
 			requests,
 			{ ...issue41CreateInput('allDay'), uid: 'private-create-uid' } as never,
 			() => new Date('2040-01-01T00:00:00Z'),
-		);
-		expect(requests.request).toHaveBeenCalledOnce();
+		).catch((failure: unknown) => failure);
+		expect(error).toMatchObject({ code: CalendarEventCreateFailureCode.CONFIRMATION_FAILED });
+		expect(requests.request).toHaveBeenCalledTimes(2);
 		expect(requests.request.mock.calls.map(([request]) => request.method)).toEqual([
 			CalDavMethod.PUT,
+			CalDavMethod.GET,
 		]);
 		expect(requests.request.mock.calls.flat()).not.toEqual(
 			expect.arrayContaining([expect.objectContaining({ method: CalDavMethod.DELETE })]),
 		);
-		expect(created).not.toHaveProperty('rawIcs');
 		for (const sentinel of privateSentinels.slice(1))
-			expect(JSON.stringify(created)).not.toContain(sentinel);
+			expect(JSON.stringify(error)).not.toContain(sentinel);
 	});
 });
 

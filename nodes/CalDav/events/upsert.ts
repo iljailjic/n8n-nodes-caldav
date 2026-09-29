@@ -14,6 +14,7 @@ import {
 	mapCalendarEventResource,
 	type CalendarDateString,
 	type CalendarEvent,
+	type CalendarEventReadResult,
 	type CalendarEventStatus,
 	type CalendarEventTransparency,
 	type UtcDateTimeString,
@@ -39,6 +40,7 @@ import type { CalDavTransport } from '../transport/http';
 import { normalizeCalendarCollectionUrl, validateAbsoluteHttpUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './create';
+import { confirmStructuredCalendarEventCreate } from './createConfirmation';
 import type { CalendarEventCreateClock, StructuredCalendarEventCreateInput } from './create';
 import { calendarEventResourceUrlForUid, prepareCalendarEventCreate } from './createPreparation';
 import {
@@ -114,6 +116,8 @@ export interface CalendarEventUpsertDependencies {
 	readonly clock: CalendarEventCreateClock;
 	readonly uidFactory: CalendarEventUidGenerator;
 	readonly alarmUidFactory?: CalendarAlarmUidGenerator;
+	readonly governingTimeZoneDefinition?: ICalendarComponent;
+	readonly preResolvedCurrent?: CalendarEventReadResult;
 }
 
 export type UpsertedCalendarEvent = CalendarEvent & { readonly etag: string };
@@ -359,6 +363,7 @@ function recurrenceStartContext(
 				readonly timeZone: CalendarEventTimeZone;
 		  }
 		| { readonly timeMode: 'allDay'; readonly startDate: CalendarDateString },
+	definition?: ICalendarComponent,
 ): RecurrenceStartContext {
 	if (time.timeMode === 'allDay') return { timeMode: 'allDay', startDate: time.startDate };
 	const start = time.start.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
@@ -368,7 +373,7 @@ function recurrenceStartContext(
 				timeMode: 'timed',
 				timeZoneMode: 'iana',
 				start,
-				startLocal: projectInstantInTimeZone(time.start, time.timeZone.timeZone),
+				startLocal: projectInstantInTimeZone(time.start, time.timeZone.timeZone, definition),
 			};
 }
 
@@ -394,6 +399,7 @@ function recurrencePatch(
 
 function snapshotInput(
 	input: StructuredCalendarEventUpsertInput,
+	definition?: ICalendarComponent,
 ): StructuredCalendarEventUpsertInput {
 	if (!isRecord(input)) return invalid(MESSAGES.INVALID_CALENDAR_URL);
 	let calendarUrl: AbsoluteHttpUrl;
@@ -533,7 +539,7 @@ function snapshotInput(
 	const recurrence =
 		input.recurrence === undefined
 			? undefined
-			: recurrencePatch(input.recurrence, recurrenceStartContext(time));
+			: recurrencePatch(input.recurrence, recurrenceStartContext(time, definition));
 	if (uid === undefined && alarms?.some((mutation) => mutation.kind !== 'add')) {
 		return invalid(MESSAGES.INVALID_ADDITIONAL_FIELDS);
 	}
@@ -542,16 +548,18 @@ function snapshotInput(
 		if (time.timeZone.timeZoneMode === 'iana') {
 			if (
 				resolveLocalDateTimeInTimeZone(
-					projectInstantInTimeZone(time.start, time.timeZone.timeZone),
+					projectInstantInTimeZone(time.start, time.timeZone.timeZone, definition),
 					time.timeZone.timeZone,
+					definition,
 				).getTime() !== time.start.getTime()
 			) {
 				return invalid(MESSAGES.UNREPRESENTABLE_START);
 			}
 			if (
 				resolveLocalDateTimeInTimeZone(
-					projectInstantInTimeZone(time.end, time.timeZone.timeZone),
+					projectInstantInTimeZone(time.end, time.timeZone.timeZone, definition),
 					time.timeZone.timeZone,
+					definition,
 				).getTime() !== time.end.getTime()
 			) {
 				return invalid(MESSAGES.UNREPRESENTABLE_END);
@@ -729,6 +737,7 @@ async function createBranch(
 	uidFactory: CalendarEventUidGenerator,
 	alarmUidFactory: CalendarAlarmUidGenerator,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
+	governingDefinition?: ICalendarComponent,
 ): Promise<CalendarEventUpsertResult> {
 	const prepared = await prepareCalendarEventCreate(
 		createInput(input, uid),
@@ -736,6 +745,7 @@ async function createBranch(
 		timeZoneContext,
 		() => generatedUid(uidFactory),
 		alarmUidFactory,
+		governingDefinition,
 	);
 	let mutation;
 	try {
@@ -749,25 +759,13 @@ async function createBranch(
 		return mapConflict(error, false);
 	}
 
-	let resourceUrl = mutation.resourceUrl;
-	let etag = mutation.etag;
-	if (etag === undefined) {
-		try {
-			const metadata = await getCalendarEventMutationEtag(
-				transport,
-				input.calendarUrl,
-				resourceUrl,
-			);
-			resourceUrl = metadata.resourceUrl;
-			etag = metadata.etag;
-		} catch (error) {
-			throw new CalDavCalendarEventCreateError(
-				CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED,
-				statusCode(error),
-			);
-		}
-	}
-	const event = Object.freeze({ ...prepared.event, resourceUrl, etag });
+	const event = await confirmStructuredCalendarEventCreate(
+		transport,
+		input.calendarUrl,
+		mutation.resourceUrl,
+		prepared,
+		timeZoneContext,
+	);
 	return Object.freeze({ action: 'create', event });
 }
 
@@ -908,7 +906,10 @@ export async function upsertCalendarEvent(
 	) {
 		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
 	}
-	const snapshot = snapshotInput(input as StructuredCalendarEventUpsertInput);
+	const snapshot = snapshotInput(
+		input as StructuredCalendarEventUpsertInput,
+		dependencies.governingTimeZoneDefinition,
+	);
 	const timeZoneContext = calendarEventTimeZoneExecutionContext(transport);
 	const suppliedUid = snapshot.uid;
 	if (suppliedUid === undefined) {
@@ -920,15 +921,18 @@ export async function upsertCalendarEvent(
 			dependencies.uidFactory,
 			dependencies.alarmUidFactory ?? randomUUID,
 			timeZoneContext,
+			dependencies.governingTimeZoneDefinition,
 		);
 	}
 
 	let current;
 	try {
-		current = await resolveCalendarEventByUid(transport, snapshot.calendarUrl, suppliedUid, {
-			allowMissingEtag: true,
-			...(timeZoneContext === undefined ? {} : { timeZoneContext }),
-		});
+		current =
+			dependencies.preResolvedCurrent ??
+			(await resolveCalendarEventByUid(transport, snapshot.calendarUrl, suppliedUid, {
+				allowMissingEtag: true,
+				...(timeZoneContext === undefined ? {} : { timeZoneContext }),
+			}));
 	} catch (error) {
 		if (
 			error instanceof CalDavCalendarEventUidResolutionError &&
@@ -942,6 +946,7 @@ export async function upsertCalendarEvent(
 				dependencies.uidFactory,
 				dependencies.alarmUidFactory ?? randomUUID,
 				timeZoneContext,
+				dependencies.governingTimeZoneDefinition,
 			);
 		}
 		throw error;

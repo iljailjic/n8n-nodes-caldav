@@ -94,16 +94,30 @@ function referenceDefinition(
 	return definitions[0]!;
 }
 
+export async function resolveVerifiedCalendarEventTimeZoneDefinition(
+	context: CalendarEventTimeZoneExecutionContext | undefined,
+	calendarUrl: AbsoluteHttpUrl,
+	timeZone: IanaTimeZoneId,
+): Promise<ICalendarComponent | undefined> {
+	if (context === undefined) return undefined;
+	try {
+		return referenceDefinition(await context.resolveReference(calendarUrl, timeZone), timeZone);
+	} catch {
+		return undefined;
+	}
+}
+
 async function verifiedReference(
 	input: CalendarEventTimeZoneAuthoringInput,
 ): Promise<CalendarEventTimeZoneAuthoringRules | undefined> {
 	if (input.referenceContext === undefined) return undefined;
 	try {
-		const reference = await input.referenceContext.resolveReference(
+		const definition = await resolveVerifiedCalendarEventTimeZoneDefinition(
+			input.referenceContext,
 			input.calendarUrl,
 			input.timeZone,
 		);
-		const definition = referenceDefinition(reference, input.timeZone);
+		if (definition === undefined) return undefined;
 		if (input.coverage.kind === 'finite') {
 			assertVTimeZoneCovers(definition, input.timeZone, input.coverage.interval);
 		}

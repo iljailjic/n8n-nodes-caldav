@@ -381,7 +381,11 @@ describe('CalDAV timed event timezone normalization and errors', () => {
 			const error = await captureError(context([parameters(overrides)]));
 			expect(error.message).toBe(message);
 			expect(error.context.itemIndex).toBe(0);
-			expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
+			if (_label.startsWith('second overlap')) {
+				expect(mocks.createN8nCalDavTransport).toHaveBeenCalledOnce();
+			} else {
+				expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
+			}
 			expect(mocks.createCalendarEvent).not.toHaveBeenCalled();
 			expect(String(error)).not.toMatch(/Private\/Account-42|2040-10-28|Europe\/Prague|Etc\/UTC/);
 		},

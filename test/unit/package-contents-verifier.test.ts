@@ -41,6 +41,9 @@ const expectedPackageFiles = [
 	'dist/nodes/CalDav/events/create.d.ts',
 	'dist/nodes/CalDav/events/create.js',
 	'dist/nodes/CalDav/events/create.js.map',
+	'dist/nodes/CalDav/events/createConfirmation.d.ts',
+	'dist/nodes/CalDav/events/createConfirmation.js',
+	'dist/nodes/CalDav/events/createConfirmation.js.map',
 	'dist/nodes/CalDav/events/createErrors.d.ts',
 	'dist/nodes/CalDav/events/createErrors.js',
 	'dist/nodes/CalDav/events/createErrors.js.map',
@@ -163,6 +166,9 @@ const createArtifactPaths = [
 	'dist/nodes/CalDav/events/create.d.ts',
 	'dist/nodes/CalDav/events/create.js',
 	'dist/nodes/CalDav/events/create.js.map',
+	'dist/nodes/CalDav/events/createConfirmation.d.ts',
+	'dist/nodes/CalDav/events/createConfirmation.js',
+	'dist/nodes/CalDav/events/createConfirmation.js.map',
 ] as const;
 
 const uidArtifactPaths = [
@@ -250,13 +256,13 @@ describe('package contents verifier', () => {
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 
-		expect(expectedPackageFiles).toHaveLength(142);
+		expect(expectedPackageFiles).toHaveLength(145);
 		expect(expectedPackageFiles.filter((path) => path.includes('/icalendar/alarms.'))).toEqual(
 			alarmArtifactPaths,
 		);
-		expect(expectedPackageFiles.filter((path) => path.includes('/events/create.'))).toEqual(
-			createArtifactPaths,
-		);
+		expect(
+			expectedPackageFiles.filter((path) => /\/events\/create(?:\.|Confirmation\.)/u.test(path)),
+		).toEqual(createArtifactPaths);
 		expect(expectedPackageFiles.filter((path) => path.includes('/events/uid.'))).toEqual(
 			uidArtifactPaths,
 		);

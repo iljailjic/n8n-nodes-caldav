@@ -371,7 +371,7 @@ describe('calendar event Update coordinator requests and authoritative result', 
 		);
 	});
 
-	it('resolves an explicit canonical IANA target instead of reusing its source alias definition', async () => {
+	it('preserves a source TZID alias and definition for an explicit equivalent IANA target', async () => {
 		const aliased = SUPPORTED_EMBEDDED_IANA_EVENT.replaceAll('Europe/Prague', 'US/Eastern');
 		const canonicalReference = SUPPORTED_EMBEDDED_IANA_EVENT.replaceAll(
 			'Europe/Prague',
@@ -402,6 +402,7 @@ describe('calendar event Update coordinator requests and authoritative result', 
 			updateCalendarEvent(
 				TRANSPORT,
 				resourceInput({
+					summary: { kind: 'set', value: 'Metadata changed' },
 					timeZone: {
 						kind: 'set',
 						value: { timeZoneMode: 'iana', timeZone: 'America/New_York' },
@@ -417,19 +418,13 @@ describe('calendar event Update coordinator requests and authoritative result', 
 			timeZone: 'America/New_York',
 		});
 		const explicit = mocks.updateCalendarEventResource.mock.calls[0]![3] as string;
-		expect(explicit).toContain(
-			'DTSTART;TZID=America/New_York:20400715T100000\r\nDTEND;TZID=America/New_York:20400715T110000',
-		);
-		expect(explicit).not.toContain('DTSTART;TZID=US/Eastern:');
-		expect(explicit).not.toContain('DTEND;TZID=US/Eastern:');
-		expect(resolveReference).toHaveBeenCalledOnce();
-		expect(resolveReference).toHaveBeenCalledWith(CALENDAR_URL, 'America/New_York');
+		expect(explicit).toContain('DTSTART;TZID=US/Eastern:');
+		expect(explicit).toContain('DTEND;TZID=US/Eastern:');
+		expect(explicit).toContain('TZID:US/Eastern');
+		expect(resolveReference).not.toHaveBeenCalled();
 		expect(mocks.updateCalendarEventResource).toHaveBeenCalledOnce();
 		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledTimes(2);
 		expect(mocks.getCalendarEventByResourceUrl.mock.invocationCallOrder[0]).toBeLessThan(
-			resolveReference.mock.invocationCallOrder[0]!,
-		);
-		expect(resolveReference.mock.invocationCallOrder[0]).toBeLessThan(
 			mocks.updateCalendarEventResource.mock.invocationCallOrder[0]!,
 		);
 		expect(mocks.updateCalendarEventResource.mock.invocationCallOrder[0]).toBeLessThan(
@@ -885,7 +880,7 @@ describe('calendar event Update coordinator requests and authoritative result', 
 		expect(confirmed.calendarData).toContain('BEGIN:VALARM');
 	});
 
-	it('returns the authoritative safe read-only projection after a successful PUT and GET', async () => {
+	it('fails confirmation when post-PUT read-back is unsupported', async () => {
 		const patch: CalendarEventPatch = { summary: { kind: 'set', value: 'After update' } };
 		const current = readResult(calendarData(), { etag: '"snapshot"' });
 		const confirmed = updatedRead(current, patch, { etag: '"authoritative"' });
@@ -912,7 +907,7 @@ describe('calendar event Update coordinator requests and authoritative result', 
 
 		await expect(
 			updateCalendarEvent(TRANSPORT, resourceInput(patch), () => CLOCK),
-		).resolves.toEqual({ ...readOnlyConfirmed.event, rawIcs: readOnlyConfirmed.rawIcs });
+		).rejects.toMatchObject({ code: CalendarEventUpdateFailureCode.CONFIRMATION_FAILED });
 		expect(mocks.updateCalendarEventResource).toHaveBeenCalledTimes(1);
 		expect(mocks.getCalendarEventByResourceUrl).toHaveBeenCalledTimes(2);
 	});

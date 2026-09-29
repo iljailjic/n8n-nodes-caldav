@@ -1,8 +1,8 @@
 # Version 1.0.0 MVP
 
 Version 1.0.0 will provide a useful, general-purpose CalDAV node rather than a
-single-workflow integration. iCloud is the first supported and fully tested
-provider, while the public model remains standards-based.
+single-workflow integration. iCloud is the first interoperability target, with
+coverage established per capability; the public model remains standards-based.
 
 ## Required capabilities
 
@@ -53,6 +53,21 @@ Unbounded IANA recurrence authoring requires a verified server reference.
 Reads prefer a referenced event's embedded `VTIMEZONE` rules and return
 unsupported time representations through a read-only event model.
 
+Embedded IANA definitions treat equivalent duplicate historical transition
+occurrences as one occurrence, apply UTC `UNTIL` inclusively, and retain the
+last included transition's offset afterward. Metadata-only structured Update
+and Upsert preserve event bounds and the source `TZID`; semantic no-ops avoid
+writing, and a successful mutation requires strict authoritative read-back
+confirmation. These are provider-neutral guarantees. Radicale coverage is
+local integration evidence and does not claim live iCloud confirmation.
+Structured Create and Upsert-create interpret local input with a verified
+governing definition when available and return the event only after a GET
+confirms the created UID, resource URL, ETag, editable time mode, and bounds.
+Live provider behavior for the historical Lord Howe, Apia, and Casablanca
+definitions remains unresolved and is tracked in
+[#162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162); synthetic
+fixtures do not count as live validation.
+
 - Summary, description, location, and URL.
 - Categories, status, and transparency.
 - Reminders, including multiple alarms and supported display, audio, or email
@@ -77,7 +92,8 @@ read-only for structured Update.
   not intentionally replace them.
 - Validate interoperability with iCloud, including discovery redirects,
   partition hosts, event CRUD, recurrence, alarms, all-day events, and time
-  zones.
+  zones through the opt-in live suite; local Radicale or synthetic coverage
+  does not by itself confirm live iCloud behavior.
 
 ### Quality gates
 

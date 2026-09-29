@@ -5,6 +5,10 @@ documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Clarify IANA `VTIMEZONE` transition handling for equivalent duplicate historical occurrences, inclusive UTC `UNTIL` cutoffs, and terminal offsets. Metadata-only structured Update and Upsert preserve IANA time bounds and source `TZID` definitions; semantic no-ops avoid writes. Structured Create and Upsert-create return the event only after authoritative GET confirmation, using a verified governing definition for IANA local input when available. Lord Howe, Apia, and Casablanca provider-history behavior remains unresolved in [#162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162); local Radicale and synthetic coverage do not imply live iCloud validation.
+
 ## [1.0.0-beta.4] - 2026-09-26
 
 ### Changed

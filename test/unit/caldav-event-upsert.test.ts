@@ -265,9 +265,14 @@ describe('calendar-event Upsert public contract', () => {
 });
 
 describe('calendar-event Upsert deterministic selection and provenance', () => {
-	it('generates one omitted UID, skips REPORT, and returns local authored data with the PUT ETag', async () => {
+	it('generates one omitted UID, skips REPORT, and returns authoritative GET data', async () => {
 		const requests = transport(async (request) =>
-			response(201, request.url!, { etag: ' W/"put" ' }),
+			request.method === CalDavMethod.PUT
+				? response(201, request.url!, { etag: ' W/"put" ' })
+				: response(200, request.url!, {
+						etag: '"confirmed"',
+						body: eventIcs(GENERATED_UID),
+					}),
 		);
 		const deps = dependencies();
 		const expectedResourceUrl = new URL(
@@ -277,7 +282,7 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 
 		const result = await upsertCalendarEvent(requests, omittedUidInput(), deps);
 
-		expect(methods(requests)).toEqual(['PUT']);
+		expect(methods(requests)).toEqual(['PUT', 'GET']);
 		expect(requests.request.mock.calls[0]![0]).toMatchObject({
 			method: CalDavMethod.PUT,
 			url: expectedResourceUrl,
@@ -291,7 +296,7 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 			event: {
 				calendarUrl: CALENDAR_URL,
 				resourceUrl: expectedResourceUrl,
-				etag: ' W/"put" ',
+				etag: '"confirmed"',
 				uid: GENERATED_UID,
 				summary: 'Desired summary',
 				timeMode: 'timed',
@@ -312,13 +317,16 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 			if (request.method === CalDavMethod.REPORT) {
 				return response(207, CALENDAR_URL, { body: multistatus() });
 			}
-			return response(201, request.url!, { etag: '"created"' });
+			return response(request.method === CalDavMethod.PUT ? 201 : 200, request.url!, {
+				etag: '"created"',
+				body: eventIcs(SUPPLIED_UID),
+			});
 		});
 		const deps = dependencies();
 
 		const result = await upsertCalendarEvent(requests, timedInput(), deps);
 
-		expect(methods(requests)).toEqual(['REPORT', 'PUT']);
+		expect(methods(requests)).toEqual(['REPORT', 'PUT', 'GET']);
 		expect(requests.request.mock.calls[0]![0]).toMatchObject({
 			method: CalDavMethod.REPORT,
 			url: CALENDAR_URL,
@@ -615,7 +623,12 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 	});
 
 	it('authors all-day DATE values through the same generated-UID Create branch', async () => {
-		const requests = transport(async (request) => response(201, request.url!, { etag: '"date"' }));
+		const requests = transport(async (request) =>
+			response(request.method === CalDavMethod.PUT ? 201 : 200, request.url!, {
+				etag: '"date"',
+				body: allDayIcs(GENERATED_UID),
+			}),
+		);
 		const deps = dependencies();
 		const allDay = {
 			calendarUrl: CALENDAR_URL,
@@ -627,7 +640,7 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 
 		const result = await upsertCalendarEvent(requests, allDay, deps);
 
-		expect(methods(requests)).toEqual(['PUT']);
+		expect(methods(requests)).toEqual(['PUT', 'GET']);
 		const body = requests.request.mock.calls[0]![0].body as string;
 		expect(body).toContain('DTSTART;VALUE=DATE:20400228');
 		expect(body).toContain('DTEND;VALUE=DATE:20400301');
@@ -645,7 +658,14 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 	});
 
 	it('uses the execution-scoped reference-first IANA authoring context', async () => {
-		const requests = transport(async (request) => response(201, request.url!, { etag: '"iana"' }));
+		let submitted = '';
+		const requests = transport(async (request) => {
+			if (request.method === CalDavMethod.PUT) {
+				submitted = request.body!;
+				return response(201, request.url!, { etag: '"iana"' });
+			}
+			return response(200, request.url!, { etag: '"confirmed"', body: submitted });
+		});
 		const timeZone = canonicalizeIanaTimeZone('Europe/Prague');
 		const resolveReference = vi.fn().mockResolvedValue({
 			timeZone,
@@ -662,7 +682,7 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 			deps,
 		);
 
-		expect(resolveReference).toHaveBeenCalledOnce();
+		expect(resolveReference).toHaveBeenCalledTimes(2);
 		expect(resolveReference).toHaveBeenCalledWith(CALENDAR_URL, timeZone);
 		expect(resolveReference.mock.invocationCallOrder[0]).toBeLessThan(
 			deps.uidFactory.mock.invocationCallOrder[0]!,
@@ -949,7 +969,7 @@ describe('calendar-event Upsert races, strict preconditions, and partial success
 		expect(JSON.stringify(error)).not.toContain('private');
 	});
 
-	it('reports Create partial success only after PUT succeeded without ETag and metadata GET failed', async () => {
+	it('reports Create partial success when authoritative GET fails after PUT', async () => {
 		const requests = transport(async (request) => {
 			if (request.method === CalDavMethod.PUT) {
 				return response(201, request.url!, { includeEtag: false });
@@ -961,7 +981,7 @@ describe('calendar-event Upsert races, strict preconditions, and partial success
 		);
 
 		expect(error).toMatchObject({
-			message: 'The event was created, but its required ETag could not be retrieved.',
+			message: 'The event was created, but its current state could not be verified.',
 			statusCode: 404,
 		});
 		expect(methods(requests)).toEqual(['PUT', 'GET']);

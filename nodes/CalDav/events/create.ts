@@ -8,6 +8,7 @@ import type {
 } from '../icalendar/eventReadModel';
 import { mapCalendarEventResource } from '../icalendar/eventReadModel';
 import type { CalendarEventTimeZone } from '../icalendar/timeZones';
+import type { ICalendarComponent } from '../icalendar/parser';
 import type { CalendarEventTimeZoneExecutionContext } from '../discovery/timeZoneReferences';
 import type { CalendarAlarmInput } from '../icalendar/alarms';
 import type { RecurrenceRule } from '../icalendar/recurrence';
@@ -15,6 +16,7 @@ import { CalDavTransportError } from '../transport/http';
 import type { CalDavTransport } from '../transport/http';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
+import { confirmStructuredCalendarEventCreate } from './createConfirmation';
 import { calendarEventResourceUrlForUid, prepareCalendarEventCreate } from './createPreparation';
 import { createCalendarEventResource, getCalendarEventMutationEtag } from './mutations';
 import {
@@ -138,13 +140,21 @@ export async function createCalendarEvent(
 	input: CalendarEventCreateInput,
 	clock: CalendarEventCreateClock,
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
+	governingDefinition?: ICalendarComponent,
 ): Promise<CreatedCalendarEvent> {
 	assertCreateInputMode(input);
 	if (input.inputMode === 'rawIcs') {
 		const prepared = prepareRawCalendarEventWrite({ operation: 'create', rawIcs: input.rawIcs });
 		return await createPreparedRawCalendarEvent(transport, input.calendarUrl, prepared);
 	}
-	const prepared = await prepareCalendarEventCreate(input, clock, timeZoneContext);
+	const prepared = await prepareCalendarEventCreate(
+		input,
+		clock,
+		timeZoneContext,
+		undefined,
+		undefined,
+		governingDefinition,
+	);
 	const created = await createCalendarEventResource(
 		transport,
 		input.calendarUrl,
@@ -152,23 +162,11 @@ export async function createCalendarEvent(
 		prepared.calendarData,
 	);
 
-	let resourceUrl = created.resourceUrl;
-	let etag = created.etag;
-	if (etag === undefined) {
-		try {
-			const metadata = await getCalendarEventMutationEtag(
-				transport,
-				input.calendarUrl,
-				resourceUrl,
-			);
-			resourceUrl = metadata.resourceUrl;
-			etag = metadata.etag;
-		} catch (error) {
-			throw new CalDavCalendarEventCreateError(
-				CalendarEventCreateFailureCode.ETAG_RETRIEVAL_FAILED,
-				safeStatusCode(error),
-			);
-		}
-	}
-	return Object.freeze({ ...prepared.event, resourceUrl, etag });
+	return await confirmStructuredCalendarEventCreate(
+		transport,
+		input.calendarUrl,
+		created.resourceUrl,
+		prepared,
+		timeZoneContext,
+	);
 }

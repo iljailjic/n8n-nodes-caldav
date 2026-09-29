@@ -437,14 +437,6 @@ describe('RFC 7809 capability and RFC 7808 TZDIST resolution', () => {
 				'RRULE:FREQ=YEARLY;FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU',
 			),
 		],
-		[
-			'insufficient non-recurring transition coverage',
-			{ 'content-type': 'text/calendar', etag: '"strong"' },
-			TZDIST_ZONE_RESPONSE.replace('RDATE:20401028T030000\r\n', '').replace(
-				'RDATE:20410331T020000\r\n',
-				'',
-			),
-		],
 	] as const)('rejects %s as an invalid TZDIST zone response', async (_label, headers, body) => {
 		const transport = transportForServices(['https://tzdist.example.test/']);
 		const request = vi
@@ -459,6 +451,25 @@ describe('RFC 7809 capability and RFC 7808 TZDIST resolution', () => {
 			context(transport, request).resolveReference(CALENDAR_URL, 'Europe/Prague'),
 		);
 		expect(error.code).toBe(TimeZoneReferenceFailureCode.INVALID_RESPONSE);
+	});
+
+	it('accepts a valid finite historical TZDIST definition with a terminal offset', async () => {
+		const transport = transportForServices(['https://tzdist.example.test/']);
+		const finite = TZDIST_ZONE_RESPONSE.replace('RDATE:20401028T030000\r\n', '').replace(
+			'RDATE:20410331T020000\r\n',
+			'',
+		);
+		const request = vi
+			.fn()
+			.mockResolvedValueOnce(
+				response(200, TZDIST_CAPABILITIES, { 'content-type': 'application/json' }),
+			)
+			.mockResolvedValueOnce(
+				response(200, finite, { 'content-type': 'text/calendar', etag: '"strong"' }),
+			) as unknown as TimeZoneDistributionRequest;
+		await expect(
+			context(transport, request).resolveReference(CALENDAR_URL, 'Europe/Prague'),
+		).resolves.toMatchObject({ etag: '"strong"', calendarData: finite });
 	});
 
 	it('never forwards CalDAV authentication, cookies, or credential-derived headers to TZDIST', async () => {

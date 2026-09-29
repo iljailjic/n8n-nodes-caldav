@@ -28,7 +28,10 @@ import { projectInstantInTimeZone } from '../icalendar/timeZones';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import type { CalendarEventCreateClock, StructuredCalendarEventCreateInput } from './create';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
-import { resolveCalendarEventTimeZoneAuthoring } from './timeZoneAuthoring';
+import {
+	CalDavCalendarEventTimeZoneAuthoringError,
+	resolveCalendarEventTimeZoneAuthoring,
+} from './timeZoneAuthoring';
 import type { CalendarEventTimeZoneAuthoringCoverage } from './timeZoneAuthoring';
 import { resolveCalendarEventUid } from './uid';
 import type { CalendarEventUidGenerator } from './uid';
@@ -101,13 +104,18 @@ export interface PreparedCalendarEventCreate {
 	readonly event: CalendarEvent;
 	readonly resourceUrl: AbsoluteHttpUrl;
 	readonly uid: string;
+	readonly timeZoneDefinition?: ICalendarComponent;
+	readonly timeZoneCoverage?: CalendarEventTimeZoneAuthoringCoverage;
 }
 
 function utcString(value: Date): UtcDateTimeString {
 	return value.toISOString().replace('.000Z', 'Z') as UtcDateTimeString;
 }
 
-function recurrenceStartContext(input: StructuredCalendarEventCreateInput): RecurrenceStartContext {
+function recurrenceStartContext(
+	input: StructuredCalendarEventCreateInput,
+	definition?: ICalendarComponent,
+): RecurrenceStartContext {
 	if (input.timeMode === 'allDay') {
 		return { timeMode: 'allDay', startDate: input.startDate as CalendarDateString };
 	}
@@ -119,7 +127,7 @@ function recurrenceStartContext(input: StructuredCalendarEventCreateInput): Recu
 		timeMode: 'timed',
 		timeZoneMode: 'iana',
 		start: utcString(input.start),
-		startLocal: projectInstantInTimeZone(input.start, timeZone.timeZone),
+		startLocal: projectInstantInTimeZone(input.start, timeZone.timeZone, definition),
 	};
 }
 
@@ -158,30 +166,36 @@ export async function prepareCalendarEventCreate(
 	timeZoneContext?: CalendarEventTimeZoneExecutionContext,
 	uidGenerator?: CalendarEventUidGenerator,
 	alarmUidGenerator: CalendarAlarmUidGenerator = randomUUID,
+	governingDefinition?: ICalendarComponent,
 ): Promise<PreparedCalendarEventCreate> {
-	const recurrenceStart = recurrenceStartContext(input);
+	const recurrenceStart = recurrenceStartContext(input, governingDefinition);
 	const recurrence = normalizedRecurrence(input, recurrenceStart);
 	const timeZone =
 		input.timeMode === 'timed'
 			? (input.timeZone ?? { timeZoneMode: 'utc' as const })
 			: ({ timeZoneMode: 'utc' } as const);
 	let timeZoneDefinition: ICalendarComponent | undefined;
+	let timeZoneCoverage: CalendarEventTimeZoneAuthoringCoverage | undefined;
 	let embeddedTimeZoneDefinition: ICalendarComponent | undefined;
 	let projectInstant: CalendarEventInstantProjector | undefined;
 	if (timeZone.timeZoneMode === 'iana') {
 		if (input.timeMode !== 'timed') {
 			throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
 		}
+		timeZoneCoverage = ianaCoverage(
+			input,
+			recurrence,
+			recurrenceStart as Extract<RecurrenceStartContext, { readonly timeZoneMode: 'iana' }>,
+		);
 		const selection = await resolveCalendarEventTimeZoneAuthoring({
 			calendarUrl: input.calendarUrl,
 			timeZone: timeZone.timeZone,
-			coverage: ianaCoverage(
-				input,
-				recurrence,
-				recurrenceStart as Extract<RecurrenceStartContext, { readonly timeZoneMode: 'iana' }>,
-			),
+			coverage: timeZoneCoverage,
 			...(timeZoneContext === undefined ? {} : { referenceContext: timeZoneContext }),
 		});
+		if (governingDefinition !== undefined && selection.source !== 'reference') {
+			throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
+		}
 		timeZoneDefinition = selection.definition;
 		if (selection.embed) embeddedTimeZoneDefinition = selection.definition;
 		const definition = timeZoneDefinition;
@@ -251,5 +265,12 @@ export async function prepareCalendarEventCreate(
 	) {
 		throw new CalDavCalendarEventCreateError(CalendarEventCreateFailureCode.NORMALIZATION_FAILED);
 	}
-	return Object.freeze({ calendarData, event, resourceUrl, uid });
+	return Object.freeze({
+		calendarData,
+		event,
+		resourceUrl,
+		uid,
+		timeZoneDefinition,
+		timeZoneCoverage,
+	});
 }

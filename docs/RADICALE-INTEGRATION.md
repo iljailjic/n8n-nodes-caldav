@@ -9,7 +9,13 @@ inventory and its source paths.
 
 This matrix proves behavior against a local, standards-oriented Radicale
 service plus synthetic and unit oracles. It does not claim universal CalDAV
-provider compatibility and does not include live iCloud coverage.
+provider compatibility and does not include live iCloud coverage. The IANA
+transition and metadata-only preservation guarantees documented in the
+[workflow contract](CONTRACT.md) have deterministic unit coverage; this matrix
+does not claim that those cases were exercised against live Radicale or iCloud.
+The synthetic cases for Lord Howe, Apia, and Casablanca also do not resolve
+provider-history behavior; that limitation is tracked in
+[#162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162).
 
 ## Run the matrix
 

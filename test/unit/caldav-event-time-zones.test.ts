@@ -30,6 +30,10 @@ import {
 	UNSUPPORTED_UNREFERENCED_VTIMEZONE,
 	timedEventIcs,
 } from './fixtures/time-zones/synthetic-time-zone-fixtures';
+import {
+	ISSUE_157_PROVIDER_CASES,
+	syntheticProviderCalendarData,
+} from './fixtures/time-zones/issue-157-provider-captures';
 
 const encoder = new TextEncoder();
 const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/work/');
@@ -84,6 +88,52 @@ function basicTimedInput(
 }
 
 describe('timed event serialization and projection', () => {
+	it.each(
+		ISSUE_157_PROVIDER_CASES.flatMap((testCase) =>
+			(['radicale', 'icloud'] as const).map((provider) => ({ ...testCase, provider })),
+		),
+	)('projects synthetic $provider expanded history for $name from its stored rules', (testCase) => {
+		const source = syntheticProviderCalendarData(testCase, testCase.provider);
+		const icloudObservances: Readonly<Record<string, number>> = {
+			'01': 17,
+			'02': 19,
+			'03': 14,
+			'04': 10,
+			'05': 2,
+			'06': 5,
+			'07': 7,
+			'08': 10,
+			'10': 17,
+		};
+		expect(source.match(/BEGIN:(?:STANDARD|DAYLIGHT)/gu)).toHaveLength(
+			testCase.provider === 'icloud'
+				? icloudObservances[testCase.id]
+				: testCase.id === '05' || testCase.id === '06' || testCase.id === '07'
+					? 1
+					: 3,
+		);
+		const event = map(source);
+		const expectedStart =
+			testCase.expectedByProvider?.[testCase.provider] ?? testCase.expectedStart;
+		const expectedEnd = new Date(Date.parse(expectedStart) + 15 * 60_000)
+			.toISOString()
+			.replace('.000Z', 'Z');
+		expect(event).toMatchObject({
+			accessMode: 'editable',
+			timeZoneMode: 'iana',
+			timeZone: testCase.zone,
+			start: expectedStart,
+			end: expectedEnd,
+		});
+		expect(event.end).not.toBe(event.start);
+		if (testCase.zone === 'Pacific/Apia' && testCase.provider === 'icloud') {
+			expect(event.start).not.toBe('2026-10-05T20:20:00Z');
+		}
+		if (testCase.zone === 'Africa/Casablanca') {
+			expect(event.start).not.toBe('2026-10-06T09:20:00Z');
+		}
+	});
+
 	it('keeps serializeBasicUtcEvent compatible and emits the exact UTC wire form', () => {
 		const legacy = serializeBasicUtcEvent(basicTimedInput());
 		const timed = serializeBasicTimedEvent(basicTimedInput());
@@ -240,8 +290,90 @@ describe('safe unsupported and hard-failure boundaries', () => {
 		expect(event).toMatchObject({ accessMode: 'editable', timeZoneMode: 'iana' });
 	});
 
+	it('accepts inclusive UTC UNTIL at a transition instant and finite terminal offsets', () => {
+		const definition = RECURRING_PRAGUE_VTIMEZONE.replace(
+			'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU',
+			'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;UNTIL=20401028T000000Z',
+		).replace(
+			'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU',
+			'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU;UNTIL=20410331T000000Z',
+		);
+		const event = map(
+			timedEventIcs(
+				'DTSTART;TZID=Europe/Prague:20400715T100000',
+				'DTEND;TZID=Europe/Prague:20400715T110000',
+				[definition],
+			),
+		);
+		expect(event).toMatchObject({ accessMode: 'editable', timeZoneMode: 'iana' });
+		const parsed = parse(
+			timedEventIcs(
+				'DTSTART;TZID=Europe/Prague:20400715T100000',
+				'DTEND;TZID=Europe/Prague:20400715T110000',
+				[definition],
+			),
+		);
+		const embedded = parsed.calendar.entries.find(
+			(entry) => entry.kind === 'component' && entry.name === 'VTIMEZONE',
+		);
+		expect(embedded).toBeDefined();
+		const zone = canonicalizeIanaTimeZone('Europe/Prague');
+		const cutoff = new Date('2040-10-28T00:00:00Z');
+		expect(projectInstantInTimeZone(cutoff, zone, embedded!)).toBe('2040-10-28T02:00:00');
+		const beforeCutoff = parse(
+			timedEventIcs(
+				'DTSTART;TZID=Europe/Prague:20400715T100000',
+				'DTEND;TZID=Europe/Prague:20400715T110000',
+				[definition.replace('UNTIL=20401028T000000Z', 'UNTIL=20401027T235959Z')],
+			),
+		).calendar.entries.find((entry) => entry.kind === 'component' && entry.name === 'VTIMEZONE');
+		expect(projectInstantInTimeZone(cutoff, zone, beforeCutoff!)).toBe('2040-10-28T03:00:00');
+	});
+
+	it('projects a later event through a finite Kathmandu terminal offset', () => {
+		const definition = [
+			'BEGIN:VTIMEZONE',
+			'TZID:Asia/Kathmandu',
+			'BEGIN:STANDARD',
+			'DTSTART:19860101T000000',
+			'TZOFFSETFROM:+0530',
+			'TZOFFSETTO:+0545',
+			'END:STANDARD',
+			'END:VTIMEZONE',
+		].join('\r\n');
+		const event = map(
+			timedEventIcs(
+				'DTSTART;TZID=Asia/Kathmandu:20400115T100000',
+				'DTEND;TZID=Asia/Kathmandu:20400115T110000',
+				[definition],
+			),
+		);
+		expect(event).toMatchObject({
+			accessMode: 'editable',
+			timeZone: 'Asia/Kathmandu',
+			start: '2040-01-15T04:15:00Z',
+			end: '2040-01-15T05:15:00Z',
+		});
+	});
+
+	it('collapses equivalent duplicate transition dates without changing the source definition', () => {
+		const definition = PRAGUE_VTIMEZONE.replace(
+			'RDATE:20401028T030000',
+			'RDATE:20401028T030000,20401028T030000',
+		);
+		const source = timedEventIcs(
+			'DTSTART;TZID=Europe/Prague:20400715T100000',
+			'DTEND;TZID=Europe/Prague:20400715T110000',
+			[definition],
+		);
+		expect(map(source)).toMatchObject({ accessMode: 'editable', timeZoneMode: 'iana' });
+		expect(serializeICalendarResource(parse(source))).toContain(
+			'RDATE:20401028T030000,20401028T030000',
+		);
+	});
+
 	it.each([
-		['UNTIL', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;UNTIL=20451231T000000Z'],
+		['malformed UNTIL', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;UNTIL=20451231'],
 		['COUNT', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;COUNT=4'],
 		['duplicate FREQ', 'FREQ=YEARLY;FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU'],
 		['unsupported BYSETPOS', 'FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU;BYSETPOS=1'],
@@ -265,7 +397,7 @@ describe('safe unsupported and hard-failure boundaries', () => {
 		});
 	});
 
-	it('maps a finite VTIMEZONE without sufficient future coverage to read-only', () => {
+	it('uses the terminal historical offset after a finite VTIMEZONE ends', () => {
 		const definition = PRAGUE_VTIMEZONE.replace('RDATE:20410331T020000\r\n', '');
 		const event = map(
 			timedEventIcs(
@@ -274,7 +406,7 @@ describe('safe unsupported and hard-failure boundaries', () => {
 				[definition],
 			),
 		);
-		expect(event).toMatchObject({ timeMode: 'unsupported', accessMode: 'readOnly' });
+		expect(event).toMatchObject({ timeMode: 'timed', accessMode: 'editable' });
 	});
 
 	it.each([
