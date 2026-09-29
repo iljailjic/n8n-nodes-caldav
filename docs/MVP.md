@@ -48,10 +48,14 @@ IANA identifiers use the checked-in TZDB 2026c Zone/Link oracle. Create and
 timezone-changing Update operations use canonical identifiers and prefer the
 server-by-reference flow from RFC 7809 and RFC 7808. When a safe reference is
 unavailable for a finite event, they embed a minimal finite `VTIMEZONE`
-generated from runtime `Intl` rules and prove coverage before mutation.
-Unbounded IANA recurrence authoring requires a verified server reference.
-Reads prefer a referenced event's embedded `VTIMEZONE` rules and return
-unsupported time representations through a read-only event model.
+generated from bundled, pinned TZDB 2026c rules and prove coverage before
+mutation. This fallback is independent of the host's `Intl`/OS time-zone data.
+The rules engine and data are bundled, so fallback conversion and generation
+add no runtime dependency. Unbounded IANA recurrence authoring requires a
+verified server reference. Reads and preservation-first updates prefer the
+event's embedded `VTIMEZONE` rules and return unsupported time representations
+through a read-only event model. Generation remains finite and subject to the
+repository's iCalendar parser and serializer resource limits.
 
 Embedded IANA definitions treat equivalent duplicate historical transition
 occurrences as one occurrence, apply UTC `UNTIL` inclusively, and retain the
@@ -63,10 +67,20 @@ local integration evidence and does not claim live iCloud confirmation.
 Structured Create and Upsert-create interpret local input with a verified
 governing definition when available and return the event only after a GET
 confirms the created UID, resource URL, ETag, editable time mode, and bounds.
-Live provider behavior for the historical Lord Howe, Apia, and Casablanca
-definitions remains unresolved and is tracked in
-[#162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162); synthetic
-fixtures do not count as live validation.
+All-day Create ignores stale hidden time-zone values and serializes only the
+date fields.
+Structured IANA authoring rejects `Australia/Lord_Howe`, `Pacific/Apia`, and
+`Africa/Casablanca` for every provider. The selector omits these canonical
+options and runtime validation rejects aliases and case variants that resolve
+to them before a PUT. Existing events in those zones remain readable, and
+metadata-only structured updates remain possible when time bounds and zone
+are unchanged. Raw ICS follows its independent input contract. The current
+diagnostic matrix has 16 cases per provider: 11 positive full-round-trip
+cases, including Kathmandu and Kolkata, plus five typed negative pre-PUT
+cases; fixed time-zone oracles remain unchanged. These counts do not claim the
+final live validation gate has passed. Historical iCloud observations are
+tracked in [#162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162),
+which does not waive the provider-neutral restriction.
 
 - Summary, description, location, and URL.
 - Categories, status, and transparency.

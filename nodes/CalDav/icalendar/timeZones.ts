@@ -4,8 +4,17 @@ import {
 	ICALENDAR_MAX_RESOURCE_BYTES,
 } from './parser';
 import type { ICalendarComponent, ICalendarProperty, ICalendarValue } from './parser';
+import { TzDatabase } from 'timezonecomplete';
+import tzdata from 'tzdata/timezone-data.json';
 
 export const IANA_TIME_ZONE_DATABASE_VERSION = '2026c' as const;
+
+// Initialize explicitly: timezonecomplete's own dependency can contain an older TZDB.
+if (tzdata.version !== IANA_TIME_ZONE_DATABASE_VERSION) {
+	throw new Error('The bundled IANA time-zone database version is unsupported.');
+}
+TzDatabase.init(tzdata);
+const PINNED_TZDB = TzDatabase.instance();
 
 export const CalDavIanaTimeZoneErrorCode = Object.freeze({
 	INVALID_TIME_ZONE: 'INVALID_TIME_ZONE',
@@ -730,12 +739,7 @@ function resolvePrimaryName(input: string): string | undefined {
 }
 
 function runtimeRecognizesTimeZone(timeZone: string): boolean {
-	try {
-		new Intl.DateTimeFormat('en-US', { timeZone }).format(0);
-		return true;
-	} catch {
-		return false;
-	}
+	return PINNED_TZDB.exists(timeZone);
 }
 
 export function canonicalizeIanaTimeZone(input: string): IanaTimeZoneId {
@@ -790,52 +794,19 @@ function dateTimestamp(value: Date): number {
 	return timestamp;
 }
 
-function formatter(timeZone: IanaTimeZoneId): Intl.DateTimeFormat {
-	return new Intl.DateTimeFormat('en-US-u-ca-iso8601-nu-latn', {
-		timeZone,
-		calendar: 'iso8601',
-		numberingSystem: 'latn',
-		hourCycle: 'h23',
-		era: 'short',
-		year: 'numeric',
-		month: '2-digit',
-		day: '2-digit',
-		hour: '2-digit',
-		minute: '2-digit',
-		second: '2-digit',
-	});
-}
-
-function projectedPartsWithFormatter(
-	timestamp: number,
-	dateTimeFormatter: Intl.DateTimeFormat,
-): DateParts {
-	const parts = dateTimeFormatter.formatToParts(new Date(timestamp));
-	const values = new Map(parts.map(({ type, value }) => [type, value]));
-	const era = values.get('era');
-	if (era !== undefined && era !== 'AD') return invalidInstant();
-	const result = {
-		year: Number(values.get('year')),
-		month: Number(values.get('month')),
-		day: Number(values.get('day')),
-		hour: Number(values.get('hour')),
-		minute: Number(values.get('minute')),
-		second: Number(values.get('second')),
-	};
-	if (
-		!Number.isInteger(result.year) ||
-		result.year < 1 ||
-		result.year > 9999 ||
-		!validParts(result) ||
-		Math.abs(wallTimestamp(result) - timestamp) > 24 * 60 * 60 * 1_000
-	) {
-		return invalidInstant();
-	}
-	return result;
-}
-
 function projectedParts(timestamp: number, timeZone: IanaTimeZoneId): DateParts {
-	return projectedPartsWithFormatter(timestamp, formatter(timeZone));
+	const offset = offsetAt(timestamp, timeZone);
+	const wall = new Date(timestamp + offset);
+	const result = {
+		year: wall.getUTCFullYear(),
+		month: wall.getUTCMonth() + 1,
+		day: wall.getUTCDate(),
+		hour: wall.getUTCHours(),
+		minute: wall.getUTCMinutes(),
+		second: wall.getUTCSeconds(),
+	};
+	if (!validParts(result)) return invalidInstant();
+	return result;
 }
 
 function pad(value: number, width = 2): string {
@@ -899,7 +870,22 @@ function wallTimestamp(parts: DateParts): number {
 }
 
 function offsetAt(timestamp: number, timeZone: IanaTimeZoneId): number {
-	return wallTimestamp(projectedParts(timestamp, timeZone)) - timestamp;
+	if (!Number.isFinite(timestamp)) return invalidInstant();
+	return pinnedOffsetMilliseconds(PINNED_TZDB.totalOffset(timeZone, timestamp).milliseconds());
+}
+
+function pinnedOffsetMilliseconds(value: number): number {
+	// tzdata stores whole seconds; Duration can expose a floating-point rounding residue.
+	const offset = Math.round(value);
+	if (
+		!Number.isSafeInteger(offset) ||
+		Math.abs(value - offset) > 0.01 ||
+		offset % 1000 !== 0 ||
+		Math.abs(offset) > 24 * 60 * 60 * 1_000
+	) {
+		return invalidInstant();
+	}
+	return offset;
 }
 
 interface GeneratedTransition {
@@ -908,8 +894,50 @@ interface GeneratedTransition {
 	readonly offsetToMilliseconds: number;
 }
 
+function pinnedLocalRules(
+	timeZone: IanaTimeZoneId,
+	parts: DateParts,
+): { readonly offsets: ReadonlySet<number>; readonly transitions: readonly GeneratedTransition[] } {
+	const fromYear = Math.max(1, parts.year - 1);
+	const toYear = Math.min(9999, parts.year + 1);
+	const offsets = new Set<number>();
+	const transitions: GeneratedTransition[] = [];
+	for (const transition of PINNED_TZDB.getTransitionsTotalOffsets(timeZone, fromYear, toYear)) {
+		const nextOffset = offsetAt(transition.at, timeZone);
+		offsets.add(nextOffset);
+		if (transition.at <= utcYearStart(fromYear)) continue;
+		const previousOffset = offsetAt(transition.at - 1000, timeZone);
+		offsets.add(previousOffset);
+		if (nextOffset !== previousOffset) {
+			transitions.push({
+				localMilliseconds: transition.at + previousOffset,
+				offsetFromMilliseconds: previousOffset,
+				offsetToMilliseconds: nextOffset,
+			});
+		}
+	}
+	offsets.add(offsetAt(wallTimestamp(parts), timeZone));
+	return { offsets, transitions };
+}
+
+function matchingPinnedInstants(
+	wall: number,
+	timeZone: IanaTimeZoneId,
+	offsets: ReadonlySet<number>,
+): number[] {
+	return [...offsets]
+		.map((offset) => wall - offset)
+		.filter((candidate) => {
+			const year = new Date(candidate).getUTCFullYear();
+			return year >= 1 && year <= 9999 && offsetAt(candidate, timeZone) === wall - candidate;
+		})
+		.sort((left, right) => left - right);
+}
+
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000;
-const MAX_GENERATION_PROBES = ICALENDAR_MAX_PROPERTIES * 8;
+// Preserve the finite work budget used by the earlier day-probe generator.
+const MAX_GENERATION_DAYS = ICALENDAR_MAX_PROPERTIES * 8;
+const MAX_RULE_COVERAGE_YEARS = Math.floor(MAX_GENERATION_DAYS / 365);
 
 function invalidCoverage(): never {
 	throw new CalDavVTimeZoneGenerationError(CalDavVTimeZoneGenerationErrorCode.INVALID_COVERAGE);
@@ -1014,42 +1042,26 @@ function discoverFiniteTransitions(
 	start: number,
 	end: number,
 ): readonly GeneratedTransition[] {
-	const estimatedProbes = Math.ceil((end - start) / MILLISECONDS_PER_DAY) + 3;
-	if (!Number.isSafeInteger(estimatedProbes) || estimatedProbes > MAX_GENERATION_PROBES) {
-		return unrepresentableTimeZone();
-	}
-	const dateTimeFormatter = formatter(timeZone);
-	const projectedOffset = (timestamp: number): number =>
-		wallTimestamp(projectedPartsWithFormatter(timestamp, dateTimeFormatter)) - timestamp;
 	const transitions: GeneratedTransition[] = [];
-	let previousInstant = start;
-	let previousOffset = projectedOffset(previousInstant);
+	let previousOffset = offsetAt(start, timeZone);
 	transitions.push({
 		localMilliseconds: start + previousOffset,
 		offsetFromMilliseconds: previousOffset,
 		offsetToMilliseconds: previousOffset,
 	});
-	for (let sample = Math.min(start + MILLISECONDS_PER_DAY, end); ;) {
-		const sampleOffset = projectedOffset(sample);
-		if (sampleOffset !== previousOffset) {
-			let lower = previousInstant;
-			let upper = sample;
-			while (upper - lower > 1000) {
-				const midpoint = lower + Math.floor((upper - lower) / 2000) * 1000;
-				if (projectedOffset(midpoint) === previousOffset) lower = midpoint;
-				else upper = midpoint;
-			}
-			const transitionOffset = projectedOffset(upper);
-			transitions.push({
-				localMilliseconds: upper + previousOffset,
-				offsetFromMilliseconds: previousOffset,
-				offsetToMilliseconds: transitionOffset,
-			});
-			previousOffset = transitionOffset;
-		}
-		previousInstant = sample;
-		if (sample === end) break;
-		sample = Math.min(sample + MILLISECONDS_PER_DAY, end);
+	const startYear = new Date(start).getUTCFullYear();
+	const endYear = new Date(end).getUTCFullYear();
+	for (const transition of PINNED_TZDB.getTransitionsTotalOffsets(timeZone, startYear, endYear)) {
+		if (transition.at <= start || transition.at > end) continue;
+		const nextOffset = offsetAt(transition.at, timeZone);
+		if (nextOffset === previousOffset) continue;
+		if (transitions.length >= ICALENDAR_MAX_PROPERTIES) return unrepresentableTimeZone();
+		transitions.push({
+			localMilliseconds: transition.at + previousOffset,
+			offsetFromMilliseconds: previousOffset,
+			offsetToMilliseconds: nextOffset,
+		});
+		previousOffset = nextOffset;
 	}
 	transitions.push({
 		localMilliseconds: end + previousOffset,
@@ -1180,6 +1192,37 @@ export function assertVTimeZoneCovers(
 	}
 }
 
+/** An unchanged provider definition may govern later dates through its terminal offset. */
+export function assertVTimeZoneReadableForInterval(
+	definition: ICalendarComponent,
+	timeZone: IanaTimeZoneId,
+	coverage: FiniteTimeZoneCoverage,
+): void {
+	const snapshot = finiteCoverageTimestamps(coverage);
+	try {
+		const years = boundedDefinitionCoverageYears(
+			[definition],
+			snapshot.startYear,
+			snapshot.endYear,
+		);
+		const transitions = definitionTransitions(definition, timeZone, years);
+		if (transitions.length === 0) return unrepresentableTimeZone();
+		const probes = new Set([snapshot.start, snapshot.end]);
+		for (const transition of transitions) {
+			const instant = transition.localMilliseconds - transition.offsetFromMilliseconds;
+			if (instant >= snapshot.start && instant <= snapshot.end) probes.add(instant);
+		}
+		for (const instant of probes) {
+			const wall = new Date(instant + transitionOffsetAtInstant(transitions, instant));
+			if (wall.getUTCFullYear() < 1 || wall.getUTCFullYear() > 9999) {
+				return unrepresentableTimeZone();
+			}
+		}
+	} catch {
+		return unrepresentableTimeZone();
+	}
+}
+
 export function generateFiniteVTimeZone(
 	timeZone: IanaTimeZoneId,
 	coverage: FiniteTimeZoneCoverage,
@@ -1187,13 +1230,16 @@ export function generateFiniteVTimeZone(
 	const snapshot = finiteCoverageTimestamps(coverage);
 	const discoveryStartYear = Math.max(1, snapshot.startYear - 1);
 	const discoveryEndYear = Math.min(9999, snapshot.endYear + 1);
-	const transitions = discoverFiniteTransitions(
-		timeZone,
-		utcYearStart(discoveryStartYear),
+	const discoveryStart = utcYearStart(discoveryStartYear);
+	const discoveryEnd =
 		discoveryEndYear === 9999
 			? utcYearStart(9999) + 365 * MILLISECONDS_PER_DAY - 1000
-			: utcYearStart(discoveryEndYear + 1),
-	);
+			: utcYearStart(discoveryEndYear + 1);
+	const generationDays = Math.ceil((discoveryEnd - discoveryStart) / MILLISECONDS_PER_DAY) + 3;
+	if (!Number.isSafeInteger(generationDays) || generationDays > MAX_GENERATION_DAYS) {
+		return unrepresentableTimeZone();
+	}
+	const transitions = discoverFiniteTransitions(timeZone, discoveryStart, discoveryEnd);
 	const definition = generatedDefinition(timeZone, transitions);
 	assertVTimeZoneCovers(definition, timeZone, {
 		start: new Date(snapshot.start),
@@ -1448,6 +1494,45 @@ function definitionTransitions(
 	);
 }
 
+/** Expand only years in which a yearly observance can affect the requested interval. */
+function boundedDefinitionCoverageYears(
+	definitions: readonly ICalendarComponent[],
+	startYear: number,
+	endYear: number,
+): readonly number[] {
+	const years = new Set([startYear, endYear]);
+	let ruleYearCount = 0;
+	let ruleCount = 0;
+	const ranges: Array<{ readonly first: number; readonly last: number }> = [];
+	for (const definition of definitions) {
+		for (const entry of definition.entries) {
+			if (entry.kind !== 'component') continue;
+			const startYearOfRule = Number(definitionRaw(entry, 'DTSTART')?.slice(0, 4));
+			for (const rule of definitionProperties(entry, 'RRULE')) {
+				ruleCount += 1;
+				const untilYear = /(?:^|;)UNTIL=(\d{4})\d{4}T\d{6}Z(?:;|$)/.exec(rule.value.raw)?.[1];
+				const first = Math.max(1, startYear - 1, startYearOfRule || 1);
+				const last = Math.min(
+					9999,
+					endYear + 1,
+					untilYear === undefined ? 9999 : Number(untilYear),
+				);
+				if (last < first) continue;
+				const span = last - first + 1;
+				if (span > MAX_RULE_COVERAGE_YEARS) return unrepresentableTimeZone();
+				ruleYearCount += span;
+				if (ruleYearCount > MAX_GENERATION_DAYS) return unrepresentableTimeZone();
+				ranges.push({ first, last });
+			}
+		}
+	}
+	for (const { first, last } of ranges) {
+		for (let year = first; year <= last; year += 1) years.add(year);
+	}
+	if (ruleCount * years.size * 3 > MAX_GENERATION_DAYS) return unrepresentableTimeZone();
+	return [...years].sort((left, right) => left - right);
+}
+
 /** Compare the supported governing rules rather than serialized line and property order. */
 export function vTimeZoneRulesAreSemanticallyEqual(
 	expected: ICalendarComponent,
@@ -1462,10 +1547,7 @@ export function vTimeZoneRulesAreSemanticallyEqual(
 			assertVTimeZoneCovers(expected, timeZone, coverage);
 			// Read-back may legitimately use a terminal historical offset beyond its last transition.
 			// definitionTransitions still rejects malformed or conflicting provider rules below.
-			const years = Array.from(
-				{ length: endYear - startYear + 1 },
-				(_, index) => startYear + index,
-			);
+			const years = boundedDefinitionCoverageYears([expected, actual], startYear, endYear);
 			const expectedTransitions = definitionTransitions(expected, timeZone, years);
 			const actualTransitions = definitionTransitions(actual, timeZone, years);
 			const probes = new Set([start, end]);
@@ -1622,22 +1704,18 @@ export function resolveLocalDateTimeInTimeZone(
 		}
 		return invalidInstant();
 	}
-	const matching: number[] = [];
-	for (let offsetMinutes = -14 * 60; offsetMinutes <= 14 * 60; offsetMinutes += 15) {
-		const candidate = wall - offsetMinutes * 60_000;
-		if (formatLocal(projectedParts(candidate, timeZone)) === localDateTime)
-			matching.push(candidate);
-	}
-	if (matching.length > 0) return new Date(Math.min(...matching));
-
+	const rules = pinnedLocalRules(timeZone, parts);
+	const matching = matchingPinnedInstants(wall, timeZone, rules.offsets);
+	if (matching[0] !== undefined) return new Date(matching[0]);
 	// RFC 5545 resolves a nonexistent wall time with the UTC offset in force before the gap.
-	for (let minutesBefore = 1; minutesBefore <= 48 * 60; minutesBefore += 1) {
-		const priorWall = wall - minutesBefore * 60_000;
-		for (let offsetMinutes = -14 * 60; offsetMinutes <= 14 * 60; offsetMinutes += 15) {
-			const candidate = priorWall - offsetMinutes * 60_000;
-			if (wallTimestamp(projectedParts(candidate, timeZone)) === priorWall) {
-				return new Date(wall - offsetAt(candidate, timeZone));
-			}
+	for (const transition of rules.transitions) {
+		const gap = transition.offsetToMilliseconds - transition.offsetFromMilliseconds;
+		if (
+			gap > 0 &&
+			wall >= transition.localMilliseconds &&
+			wall < transition.localMilliseconds + gap
+		) {
+			return new Date(wall - transition.offsetFromMilliseconds);
 		}
 	}
 	return invalidInstant();
@@ -1652,7 +1730,6 @@ export function resolveStructuredLocalDateTimeInTimeZone(
 	const parts = parseLocal(localDateTime);
 	const wall = wallTimestamp(parts);
 	const offsets = new Set<number>();
-	const localFormatter = definition === undefined ? formatter(timeZone) : undefined;
 	let transitions: readonly DefinitionTransition[] | undefined;
 	if (definition !== undefined) {
 		transitions = definitionTransitions(definition, timeZone, [parts.year]);
@@ -1662,35 +1739,21 @@ export function resolveStructuredLocalDateTimeInTimeZone(
 			offsets.add(transition.offsetToMilliseconds);
 		}
 	} else {
-		// Sample both sides of non-hour transitions and date-line changes, including second offsets.
-		for (let hours = -48; hours <= 48; hours += 1) {
-			const timestamp = wall + hours * 3_600_000;
-			const year = new Date(timestamp).getUTCFullYear();
-			if (year >= 1 && year <= 9999) {
-				try {
-					offsets.add(
-						wallTimestamp(projectedPartsWithFormatter(timestamp, localFormatter!)) - timestamp,
-					);
-				} catch (error) {
-					if (
-						!(error instanceof CalDavIanaTimeZoneError) ||
-						error.code !== 'UNREPRESENTABLE_INSTANT'
-					)
-						// eslint-disable-next-line @n8n/community-nodes/require-node-api-error -- This pure time-zone helper retains typed domain failures outside execute.
-						throw error;
-				}
-			}
-		}
+		for (const offset of pinnedLocalRules(timeZone, parts).offsets) offsets.add(offset);
 	}
-	const matching = [...offsets]
-		.map((offset) => wall - offset)
-		.filter((candidate) => {
-			const year = new Date(candidate).getUTCFullYear();
-			if (year < 1 || year > 9999) return false;
-			return transitions === undefined
-				? wallTimestamp(projectedPartsWithFormatter(candidate, localFormatter!)) === wall
-				: transitionOffsetAtInstant(transitions, candidate) === wall - candidate;
-		});
+	const matching =
+		transitions === undefined
+			? matchingPinnedInstants(wall, timeZone, offsets)
+			: [...offsets]
+					.map((offset) => wall - offset)
+					.filter((candidate) => {
+						const year = new Date(candidate).getUTCFullYear();
+						return (
+							year >= 1 &&
+							year <= 9999 &&
+							transitionOffsetAtInstant(transitions!, candidate) === wall - candidate
+						);
+					});
 	if (matching.length !== 1) {
 		throw new CalDavStructuredLocalTimeError(matching.length === 0 ? 'gap' : 'fold');
 	}

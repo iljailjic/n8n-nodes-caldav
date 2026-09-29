@@ -1,3 +1,4 @@
+/* eslint-disable @n8n/community-nodes/no-restricted-globals -- Host-TZ invariance is an explicit pinned 2026c test oracle. */
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -16,8 +17,12 @@ import {
 import type { BasicTimedEventSerializationInput } from '../../nodes/CalDav/icalendar/serializer';
 import {
 	canonicalizeIanaTimeZone,
+	assertVTimeZoneCovers,
+	assertVTimeZoneReadableForInterval,
 	generateFiniteVTimeZone,
 	projectInstantInTimeZone,
+	resolveStructuredLocalDateTimeInTimeZone,
+	IANA_TIME_ZONE_DATABASE_VERSION,
 } from '../../nodes/CalDav/icalendar/timeZones';
 import { validateAbsoluteHttpUrl } from '../../nodes/CalDav/transport/url';
 import {
@@ -88,6 +93,33 @@ function basicTimedInput(
 }
 
 describe('timed event serialization and projection', () => {
+	it('uses fixed tzdb 2026c Casablanca and historical Monrovia oracles without host Intl', () => {
+		expect(IANA_TIME_ZONE_DATABASE_VERSION).toBe('2026c');
+		const casablanca = canonicalizeIanaTimeZone('Africa/Casablanca');
+		expect(
+			resolveStructuredLocalDateTimeInTimeZone('2026-10-06T09:20:00', casablanca).toISOString(),
+		).toBe('2026-10-06T09:20:00.000Z');
+		for (const host of ['UTC', 'Pacific/Honolulu']) {
+			const previous = process.env.TZ;
+			try {
+				process.env.TZ = host;
+				expect(
+					projectInstantInTimeZone(
+						new Date('1900-01-01T00:00:00Z'),
+						canonicalizeIanaTimeZone('Africa/Monrovia'),
+					),
+				).toBe('1899-12-31T23:16:52');
+				expect(
+					projectInstantInTimeZone(
+						new Date('1930-01-01T00:00:00Z'),
+						canonicalizeIanaTimeZone('Africa/Monrovia'),
+					),
+				).toBe('1929-12-31T23:15:30');
+			} finally {
+				process.env.TZ = previous;
+			}
+		}
+	});
 	it.each(
 		ISSUE_157_PROVIDER_CASES.flatMap((testCase) =>
 			(['radicale', 'icloud'] as const).map((provider) => ({ ...testCase, provider })),
@@ -133,6 +165,22 @@ describe('timed event serialization and projection', () => {
 			expect(event.start).not.toBe('2026-10-06T09:20:00Z');
 		}
 	});
+
+	it.each(ISSUE_157_PROVIDER_CASES.filter(({ id }) => id === '05' || id === '06'))(
+		'reads historical terminal $name rules while refusing them for new finite authoring',
+		(testCase) => {
+			const source = syntheticProviderCalendarData(testCase, 'icloud');
+			const definition = parse(source).calendar.entries.find(
+				(entry) => entry.kind === 'component' && entry.name === 'VTIMEZONE',
+			);
+			if (definition?.kind !== 'component') throw new Error('Missing sanitized definition.');
+			const zone = canonicalizeIanaTimeZone(testCase.zone);
+			const start = new Date(testCase.expectedStart);
+			const coverage = { start, end: new Date(start.getTime() + 15 * 60_000) };
+			expect(() => assertVTimeZoneReadableForInterval(definition, zone, coverage)).not.toThrow();
+			expect(() => assertVTimeZoneCovers(definition, zone, coverage)).toThrow();
+		},
+	);
 
 	it('keeps serializeBasicUtcEvent compatible and emits the exact UTC wire form', () => {
 		const legacy = serializeBasicUtcEvent(basicTimedInput());

@@ -29,6 +29,7 @@ import type { AbsoluteHttpUrl } from '../transport/url';
 import type { CalendarEventCreateClock, StructuredCalendarEventCreateInput } from './create';
 import { CalDavCalendarEventCreateError, CalendarEventCreateFailureCode } from './createErrors';
 import {
+	assertSupportedCalendarEventAuthoringTimeZone,
 	CalDavCalendarEventTimeZoneAuthoringError,
 	resolveCalendarEventTimeZoneAuthoring,
 } from './timeZoneAuthoring';
@@ -168,6 +169,9 @@ export async function prepareCalendarEventCreate(
 	alarmUidGenerator: CalendarAlarmUidGenerator = randomUUID,
 	governingDefinition?: ICalendarComponent,
 ): Promise<PreparedCalendarEventCreate> {
+	if (input.timeMode === 'timed' && input.timeZone?.timeZoneMode === 'iana') {
+		assertSupportedCalendarEventAuthoringTimeZone(input.timeZone.timeZone);
+	}
 	const recurrenceStart = recurrenceStartContext(input, governingDefinition);
 	const recurrence = normalizedRecurrence(input, recurrenceStart);
 	const timeZone =

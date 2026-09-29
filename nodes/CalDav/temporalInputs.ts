@@ -2,6 +2,7 @@
 
 import {
 	CalDavStructuredLocalTimeError,
+	canonicalizeIanaTimeZone,
 	projectInstantInTimeZone,
 	resolveStructuredLocalDateTimeInTimeZone,
 } from './icalendar/timeZones';
@@ -127,7 +128,7 @@ export function normalizeParsedStructuredTimedInput(
 	if (parsed === undefined) return undefined;
 	// Validate the effective zone even when the caller supplies an absolute instant.
 	try {
-		new Intl.DateTimeFormat('en-US', { timeZone: zone });
+		if (zone !== 'UTC') canonicalizeIanaTimeZone(zone);
 	} catch {
 		throw new CalDavTemporalInputError(field, 'requires a valid effective time zone.');
 	}

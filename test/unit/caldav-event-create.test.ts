@@ -40,6 +40,10 @@ import {
 	ISSUE_157_PROVIDER_CASES,
 	syntheticProviderCalendarData,
 } from './fixtures/time-zones/issue-157-provider-captures';
+import {
+	CONSTANT_KATHMANDU_REFERENCE,
+	YEARLY_PRAGUE_REFERENCE,
+} from './fixtures/time-zones/issue-157-long-reference-fixtures';
 
 const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/selected/');
 const FIXED_CLOCK = new Date('2040-01-01T00:00:00.987Z');
@@ -276,6 +280,122 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(JSON.stringify(error)).not.toMatch(/Prague|calendar\.example|0001|9999|private/i);
 	});
 
+	it('rejects a yearly 2026–9999 IANA series promptly before provider PUT', async () => {
+		const requests = transport(async () => {
+			throw new Error('Unexpected provider request.');
+		});
+		const clock = vi.fn(() => FIXED_CLOCK);
+		const started = Date.now();
+		const error = await captureError(
+			createCalendarEvent(
+				requests,
+				input({
+					start: new Date('2026-10-06T07:20:00Z'),
+					end: new Date('2026-10-06T07:35:00Z'),
+					recurrence: {
+						frequency: 'yearly',
+						end: { kind: 'until', value: { kind: 'dateTime', dateTime: '9999-01-01T00:00:00Z' } },
+					},
+					timeZone: { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone('Europe/Prague') },
+				}),
+				clock,
+			),
+		);
+		expect(error).toMatchObject({ code: 'UNREPRESENTABLE_TIME_ZONE' });
+		expect(Date.now() - started).toBeLessThan(2000);
+		expect(clock).not.toHaveBeenCalled();
+		expect(requests.request).not.toHaveBeenCalled();
+	});
+
+	it('rejects a verified yearly Prague reference over 2026–9999 before PUT', async () => {
+		const requests = transport(async () => {
+			throw new Error('Unexpected provider request.');
+		});
+		const zone = canonicalizeIanaTimeZone('Europe/Prague');
+		const resolveReference = vi.fn().mockResolvedValue({
+			timeZone: zone,
+			etag: '"reference"',
+			calendarData: YEARLY_PRAGUE_REFERENCE,
+			ruleSource: 'vtimezone' as const,
+		});
+		const clock = vi.fn(() => FIXED_CLOCK);
+		const start = Date.now();
+		const error = await captureError(
+			createCalendarEvent(
+				requests,
+				input({
+					start: new Date('2026-10-06T07:20:00Z'),
+					end: new Date('2026-10-06T07:35:00Z'),
+					recurrence: {
+						frequency: 'yearly',
+						end: { kind: 'until', value: { kind: 'dateTime', dateTime: '9999-01-01T00:00:00Z' } },
+					},
+					timeZone: { timeZoneMode: 'iana', timeZone: zone },
+				}),
+				clock,
+				{ resolveReference },
+			),
+		);
+		expect(error).toMatchObject({ code: 'UNREPRESENTABLE_TIME_ZONE' });
+		expect(Date.now() - start).toBeLessThan(2000);
+		expect(resolveReference).toHaveBeenCalledOnce();
+		expect(clock).not.toHaveBeenCalled();
+		expect(requests.request).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		['long constant', 'Asia/Kathmandu', CONSTANT_KATHMANDU_REFERENCE, '2026-10-06T03:35:00Z', true],
+		['normal finite', 'Europe/Prague', YEARLY_PRAGUE_REFERENCE, '2026-10-06T07:20:00Z', false],
+	] as const)(
+		'accepts a verified %s reference during Create',
+		async (_label, name, calendarData, startText, long) => {
+			let submitted = '';
+			const requests = transport(async (request) => {
+				if (request.method === CalDavMethod.PUT) {
+					submitted = request.body!;
+					return response(201, request.url, { etag: '"put"' });
+				}
+				return response(200, request.url, { etag: '"confirmed"', body: submitted });
+			});
+			const zone = canonicalizeIanaTimeZone(name);
+			const resolveReference = vi.fn().mockResolvedValue({
+				timeZone: zone,
+				etag: '"reference"',
+				calendarData,
+				ruleSource: 'vtimezone' as const,
+			});
+			const start = new Date(startText);
+			await expect(
+				createCalendarEvent(
+					requests,
+					input({
+						start,
+						end: new Date(start.getTime() + 900_000),
+						...(long
+							? {
+									recurrence: {
+										frequency: 'yearly' as const,
+										end: {
+											kind: 'until' as const,
+											value: { kind: 'dateTime' as const, dateTime: '9999-01-01T00:00:00Z' },
+										},
+									},
+								}
+							: {}),
+						timeZone: { timeZoneMode: 'iana', timeZone: zone },
+					}),
+					() => FIXED_CLOCK,
+					{ resolveReference },
+				),
+			).resolves.toMatchObject({ timeZone: name });
+			expect(submitted).toContain(`TZID=${name}`);
+			expect(submitted).not.toContain('BEGIN:VTIMEZONE');
+			expect(
+				requests.request.mock.calls.map(([request]) => (request as CalDavTransportRequest).method),
+			).toEqual([CalDavMethod.PUT, CalDavMethod.GET]);
+		},
+	);
+
 	it('reuses one generated UID across all-day DATE serialization, resource identity, and output', async () => {
 		const authoritativeBody = [
 			'BEGIN:VCALENDAR',
@@ -486,20 +606,16 @@ describe('calendar-event Create coordinator public contract', () => {
 		expect(requests.request).toHaveBeenCalledTimes(2);
 	});
 
-	it('rejects a Lord Howe provider read-back that collapses an authored 15-minute interval', async () => {
-		let submitted = '';
-		const requests = transport(async (request) => {
-			if (request.method === CalDavMethod.PUT) {
-				submitted = request.body!;
-				return response(201, request.url, { etag: '"put"' });
-			}
-			return response(200, request.url, {
-				etag: '"read-back"',
-				body: submitted.replace(
-					'DTEND;TZID=Australia/Lord_Howe:20261006T093500',
-					'DTEND;TZID=Australia/Lord_Howe:20261006T092000',
-				),
-			});
+	it.each([
+		'Australia/Lord_Howe',
+		'Australia/LHI',
+		'Pacific/Apia',
+		'pacific/apia',
+		'Africa/Casablanca',
+		'africa/casablanca',
+	])('rejects structured Create in %s before any provider request', async (zone) => {
+		const requests = transport(async () => {
+			throw new Error('Unexpected provider request.');
 		});
 		const error = await captureError(
 			createCalendarEvent(
@@ -507,19 +623,48 @@ describe('calendar-event Create coordinator public contract', () => {
 				input({
 					start: new Date('2026-10-05T22:20:00Z'),
 					end: new Date('2026-10-05T22:35:00Z'),
-					timeZone: {
-						timeZoneMode: 'iana',
-						timeZone: canonicalizeIanaTimeZone('Australia/Lord_Howe'),
-					},
+					timeZone: { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(zone) },
 				}),
 				() => FIXED_CLOCK,
 			),
 		);
-		expect(submitted).toContain('DTSTART;TZID=Australia/Lord_Howe:20261006T092000');
-		expect(submitted).toContain('DTEND;TZID=Australia/Lord_Howe:20261006T093500');
-		expect(error).toMatchObject({ code: CalendarEventCreateFailureCode.CONFIRMATION_FAILED });
-		expect(JSON.stringify(error)).not.toMatch(/Lord_Howe|20261006|opaque|selected/i);
-		expect(requests.request).toHaveBeenCalledTimes(2);
+		expect(error).toMatchObject({ code: 'UNSUPPORTED_AUTHORING_TIME_ZONE' });
+		expect(JSON.stringify(error)).not.toMatch(
+			/Lord_Howe|Apia|Casablanca|20261006|opaque|selected/i,
+		);
+		expect(requests.request).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		['Pacific/Pago_Pago', '2026-10-06T20:20:00Z', '2026-10-06T20:35:00Z'],
+		['Africa/El_Aaiun', '2026-10-06T08:20:00Z', '2026-10-06T08:35:00Z'],
+	] as const)('continues to author nearby supported zone %s', async (zone, start, end) => {
+		let submitted = '';
+		const requests = transport(async (request) => {
+			if (request.method === CalDavMethod.PUT) {
+				submitted = request.body!;
+				return response(201, request.url, { etag: '"put"' });
+			}
+			return response(200, request.url, { etag: '"confirmed"', body: submitted });
+		});
+		await expect(
+			createCalendarEvent(
+				requests,
+				input({
+					start: new Date(start),
+					end: new Date(end),
+					timeZone: {
+						timeZoneMode: 'iana',
+						timeZone: canonicalizeIanaTimeZone(zone),
+					},
+				}),
+				() => FIXED_CLOCK,
+			),
+		).resolves.toMatchObject({ timeZone: zone });
+		expect(submitted).toContain(`TZID:${zone}`);
+		expect(
+			requests.request.mock.calls.map(([request]) => (request as CalDavTransportRequest).method),
+		).toEqual([CalDavMethod.PUT, CalDavMethod.GET]);
 	});
 
 	function icloudPragueReadBack(submitted: string, changedLaterTransition = false): string {

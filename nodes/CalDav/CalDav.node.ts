@@ -74,7 +74,9 @@ import type { CalendarEventUpsertInput } from './events/upsert';
 import { bindCalendarEventTimeZoneExecutionContext } from './events/timeZoneExecutionContext';
 import {
 	CalDavCalendarEventTimeZoneAuthoringError,
+	isUnsupportedCalendarEventAuthoringTimeZone,
 	resolveVerifiedCalendarEventTimeZoneDefinition,
+	UNSUPPORTED_AUTHORING_TIME_ZONE_MESSAGE,
 } from './events/timeZoneAuthoring';
 import { queryCalendarEventsByTimeRange } from './events/timeRangeQuery';
 import {
@@ -2658,23 +2660,30 @@ async function eventCreateInput(
 	if (inputMode !== STRUCTURED_INPUT_MODE) {
 		return 'Input Mode must be Structured or Raw ICS.';
 	}
-	const timeZoneMode = nodeParameter(execution, 'timeZoneMode', itemIndex) ?? 'utc';
-	let timeZone: CalendarEventTimeZone;
-	if (timeZoneMode === 'utc') {
-		timeZone = { timeZoneMode: 'utc' };
-	} else if (timeZoneMode === 'iana') {
-		const value = nodeParameter(execution, 'timeZone', itemIndex);
-		try {
-			if (typeof value !== 'string') return EVENT_CREATE_MESSAGES.INVALID_TIME_ZONE;
-			timeZone = { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(value) };
-		} catch (error) {
-			return error instanceof CalDavIanaTimeZoneError &&
-				error.code === CalDavIanaTimeZoneErrorCode.UTC_EQUIVALENT
-				? EVENT_CREATE_MESSAGES.UTC_TIME_ZONE
-				: EVENT_CREATE_MESSAGES.INVALID_TIME_ZONE;
+	const timeMode = nodeParameter(execution, 'timeMode', itemIndex) ?? 'timed';
+	if (timeMode !== 'timed' && timeMode !== 'allDay') {
+		return EVENT_CREATE_MESSAGES.INVALID_TIME_MODE;
+	}
+	let timeZone: CalendarEventTimeZone = { timeZoneMode: 'utc' };
+	if (timeMode === 'timed') {
+		const timeZoneMode = nodeParameter(execution, 'timeZoneMode', itemIndex) ?? 'utc';
+		if (timeZoneMode === 'iana') {
+			const value = nodeParameter(execution, 'timeZone', itemIndex);
+			try {
+				if (typeof value !== 'string') return EVENT_CREATE_MESSAGES.INVALID_TIME_ZONE;
+				timeZone = { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(value) };
+			} catch (error) {
+				return error instanceof CalDavIanaTimeZoneError &&
+					error.code === CalDavIanaTimeZoneErrorCode.UTC_EQUIVALENT
+					? EVENT_CREATE_MESSAGES.UTC_TIME_ZONE
+					: EVENT_CREATE_MESSAGES.INVALID_TIME_ZONE;
+			}
+			if (isUnsupportedCalendarEventAuthoringTimeZone(timeZone.timeZone)) {
+				return UNSUPPORTED_AUTHORING_TIME_ZONE_MESSAGE;
+			}
+		} else if (timeZoneMode !== 'utc') {
+			return EVENT_CREATE_MESSAGES.INVALID_TIME_ZONE_MODE;
 		}
-	} else {
-		return EVENT_CREATE_MESSAGES.INVALID_TIME_ZONE_MODE;
 	}
 
 	const uidValue = nodeParameter(execution, 'uid', itemIndex);
@@ -2685,10 +2694,6 @@ async function eventCreateInput(
 		return EVENT_CREATE_MESSAGES.RESOURCE_NAME_TOO_LONG;
 	}
 
-	const timeMode = nodeParameter(execution, 'timeMode', itemIndex) ?? 'timed';
-	if (timeMode !== 'timed' && timeMode !== 'allDay') {
-		return EVENT_CREATE_MESSAGES.INVALID_TIME_MODE;
-	}
 	const startValue = nodeParameter(execution, 'start', itemIndex);
 	const endValue = nodeParameter(execution, 'end', itemIndex);
 	const startDateValue = nodeParameter(execution, 'startDate', itemIndex);
@@ -3052,6 +3057,9 @@ async function eventUpsertInput(
 					? EVENT_UPSERT_MESSAGES.UTC_TIME_ZONE
 					: EVENT_UPSERT_MESSAGES.INVALID_TIME_ZONE;
 			}
+			if (uidValue.length === 0 && isUnsupportedCalendarEventAuthoringTimeZone(timeZone.timeZone)) {
+				return UNSUPPORTED_AUTHORING_TIME_ZONE_MESSAGE;
+			}
 		} else {
 			return EVENT_UPSERT_MESSAGES.INVALID_TIME_ZONE_MODE;
 		}
@@ -3353,9 +3361,13 @@ function eventUpdatePatch(
 			const value = (change as { readonly timeZone?: unknown }).timeZone;
 			try {
 				if (typeof value !== 'string') return EVENT_UPDATE_MESSAGES.INVALID_TIME_ZONE;
+				const timeZone = canonicalizeIanaTimeZone(value);
+				if (isUnsupportedCalendarEventAuthoringTimeZone(timeZone)) {
+					return UNSUPPORTED_AUTHORING_TIME_ZONE_MESSAGE;
+				}
 				patch.timeZone = {
 					kind: 'set',
-					value: { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(value) },
+					value: { timeZoneMode: 'iana', timeZone },
 				};
 			} catch (error) {
 				return error instanceof CalDavIanaTimeZoneError &&
@@ -4058,10 +4070,12 @@ export class CalDav implements INodeType {
 		listSearch: { searchCalendars },
 		loadOptions: {
 			async getIanaTimeZones() {
-				return listCanonicalIanaTimeZones().map((timeZone) => ({
-					name: timeZone,
-					value: timeZone,
-				}));
+				return listCanonicalIanaTimeZones()
+					.filter((timeZone) => !isUnsupportedCalendarEventAuthoringTimeZone(timeZone))
+					.map((timeZone) => ({
+						name: timeZone,
+						value: timeZone,
+					}));
 			},
 		},
 	};

@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+// Test-only package manifest read verifies that pinned build inputs do not become runtime dependencies.
+// eslint-disable-next-line @n8n/community-nodes/no-restricted-imports
+import { readFileSync } from 'node:fs';
 
 import { verifyPackOutput } from '../../scripts/verify-package-contents.mjs';
 
@@ -253,6 +256,27 @@ function createPackOutput(paths: string[], overrides: PackResultOverrides = {}) 
 }
 
 describe('package contents verifier', () => {
+	it('pins 2026c build inputs without requiring install-time runtime dependencies', () => {
+		const manifest = JSON.parse(readFileSync('package.json', 'utf8')) as {
+			dependencies?: Record<string, string>;
+			devDependencies?: Record<string, string>;
+		};
+		expect(manifest.dependencies).toBeUndefined();
+		expect(manifest.devDependencies).toMatchObject({
+			tzdata: '1.0.50',
+			timezonecomplete: '5.15.1',
+		});
+		expect(
+			expectedPackageFiles.some(
+				(path) => path.includes('node_modules') || path.includes('tzdata/timezone-data.json'),
+			),
+		).toBe(false);
+		expect(timeZoneArtifactPaths).toEqual([
+			'dist/nodes/CalDav/icalendar/timeZones.d.ts',
+			'dist/nodes/CalDav/icalendar/timeZones.js',
+			'dist/nodes/CalDav/icalendar/timeZones.js.map',
+		]);
+	});
 	it('accepts only the exact production package manifest', () => {
 		const packOutput = createPackOutput(expectedPackageFiles);
 

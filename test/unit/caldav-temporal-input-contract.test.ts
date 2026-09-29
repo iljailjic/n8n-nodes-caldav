@@ -210,6 +210,24 @@ describe('r3 strict timed grammar and precision', () => {
 });
 
 describe('r3 local context and DST', () => {
+	it('uses pinned 2026c local rules when host Intl timezone formatting is unavailable', () => {
+		const formatter = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(() => {
+			throw new Error('host Intl timezone data unavailable');
+		});
+		try {
+			expect(
+				normalizeStructuredTimedInput('2026-10-06T09:20:00', 'Africa/Casablanca')?.toISOString(),
+			).toBe('2026-10-06T09:20:00.000Z');
+			expect(() =>
+				normalizeStructuredTimedInput('2026-03-29T02:30:00', 'Europe/Prague', 'Start'),
+			).toThrow(/Start.*nonexistent/);
+			expect(() =>
+				normalizeStructuredTimedInput('2026-10-25T02:30:00', 'Europe/Prague', 'Start'),
+			).toThrow(/Start.*ambiguous/);
+		} finally {
+			formatter.mockRestore();
+		}
+	});
 	it.each([
 		['Europe/Prague', '2026-03-29T02:30:00', 'nonexistent'],
 		['Europe/Prague', '2026-10-25T02:30:00', 'ambiguous'],

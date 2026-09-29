@@ -52,6 +52,7 @@ import { CalDavCalendarAlarmError, CalendarAlarmErrorCode } from '../icalendar/a
 import type { CalendarAlarmUidGenerator } from '../icalendar/alarms';
 import {
 	assertVTimeZoneCovers,
+	assertVTimeZoneReadableForInterval,
 	canonicalizeIanaTimeZone,
 	projectInstantInTimeZone,
 } from '../icalendar/timeZones';
@@ -60,6 +61,7 @@ import type { CalDavTransport } from '../transport/http';
 import { normalizeCalendarCollectionUrl, validateAbsoluteHttpUrl } from '../transport/url';
 import type { AbsoluteHttpUrl } from '../transport/url';
 import {
+	assertSupportedCalendarEventAuthoringTimeZone,
 	CalDavCalendarEventTimeZoneAuthoringError,
 	resolveCalendarEventTimeZoneAuthoring,
 } from './timeZoneAuthoring';
@@ -867,6 +869,11 @@ async function updateCalendarEventInternal(
 	if (snapshot.resolveTemporalPatch !== undefined) {
 		snapshot = { ...snapshot, patch: await snapshot.resolveTemporalPatch(current) };
 	}
+	const explicitTimeZone =
+		'timeZone' in snapshot.patch ? snapshot.patch.timeZone?.value : undefined;
+	if (explicitTimeZone?.timeZoneMode === 'iana') {
+		assertSupportedCalendarEventAuthoringTimeZone(explicitTimeZone.timeZone);
+	}
 	snapshot = { ...snapshot, patch: omitUnchangedTimedFields(current.event, snapshot.patch) };
 	const timedCurrent = current.event.timeMode === 'timed' ? current.event : undefined;
 	const patchTimeMode = snapshot.patch.timeMode ?? current.event.timeMode;
@@ -900,6 +907,16 @@ async function updateCalendarEventInternal(
 			? sourceTimeZoneId(current.context.master)
 			: undefined;
 	const changesTimeRepresentation = timeRepresentationChanges(current.event, snapshot.patch);
+	if (
+		requestedTimeZone === undefined &&
+		(changesTimeRepresentation || changesRecurrence) &&
+		current.event.timeMode === 'timed' &&
+		current.event.timeZoneMode === 'iana' &&
+		current.event.timeZone !== undefined &&
+		patchTimeMode === 'timed'
+	) {
+		assertSupportedCalendarEventAuthoringTimeZone(current.event.timeZone);
+	}
 	if (
 		recurrenceDependsOnPreservedContent(current) &&
 		(changesRecurrence || changesTimeRepresentation)
@@ -972,7 +989,11 @@ async function updateCalendarEventInternal(
 		if (canUseEmbedded) {
 			const definition = embeddedDefinition;
 			try {
-				assertVTimeZoneCovers(definition, effectiveTimeZone.timeZone, coverage.interval);
+				assertVTimeZoneReadableForInterval(
+					definition,
+					effectiveTimeZone.timeZone,
+					coverage.interval,
+				);
 			} catch {
 				throw new CalDavCalendarEventTimeZoneAuthoringError('UNREPRESENTABLE_TIME_ZONE');
 			}

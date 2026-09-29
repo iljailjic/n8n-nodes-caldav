@@ -8,6 +8,8 @@ import { parseICalendarResource } from '../icalendar/parser';
 import type { ICalendarComponent } from '../icalendar/parser';
 import {
 	assertVTimeZoneCovers,
+	assertVTimeZoneReadableForInterval,
+	CalDavIanaTimeZoneError,
 	canonicalizeIanaTimeZone,
 	generateFiniteVTimeZone,
 } from '../icalendar/timeZones';
@@ -18,10 +20,14 @@ export const CalendarEventTimeZoneAuthoringErrorCode = Object.freeze({
 	COUNT_REQUIRES_REFERENCE: 'COUNT_REQUIRES_REFERENCE',
 	UNBOUNDED_REQUIRES_REFERENCE: 'UNBOUNDED_REQUIRES_REFERENCE',
 	UNREPRESENTABLE_TIME_ZONE: 'UNREPRESENTABLE_TIME_ZONE',
+	UNSUPPORTED_AUTHORING_TIME_ZONE: 'UNSUPPORTED_AUTHORING_TIME_ZONE',
 } as const);
 
 export type CalendarEventTimeZoneAuthoringErrorCode =
 	(typeof CalendarEventTimeZoneAuthoringErrorCode)[keyof typeof CalendarEventTimeZoneAuthoringErrorCode];
+
+export const UNSUPPORTED_AUTHORING_TIME_ZONE_MESSAGE =
+	'The selected IANA time zone is not supported for structured event authoring.';
 
 const ERROR_MESSAGES: Readonly<Record<CalendarEventTimeZoneAuthoringErrorCode, string>> = {
 	COUNT_REQUIRES_REFERENCE:
@@ -30,6 +36,7 @@ const ERROR_MESSAGES: Readonly<Record<CalendarEventTimeZoneAuthoringErrorCode, s
 		'An unbounded IANA recurrence requires server time-zone reference support.',
 	UNREPRESENTABLE_TIME_ZONE:
 		'The selected IANA time zone cannot be represented safely for this calendar event.',
+	UNSUPPORTED_AUTHORING_TIME_ZONE: UNSUPPORTED_AUTHORING_TIME_ZONE_MESSAGE,
 };
 
 export class CalDavCalendarEventTimeZoneAuthoringError extends Error {
@@ -39,6 +46,27 @@ export class CalDavCalendarEventTimeZoneAuthoringError extends Error {
 		super(ERROR_MESSAGES[code]);
 		this.name = 'CalDavAuthoringError';
 		this.code = code;
+	}
+}
+
+export function isUnsupportedCalendarEventAuthoringTimeZone(timeZone: IanaTimeZoneId): boolean {
+	return (
+		timeZone === 'Australia/Lord_Howe' ||
+		timeZone === 'Pacific/Apia' ||
+		timeZone === 'Africa/Casablanca'
+	);
+}
+
+export function assertSupportedCalendarEventAuthoringTimeZone(timeZone: IanaTimeZoneId): void {
+	let canonical: IanaTimeZoneId;
+	try {
+		canonical = canonicalizeIanaTimeZone(timeZone);
+	} catch (error) {
+		if (error instanceof CalDavIanaTimeZoneError) return;
+		throw error;
+	}
+	if (isUnsupportedCalendarEventAuthoringTimeZone(canonical)) {
+		throw new CalDavCalendarEventTimeZoneAuthoringError('UNSUPPORTED_AUTHORING_TIME_ZONE');
 	}
 }
 
@@ -120,6 +148,7 @@ async function verifiedReference(
 		if (definition === undefined) return undefined;
 		if (input.coverage.kind === 'finite') {
 			assertVTimeZoneCovers(definition, input.timeZone, input.coverage.interval);
+			assertVTimeZoneReadableForInterval(definition, input.timeZone, input.coverage.interval);
 		}
 		return Object.freeze({ source: 'reference', embed: false, definition });
 	} catch {
@@ -133,6 +162,7 @@ export function resolveCalendarEventTimeZoneAuthoring(
 export async function resolveCalendarEventTimeZoneAuthoring(
 	input: InternalCalendarEventTimeZoneAuthoringInput,
 ): Promise<CalendarEventTimeZoneAuthoringRules> {
+	assertSupportedCalendarEventAuthoringTimeZone(input.timeZone);
 	const reference = await verifiedReference(input);
 	if (reference !== undefined) return reference;
 	if (input.coverage.kind === 'unbounded') {
@@ -144,6 +174,11 @@ export async function resolveCalendarEventTimeZoneAuthoring(
 	try {
 		if (input.reusableDefinition !== undefined) {
 			assertVTimeZoneCovers(input.reusableDefinition, input.timeZone, input.coverage.interval);
+			assertVTimeZoneReadableForInterval(
+				input.reusableDefinition,
+				input.timeZone,
+				input.coverage.interval,
+			);
 			return Object.freeze({
 				source: 'generated',
 				embed: true,

@@ -1,0 +1,34 @@
+const calendar = (zone: string, observances: readonly string[]) =>
+	[
+		'BEGIN:VCALENDAR',
+		'VERSION:2.0',
+		'BEGIN:VTIMEZONE',
+		`TZID:${zone}`,
+		...observances,
+		'END:VTIMEZONE',
+		'END:VCALENDAR',
+		'',
+	].join('\r\n');
+
+export const YEARLY_PRAGUE_REFERENCE = calendar('Europe/Prague', [
+	'BEGIN:STANDARD',
+	'DTSTART:20261025T030000',
+	'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU',
+	'TZOFFSETFROM:+0200',
+	'TZOFFSETTO:+0100',
+	'END:STANDARD',
+	'BEGIN:DAYLIGHT',
+	'DTSTART:20260329T020000',
+	'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU',
+	'TZOFFSETFROM:+0100',
+	'TZOFFSETTO:+0200',
+	'END:DAYLIGHT',
+]);
+
+export const CONSTANT_KATHMANDU_REFERENCE = calendar('Asia/Kathmandu', [
+	'BEGIN:STANDARD',
+	'DTSTART:20200101T000000',
+	'TZOFFSETFROM:+0545',
+	'TZOFFSETTO:+0545',
+	'END:STANDARD',
+]);

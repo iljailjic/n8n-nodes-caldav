@@ -63,10 +63,11 @@ export const ISSUE_157_PROVIDER_CASES: readonly Case[] = [
 	},
 	{
 		id: '08',
-		name: 'Casablanca provider +01 history',
+		name: 'Casablanca fixed 2026c and provider +01 history',
 		zone: 'Africa/Casablanca',
 		localStart: '20261006T092000',
-		expectedStart: '2026-10-06T08:20:00Z',
+		expectedStart: '2026-10-06T09:20:00Z',
+		expectedByProvider: { radicale: '2026-10-06T08:20:00Z', icloud: '2026-10-06T08:20:00Z' },
 	},
 	{
 		id: '10',

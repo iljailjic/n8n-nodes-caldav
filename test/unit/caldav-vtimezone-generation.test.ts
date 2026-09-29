@@ -7,11 +7,13 @@ import type { ICalendarComponent, ICalendarProperty } from '../../nodes/CalDav/i
 import { serializeICalendarResource } from '../../nodes/CalDav/icalendar/serializer';
 import {
 	assertVTimeZoneCovers,
+	assertVTimeZoneReadableForInterval,
 	CalDavVTimeZoneGenerationError,
 	CalDavVTimeZoneGenerationErrorCode,
 	canonicalizeIanaTimeZone,
 	generateFiniteVTimeZone,
 	projectInstantInTimeZone,
+	vTimeZoneRulesAreSemanticallyEqual,
 } from '../../nodes/CalDav/icalendar/timeZones';
 import type { FiniteTimeZoneCoverage } from '../../nodes/CalDav/icalendar/timeZones';
 
@@ -30,6 +32,28 @@ function observances(definition: ICalendarComponent): readonly ICalendarComponen
 	return definition.entries.filter(
 		(entry): entry is ICalendarComponent => entry.kind === 'component',
 	);
+}
+
+function fixtureDefinition(zone: string, observancesText: readonly string[]): ICalendarComponent {
+	const resource = parseICalendarResource(
+		encoder.encode(
+			[
+				'BEGIN:VCALENDAR',
+				'VERSION:2.0',
+				'BEGIN:VTIMEZONE',
+				`TZID:${zone}`,
+				...observancesText,
+				'END:VTIMEZONE',
+				'END:VCALENDAR',
+				'',
+			].join('\r\n'),
+		),
+	);
+	const definition = resource.calendar.entries.find(
+		(entry) => entry.kind === 'component' && entry.name === 'VTIMEZONE',
+	);
+	if (definition?.kind !== 'component') throw new Error('Missing synthetic VTIMEZONE.');
+	return definition;
 }
 
 function resourceFor(definition: ICalendarComponent): string {
@@ -97,6 +121,108 @@ function expectSemanticCoverage(
 }
 
 describe('finite VTIMEZONE generation', () => {
+	it('reads long constant and terminal histories without expanding every year', () => {
+		const coverage = {
+			start: new Date('2026-01-01T00:00:00Z'),
+			end: new Date('9999-01-01T00:00:00Z'),
+		};
+		const constant = fixtureDefinition('Pacific/Apia', [
+			'BEGIN:STANDARD',
+			'DTSTART:20250101T000000',
+			'TZOFFSETFROM:+1300',
+			'TZOFFSETTO:+1300',
+			'END:STANDARD',
+		]);
+		const terminal = fixtureDefinition('Asia/Kathmandu', [
+			'BEGIN:STANDARD',
+			'DTSTART:20200101T000000',
+			'TZOFFSETFROM:+0530',
+			'TZOFFSETTO:+0530',
+			'END:STANDARD',
+			'BEGIN:STANDARD',
+			'DTSTART:20210101T000000',
+			'TZOFFSETFROM:+0530',
+			'TZOFFSETTO:+0545',
+			'END:STANDARD',
+		]);
+		const start = Date.now();
+		expect(() =>
+			assertVTimeZoneReadableForInterval(
+				constant,
+				canonicalizeIanaTimeZone('Pacific/Apia'),
+				coverage,
+			),
+		).not.toThrow();
+		expect(() =>
+			assertVTimeZoneReadableForInterval(
+				terminal,
+				canonicalizeIanaTimeZone('Asia/Kathmandu'),
+				coverage,
+			),
+		).not.toThrow();
+		expect(Date.now() - start).toBeLessThan(2000);
+	});
+
+	it('rejects long yearly coverage promptly and returns false during confirmation', () => {
+		const zone = canonicalizeIanaTimeZone('Pacific/Apia');
+		const coverage = {
+			start: new Date('2026-01-01T00:00:00Z'),
+			end: new Date('9999-01-01T00:00:00Z'),
+		};
+		const constant = fixtureDefinition('Pacific/Apia', [
+			'BEGIN:STANDARD',
+			'DTSTART:20250101T000000',
+			'TZOFFSETFROM:+1300',
+			'TZOFFSETTO:+1300',
+			'END:STANDARD',
+		]);
+		const yearly = fixtureDefinition('Pacific/Apia', [
+			'BEGIN:STANDARD',
+			'DTSTART:20250101T000000',
+			'TZOFFSETFROM:+1300',
+			'TZOFFSETTO:+1300',
+			'END:STANDARD',
+			'BEGIN:DAYLIGHT',
+			'DTSTART:20260301T000000',
+			'RRULE:FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=1',
+			'TZOFFSETFROM:+1300',
+			'TZOFFSETTO:+1400',
+			'END:DAYLIGHT',
+		]);
+		const start = Date.now();
+		expect(() => assertVTimeZoneReadableForInterval(yearly, zone, coverage)).toThrowError(
+			expect.objectContaining({ code: 'UNREPRESENTABLE_TIME_ZONE' }),
+		);
+		expect(vTimeZoneRulesAreSemanticallyEqual(constant, yearly, zone, coverage)).toBe(false);
+		expect(Date.now() - start).toBeLessThan(2000);
+		expect(() =>
+			assertVTimeZoneReadableForInterval(yearly, zone, {
+				start: new Date('2026-03-02T00:00:00Z'),
+				end: new Date('2026-09-01T00:00:00Z'),
+			}),
+		).not.toThrow();
+	});
+	it.each([
+		['Africa/Casablanca', '2026-10-06T09:20:00Z', '2026-10-06T09:20:00'],
+		['Asia/Kathmandu', '2026-10-06T03:35:00Z', '2026-10-06T09:20:00'],
+		['Asia/Kolkata', '2026-10-06T03:50:00Z', '2026-10-06T09:20:00'],
+	] as const)(
+		'matches fixed 2026c authority for %s in generated finite rules',
+		(name, instantText, expectedLocal) => {
+			const instant = new Date(instantText);
+			const zone = canonicalizeIanaTimeZone(name);
+			const definition = generateFiniteVTimeZone(zone, {
+				start: new Date(instant.getTime() - 86_400_000),
+				end: new Date(instant.getTime() + 86_400_000),
+			});
+			expect(projectInstantInTimeZone(instant, zone)).toBe(expectedLocal);
+			expect(projectInstantInTimeZone(instant, zone, definition)).toBe(expectedLocal);
+			assertVTimeZoneCovers(definition, zone, {
+				start: instant,
+				end: new Date(instant.getTime() + 900_000),
+			});
+		},
+	);
 	it.each([
 		{
 			zone: 'Europe/Prague',
@@ -219,7 +345,7 @@ describe('finite VTIMEZONE generation', () => {
 		expect(() => assertVTimeZoneCovers(definition, timeZone, coverage)).not.toThrow();
 	});
 
-	it('keeps historical signatures separate and preserves second offsets when Intl exposes them', () => {
+	it('keeps pinned 2026c historical signatures and second offsets across host time zones', () => {
 		const zone = canonicalizeIanaTimeZone('Africa/Monrovia');
 		const coverage = {
 			start: new Date('1900-01-01T00:00:00Z'),
@@ -228,10 +354,10 @@ describe('finite VTIMEZONE generation', () => {
 		const definition = generateFiniteVTimeZone(zone, coverage);
 		assertVTimeZoneCovers(definition, zone, coverage);
 		const serialized = resourceFor(definition);
-		const runtimeHasSecondOffset = ['1910-01-01T00:00:00Z', '1930-01-01T00:00:00Z'].some(
-			(value) => Math.abs(offsetSeconds(new Date(value), zone)) % 60 !== 0,
-		);
-		if (runtimeHasSecondOffset) expect(serialized).toMatch(/TZOFFSET(?:FROM|TO):[+-]\d{6}/);
+		expect(serialized).toContain('TZOFFSETTO:-004308');
+		expect(serialized).toContain('TZOFFSETTO:-004430');
+		expect(offsetSeconds(new Date('1900-01-01T00:00:00Z'), zone)).toBe(-43 * 60 - 8);
+		expect(offsetSeconds(new Date('1930-01-01T00:00:00Z'), zone)).toBe(-44 * 60 - 30);
 		expect(serialized).not.toMatch(/TZOFFSET(?:FROM|TO):-0{4}(?:00)?/);
 	});
 

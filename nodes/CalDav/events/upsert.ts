@@ -55,6 +55,7 @@ import {
 	resolveCalendarEventByUid,
 } from './resolveByUid';
 import { calendarEventTimeZoneExecutionContext } from './timeZoneExecutionContext';
+import { assertSupportedCalendarEventAuthoringTimeZone } from './timeZoneAuthoring';
 import type { CalendarEventUidGenerator } from './uid';
 import {
 	CalDavCalendarEventUpdateError,
@@ -906,10 +907,15 @@ export async function upsertCalendarEvent(
 	) {
 		throw new CalDavRawCalendarEventError(RawCalendarEventFailureCode.INVALID_INPUT_MODE);
 	}
-	const snapshot = snapshotInput(
-		input as StructuredCalendarEventUpsertInput,
-		dependencies.governingTimeZoneDefinition,
-	);
+	const structuredInput = input as StructuredCalendarEventUpsertInput;
+	if (
+		structuredInput.uid === undefined &&
+		structuredInput.timeMode === 'timed' &&
+		structuredInput.timeZone?.timeZoneMode === 'iana'
+	) {
+		assertSupportedCalendarEventAuthoringTimeZone(structuredInput.timeZone.timeZone);
+	}
+	const snapshot = snapshotInput(structuredInput, dependencies.governingTimeZoneDefinition);
 	const timeZoneContext = calendarEventTimeZoneExecutionContext(transport);
 	const suppliedUid = snapshot.uid;
 	if (suppliedUid === undefined) {
