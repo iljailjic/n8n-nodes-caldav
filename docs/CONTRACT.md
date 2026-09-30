@@ -127,6 +127,16 @@ Structured mode supports:
 - preservation-first Update and Upsert patches, including unknown iCalendar
   properties and unsupported recurrence data.
 
+Structured IANA authoring rejects `Australia/Lord_Howe`, `Pacific/Apia`, and
+`Africa/Casablanca` on all providers. The time-zone selector excludes these
+canonical zones, and runtime validation also rejects aliases and case variants
+that resolve to any of them before sending a PUT. This restriction applies to
+structured Create, time-changing Update, and both Upsert branches. Existing
+events in these zones remain readable through Get and Get Many; metadata-only
+structured Update and Upsert remain available when their time bounds and zone
+are unchanged. Raw ICS has an independent input contract and does not use this
+structured zone allowlist.
+
 Raw ICS mode accepts one complete, validated `VCALENDAR` event object. Raw
 Update and the update branch of Raw Upsert replace the complete stored
 calendar object, so omitted properties are removed. Raw Create and Upsert
@@ -136,11 +146,32 @@ same calendar, ETag, parser-security, and CalDAV request safeguards.
 
 For structured timed IANA authoring, the node prefers a verified RFC 7808/7809
 server reference. For finite events it can generate a minimal embedded
-`VTIMEZONE` from the bundled IANA TZDB 2026c identity list and proves coverage
-before writing. Unbounded IANA recurrence authoring requires a verified server
-reference. Reads treat an embedded `VTIMEZONE` as authoritative. Unsupported
-time representations are readable and deletable but are read-only for
-structured Update.
+`VTIMEZONE` from the bundled IANA TZDB 2026c rules and proves coverage before
+writing. This fallback uses pinned rules instead of the host's `Intl` database,
+so output is stable across supported Node.js and operating-system versions.
+Unbounded IANA recurrence authoring requires a verified server reference.
+Reads and preservation-first updates treat an event's embedded `VTIMEZONE` as
+authoritative. Generated definitions are limited to finite coverage and the
+repository's iCalendar component, property, nesting, and resource-size bounds.
+Unsupported time representations are readable and deletable but are read-only
+for structured Update.
+
+For structured Create and the create branch of Upsert, a verified governing
+definition for the selected IANA zone is used to interpret local input when
+available. After writing, the node reads the event back and returns that
+authoritative event only when its UID, resource URL, ETag, editable time mode,
+and authored time bounds match. A failed or mismatched confirmation is
+reported as partial success because the remote resource may already exist.
+This confirms the stored event state; it does not establish live-provider
+coverage for every historical time-zone rule. The current diagnostic matrix
+has 16 cases per provider: 11 positive full round trips, including Kathmandu
+and Kolkata, and five typed negative pre-PUT cases for the blocked zones and
+aliases on both Radicale and iCloud. The existing fixed time-zone oracles
+remain unchanged. These counts describe the current matrix and do not assert
+that the final live validation gate has passed. Historical provider
+observations are recorded in [issue #162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162);
+that issue documents context and does not waive the structured authoring
+restriction.
 
 ### Structured temporal inputs
 
@@ -165,6 +196,10 @@ explicit time-zone patch when supplied, otherwise the existing event's zone
 and authoritative embedded rules. Omitted bounds and zone-only changes
 preserve existing bound instants.
 
+All-day Create uses only its Gregorian Start Date and exclusive End Date. A
+stale hidden Time Zone value from an earlier timed configuration is ignored;
+it cannot affect all-day validation or serialization.
+
 Fractions are accepted but normalized by flooring the represented instant to
 whole seconds, including for negative-epoch instants. They are never rounded
 into the next second. Range ordering is checked after normalization, so bounds
@@ -185,6 +220,33 @@ representability checks. All-day-to-timed conversion requires an explicit time
 zone when the target bounds are local. Timed Until follows the same grammar,
 precision, and final event-zone context as other timed values, then is stored
 as canonical whole-second UTC. It is inclusive and cannot precede DTSTART.
+
+For recurring IANA events, an embedded `VTIMEZONE` is interpreted using its
+source `TZID`. Equivalent duplicate historical transition occurrences are
+collapsed; conflicting occurrences remain unsupported. A UTC `UNTIL` is
+inclusive: a transition at that instant is retained, and later occurrences
+are excluded. After the final included transition, its resulting offset
+continues as the terminal offset for subsequent instants. These rules apply to
+interpretation of the embedded definition; they do not expand recurring event
+instances.
+
+The structured authoring restriction above is provider-neutral, even though
+the motivating live observations came from iCloud. A custom-TZID Casablanca
+probe was accepted by PUT, but iCloud's subsequent GET omitted the embedded
+`VTIMEZONE`, so the created event could not be safely confirmed; cleanup
+succeeded. Lord Howe and Apia observations are also tracked in
+[#162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162). The issue
+records these observations; it does not waive the restriction. Synthetic
+fixtures alone do not establish live provider response semantics.
+
+Structured Update and the update branch of Upsert preserve existing timed
+bounds and the source `TZID` definition when only metadata changes, even when
+the server's embedded identifier is an alias rather than the canonical IANA
+option value. A semantically unchanged patch is a no-op and does not issue a
+write. A mutation is returned as successful only after an authoritative read
+back confirms an editable event in the selected calendar with the expected
+identity and semantically equivalent content. Upsert reports `action:
+"update"` for a resolved event even when that update is a no-op.
 
 Structured relative alarm controls accept integer values from 1 through
 2147483647 with minute, hour, day, or week units for Before/After; At uses

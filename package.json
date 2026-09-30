@@ -26,7 +26,7 @@
 		"email": "martin.kovacik@seznam.cz"
 	},
 	"scripts": {
-		"build": "n8n-node build",
+		"build": "n8n-node build && node scripts/bundle-time-zones.mjs",
 		"build:watch": "tsc --watch",
 		"dev": "n8n-node dev",
 		"lint": "eslint . --ignore-pattern '.codex-runtime/**'",
@@ -65,7 +65,10 @@
 		"eslint": "9.32.0",
 		"prettier": "3.9.9",
 		"release-it": "^21.1.0",
+		"rolldown": "1.2.11",
+		"timezonecomplete": "5.15.1",
 		"typescript": "5.9.2",
+		"tzdata": "1.0.50",
 		"vitest": "5.0.2"
 	},
 	"peerDependencies": {

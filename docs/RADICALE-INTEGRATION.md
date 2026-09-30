@@ -9,7 +9,22 @@ inventory and its source paths.
 
 This matrix proves behavior against a local, standards-oriented Radicale
 service plus synthetic and unit oracles. It does not claim universal CalDAV
-provider compatibility and does not include live iCloud coverage.
+provider compatibility and does not include live iCloud coverage. The IANA
+transition and metadata-only preservation guarantees documented in the
+[workflow contract](CONTRACT.md) have deterministic unit coverage; this matrix
+does not claim that those cases were exercised against live Radicale or iCloud.
+Synthetic cases do not resolve provider-history behavior. The current live
+diagnostic matrix has 16 cases per provider: 11 positive full round trips and
+five typed negative pre-PUT cases on each of Radicale and iCloud; its fixed
+time-zone oracles are unchanged. Lord Howe, Apia, and Casablanca are rejected
+for structured authoring across providers, including aliases that resolve to
+those zones. Existing-event reads and metadata-only updates remain outside
+that authoring restriction. A live iCloud custom-TZID Casablanca probe showed
+PUT acceptance followed by GET stripping the embedded `VTIMEZONE`; cleanup
+succeeded. Historical observations are recorded in
+[#162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162), which does
+not waive the restriction. These matrix counts do not claim the final live
+validation gate has passed.
 
 ## Run the matrix
 

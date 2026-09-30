@@ -28,7 +28,10 @@ discovery         calendar/event services
 ```
 
 Provider adapters supply narrow interoperability rules to discovery,
-transport, XML, and iCalendar boundaries without owning n8n UI behavior.
+transport, XML, and iCalendar boundaries without owning n8n UI behavior. The
+IANA recurrence rules in this document are provider-neutral. Radicale
+integration results are local-server evidence and do not establish live
+iCloud behavior.
 
 ## Layer responsibilities
 
@@ -76,14 +79,26 @@ whose time representation is unsupported. Structured time changes preserve
 unrelated components and parameters, and explicit timed/all-day conversions
 never infer a timezone or duration.
 
-`icalendar/timeZones.ts` owns the checked-in IANA TZDB 2026c Zone/Link identity
-oracle, deterministic `Intl` instant/local conversion, and the pure synchronous
-finite `VTIMEZONE` generator. Generated definitions contain explicit
-`STANDARD`/`DAYLIGHT` transitions only, stay within parser and serializer
-resource limits, and are returned only after their closed event coverage is
-proved. Embedded `VTIMEZONE` rules remain authoritative when reading an event.
+`icalendar/timeZones.ts` owns the checked-in IANA TZDB 2026c identity oracle
+and pinned transition rules, instant/local conversion, and pure synchronous
+finite `VTIMEZONE` generation. The rules and engine are bundled into the
+package, leaving no runtime TZDB or module dependency and avoiding host `Intl`
+version drift in fallback conversion and generation. Generated definitions
+contain explicit `STANDARD`/`DAYLIGHT` transitions only, are limited to finite
+coverage and parser/serializer resource bounds, and are returned only after
+their closed event coverage is proved. Embedded provider `VTIMEZONE` rules
+remain authoritative when reading and preserving an event.
 Unsupported or ambiguous representations project to the read-only event branch
 rather than inventing an instant.
+
+Transition expansion accepts equivalent duplicate historical occurrences as
+one occurrence and rejects conflicting transitions. UTC `UNTIL` is an
+inclusive instant cutoff; the offset established by the last included
+transition remains in effect afterward. A metadata-only Update or Upsert
+reuses the event's source `TZID` and embedded definition without changing its
+time bounds. Semantic no-ops do not write. After a mutation, Update requires a
+read-back that confirms the selected calendar, resource identity, editable
+time representation, and semantic content before returning success.
 
 `discovery/timeZoneReferences.ts` owns RFC 7809 capability detection and RFC
 7808 TZDIST lookup. It keeps authenticated CalDAV discovery separate from
@@ -99,6 +114,26 @@ serialization; Update derives final bounds after its read and resolves only
 when the patch actually changes time. Patching adds at most one newly authored
 definition and removes an old one only when no preserved property still
 references its exact source `TZID`.
+
+Create and Upsert-create use a verified governing definition for IANA local
+input interpretation when available. After the PUT, the create confirmation
+path performs a GET and returns the server-read event only when its UID,
+resource URL, ETag, editable time mode, and time bounds match the prepared
+event. A missing or mismatched confirmation is a partial-success error because
+the write may already have taken effect.
+
+The structured IANA authoring boundary rejects canonical
+`Australia/Lord_Howe`, `Pacific/Apia`, and `Africa/Casablanca` for every
+provider. The UI omits these zones, and runtime validation rejects aliases or
+case variants that resolve to them before PUT. Get/Get Many and metadata-only
+Update/Upsert remain available for existing events when their time bounds and
+zone do not change. Raw ICS has an independent input contract. Live iCloud
+observations found no safe round trip for Lord Howe or Apia and no verified
+TZDIST reference; a custom-TZID Casablanca probe had its `VTIMEZONE` stripped
+on read-back, despite PUT acceptance. Historical observations are recorded in
+[#162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162); they do not
+waive this provider-neutral policy. Synthetic fixtures are not live-provider
+evidence.
 
 ### Provider adapters
 

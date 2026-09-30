@@ -37,6 +37,14 @@ import {
 	SUPPORTED_BARE_IANA_EVENT,
 	TZDIST_ZONE_RESPONSE,
 } from './fixtures/time-zones/synthetic-time-zone-fixtures';
+import {
+	ISSUE_157_PROVIDER_CASES,
+	syntheticProviderCalendarData,
+} from './fixtures/time-zones/issue-157-provider-captures';
+import {
+	CONSTANT_KATHMANDU_REFERENCE,
+	YEARLY_PRAGUE_REFERENCE,
+} from './fixtures/time-zones/issue-157-long-reference-fixtures';
 
 const CALENDAR_URL = validateAbsoluteHttpUrl('https://calendar.example.test/calendars/selected/');
 const CLOCK_VALUE = new Date('2040-01-03T00:00:00.987Z');
@@ -265,9 +273,14 @@ describe('calendar-event Upsert public contract', () => {
 });
 
 describe('calendar-event Upsert deterministic selection and provenance', () => {
-	it('generates one omitted UID, skips REPORT, and returns local authored data with the PUT ETag', async () => {
+	it('generates one omitted UID, skips REPORT, and returns authoritative GET data', async () => {
 		const requests = transport(async (request) =>
-			response(201, request.url!, { etag: ' W/"put" ' }),
+			request.method === CalDavMethod.PUT
+				? response(201, request.url!, { etag: ' W/"put" ' })
+				: response(200, request.url!, {
+						etag: '"confirmed"',
+						body: eventIcs(GENERATED_UID),
+					}),
 		);
 		const deps = dependencies();
 		const expectedResourceUrl = new URL(
@@ -277,7 +290,7 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 
 		const result = await upsertCalendarEvent(requests, omittedUidInput(), deps);
 
-		expect(methods(requests)).toEqual(['PUT']);
+		expect(methods(requests)).toEqual(['PUT', 'GET']);
 		expect(requests.request.mock.calls[0]![0]).toMatchObject({
 			method: CalDavMethod.PUT,
 			url: expectedResourceUrl,
@@ -291,7 +304,7 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 			event: {
 				calendarUrl: CALENDAR_URL,
 				resourceUrl: expectedResourceUrl,
-				etag: ' W/"put" ',
+				etag: '"confirmed"',
 				uid: GENERATED_UID,
 				summary: 'Desired summary',
 				timeMode: 'timed',
@@ -312,13 +325,16 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 			if (request.method === CalDavMethod.REPORT) {
 				return response(207, CALENDAR_URL, { body: multistatus() });
 			}
-			return response(201, request.url!, { etag: '"created"' });
+			return response(request.method === CalDavMethod.PUT ? 201 : 200, request.url!, {
+				etag: '"created"',
+				body: eventIcs(SUPPLIED_UID),
+			});
 		});
 		const deps = dependencies();
 
 		const result = await upsertCalendarEvent(requests, timedInput(), deps);
 
-		expect(methods(requests)).toEqual(['REPORT', 'PUT']);
+		expect(methods(requests)).toEqual(['REPORT', 'PUT', 'GET']);
 		expect(requests.request.mock.calls[0]![0]).toMatchObject({
 			method: CalDavMethod.REPORT,
 			url: CALENDAR_URL,
@@ -340,6 +356,114 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 		expect(deps.uidFactory).not.toHaveBeenCalled();
 		expect(deps.clock).toHaveBeenCalledOnce();
 	});
+
+	it.each([
+		'Australia/Lord_Howe',
+		'Australia/LHI',
+		'Pacific/Apia',
+		'pacific/apia',
+		'Africa/Casablanca',
+		'africa/casablanca',
+	])('rejects missing-UID structured Upsert Create in %s before provider PUT', async (zone) => {
+		const requests = transport(async () => {
+			throw new Error('Unexpected provider request.');
+		});
+		const error = await captureError(
+			upsertCalendarEvent(
+				requests,
+				omittedUidInput({
+					timeZone: { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(zone) },
+				}),
+				dependencies(),
+			),
+		);
+		expect(error).toMatchObject({ code: 'UNSUPPORTED_AUTHORING_TIME_ZONE' });
+		expect(methods(requests)).toEqual([]);
+	});
+
+	it.each(['Australia/Lord_Howe', 'Pacific/Apia', 'Africa/Casablanca'])(
+		'rejects supplied missing UID Upsert Create in %s without PUT',
+		async (zone) => {
+			const requests = transport(async (request) => {
+				if (request.method === CalDavMethod.REPORT)
+					return response(207, CALENDAR_URL, { body: multistatus() });
+				throw new Error('Unexpected provider mutation.');
+			});
+			const error = await captureError(
+				upsertCalendarEvent(
+					requests,
+					timedInput({
+						timeZone: { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(zone) },
+					}),
+					dependencies(),
+				),
+			);
+			expect(error).toMatchObject({ code: 'UNSUPPORTED_AUTHORING_TIME_ZONE' });
+			expect(methods(requests)).toEqual(['REPORT']);
+		},
+	);
+
+	it.each(['03', '07', '08'] as const)(
+		'preserves imported restricted-zone case %s on existing UID metadata Upsert and no-op',
+		async (id) => {
+			const providerCase = ISSUE_157_PROVIDER_CASES.find((entry) => entry.id === id)!;
+			const source = syntheticProviderCalendarData(providerCase, 'radicale')
+				.replace('UID:synthetic-issue-157@example.test', `UID:${SUPPLIED_UID}`)
+				.replace(
+					'SUMMARY:Synthetic provider event',
+					'SUMMARY:Synthetic provider event\r\nX-OPAQUE:keep',
+				);
+			const start = new Date(
+				providerCase.expectedByProvider?.radicale ?? providerCase.expectedStart,
+			);
+			const end = new Date(start.getTime() + 900_000);
+			const original = timedInput({
+				start,
+				end,
+				summary: 'Synthetic provider event',
+				timeZone: { timeZoneMode: 'iana', timeZone: canonicalizeIanaTimeZone(providerCase.zone) },
+			});
+			const resourceUrl = new URL('imported.ics', CALENDAR_URL).href;
+			let submitted = '';
+			const makeRequests = () =>
+				transport(async (request) => {
+					if (request.method === CalDavMethod.REPORT)
+						return response(207, CALENDAR_URL, {
+							body: multistatus(
+								eventResponse('imported.ics', SUPPLIED_UID, { ics: source, etag: '"source"' }),
+							),
+						});
+					if (request.method === CalDavMethod.PUT) {
+						submitted = request.body!;
+						return response(204, resourceUrl, { etag: '"put"' });
+					}
+					return response(200, resourceUrl, { etag: '"confirmed"', body: submitted });
+				});
+			const requests = makeRequests();
+			await expect(upsertCalendarEvent(requests, original, dependencies())).resolves.toMatchObject({
+				action: 'update',
+				event: { timeZone: providerCase.zone },
+			});
+			expect(methods(requests)).toEqual(['REPORT']);
+			const changedRequests = makeRequests();
+			await expect(
+				upsertCalendarEvent(
+					changedRequests,
+					{ ...original, summary: 'Changed metadata' },
+					dependencies(),
+				),
+			).resolves.toMatchObject({
+				action: 'update',
+				event: { summary: 'Changed metadata', etag: '"confirmed"' },
+			});
+			expect(methods(changedRequests)).toEqual(['REPORT', 'PUT', 'GET']);
+			expect(changedRequests.request.mock.calls[1]![0]).toMatchObject({
+				headers: { 'If-Match': '"source"' },
+			});
+			expect(submitted).toContain('X-OPAQUE:keep');
+			expect(submitted).toContain(`TZID:${providerCase.zone}`);
+		},
+	);
 
 	it('returns a unique semantic no-op from the lookup snapshot without clock, PUT, or GET', async () => {
 		const requests = transport(async () =>
@@ -615,7 +739,12 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 	});
 
 	it('authors all-day DATE values through the same generated-UID Create branch', async () => {
-		const requests = transport(async (request) => response(201, request.url!, { etag: '"date"' }));
+		const requests = transport(async (request) =>
+			response(request.method === CalDavMethod.PUT ? 201 : 200, request.url!, {
+				etag: '"date"',
+				body: allDayIcs(GENERATED_UID),
+			}),
+		);
 		const deps = dependencies();
 		const allDay = {
 			calendarUrl: CALENDAR_URL,
@@ -627,7 +756,7 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 
 		const result = await upsertCalendarEvent(requests, allDay, deps);
 
-		expect(methods(requests)).toEqual(['PUT']);
+		expect(methods(requests)).toEqual(['PUT', 'GET']);
 		const body = requests.request.mock.calls[0]![0].body as string;
 		expect(body).toContain('DTSTART;VALUE=DATE:20400228');
 		expect(body).toContain('DTEND;VALUE=DATE:20400301');
@@ -645,7 +774,14 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 	});
 
 	it('uses the execution-scoped reference-first IANA authoring context', async () => {
-		const requests = transport(async (request) => response(201, request.url!, { etag: '"iana"' }));
+		let submitted = '';
+		const requests = transport(async (request) => {
+			if (request.method === CalDavMethod.PUT) {
+				submitted = request.body!;
+				return response(201, request.url!, { etag: '"iana"' });
+			}
+			return response(200, request.url!, { etag: '"confirmed"', body: submitted });
+		});
 		const timeZone = canonicalizeIanaTimeZone('Europe/Prague');
 		const resolveReference = vi.fn().mockResolvedValue({
 			timeZone,
@@ -662,7 +798,7 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 			deps,
 		);
 
-		expect(resolveReference).toHaveBeenCalledOnce();
+		expect(resolveReference).toHaveBeenCalledTimes(2);
 		expect(resolveReference).toHaveBeenCalledWith(CALENDAR_URL, timeZone);
 		expect(resolveReference.mock.invocationCallOrder[0]).toBeLessThan(
 			deps.uidFactory.mock.invocationCallOrder[0]!,
@@ -671,6 +807,100 @@ describe('calendar-event Upsert deterministic selection and provenance', () => {
 		expect(body).toMatch(/DTSTART;TZID=Europe\/Prague:\d{8}T\d{6}/);
 		expect(body).not.toContain('BEGIN:VTIMEZONE');
 	});
+
+	it('rejects long yearly Prague Upsert-create with a verified reference before provider write', async () => {
+		const requests = transport(async () => {
+			throw new Error('Unexpected provider request.');
+		});
+		const zone = canonicalizeIanaTimeZone('Europe/Prague');
+		const resolveReference = vi.fn().mockResolvedValue({
+			timeZone: zone,
+			etag: '"reference"',
+			calendarData: YEARLY_PRAGUE_REFERENCE,
+			ruleSource: 'vtimezone' as const,
+		});
+		bindCalendarEventTimeZoneExecutionContext(requests, { resolveReference });
+		const deps = dependencies();
+		const start = Date.now();
+		const error = await captureError(
+			upsertCalendarEvent(
+				requests,
+				omittedUidInput({
+					start: new Date('2026-10-06T07:20:00Z'),
+					end: new Date('2026-10-06T07:35:00Z'),
+					recurrence: {
+						kind: 'set',
+						value: {
+							frequency: 'yearly',
+							end: { kind: 'until', value: { kind: 'dateTime', dateTime: '9999-01-01T00:00:00Z' } },
+						},
+					},
+					timeZone: { timeZoneMode: 'iana', timeZone: zone },
+				}),
+				deps,
+			),
+		);
+		expect(error).toMatchObject({ code: 'UNREPRESENTABLE_TIME_ZONE' });
+		expect(Date.now() - start).toBeLessThan(2000);
+		expect(resolveReference).toHaveBeenCalled();
+		expect(deps.uidFactory).not.toHaveBeenCalled();
+		expect(deps.clock).not.toHaveBeenCalled();
+		expect(methods(requests)).toEqual([]);
+	});
+
+	it.each([
+		['long constant', 'Asia/Kathmandu', CONSTANT_KATHMANDU_REFERENCE, '2026-10-06T03:35:00Z', true],
+		['normal finite', 'Europe/Prague', YEARLY_PRAGUE_REFERENCE, '2026-10-06T07:20:00Z', false],
+	] as const)(
+		'accepts a verified %s reference during Upsert-create',
+		async (_label, name, calendarData, startText, long) => {
+			let submitted = '';
+			const requests = transport(async (request) => {
+				if (request.method === CalDavMethod.PUT) {
+					submitted = request.body!;
+					return response(201, request.url!, { etag: '"put"' });
+				}
+				return response(200, request.url!, { etag: '"confirmed"', body: submitted });
+			});
+			const zone = canonicalizeIanaTimeZone(name);
+			const resolveReference = vi.fn().mockResolvedValue({
+				timeZone: zone,
+				etag: '"reference"',
+				calendarData,
+				ruleSource: 'vtimezone' as const,
+			});
+			bindCalendarEventTimeZoneExecutionContext(requests, { resolveReference });
+			const start = new Date(startText);
+			await expect(
+				upsertCalendarEvent(
+					requests,
+					omittedUidInput({
+						start,
+						end: new Date(start.getTime() + 900_000),
+						...(long
+							? {
+									recurrence: {
+										kind: 'set' as const,
+										value: {
+											frequency: 'yearly' as const,
+											end: {
+												kind: 'until' as const,
+												value: { kind: 'dateTime' as const, dateTime: '9999-01-01T00:00:00Z' },
+											},
+										},
+									},
+								}
+							: {}),
+						timeZone: { timeZoneMode: 'iana', timeZone: zone },
+					}),
+					dependencies(),
+				),
+			).resolves.toMatchObject({ action: 'create', event: { timeZone: name } });
+			expect(submitted).toContain(`TZID=${name}`);
+			expect(submitted).not.toContain('BEGIN:VTIMEZONE');
+			expect(methods(requests)).toEqual(['PUT', 'GET']);
+		},
+	);
 });
 
 describe('calendar-event Upsert branch guards and exact side effects', () => {
@@ -949,7 +1179,7 @@ describe('calendar-event Upsert races, strict preconditions, and partial success
 		expect(JSON.stringify(error)).not.toContain('private');
 	});
 
-	it('reports Create partial success only after PUT succeeded without ETag and metadata GET failed', async () => {
+	it('reports Create partial success when authoritative GET fails after PUT', async () => {
 		const requests = transport(async (request) => {
 			if (request.method === CalDavMethod.PUT) {
 				return response(201, request.url!, { includeEtag: false });
@@ -961,7 +1191,7 @@ describe('calendar-event Upsert races, strict preconditions, and partial success
 		);
 
 		expect(error).toMatchObject({
-			message: 'The event was created, but its required ETag could not be retrieved.',
+			message: 'The event was created, but its current state could not be verified.',
 			statusCode: 404,
 		});
 		expect(methods(requests)).toEqual(['PUT', 'GET']);

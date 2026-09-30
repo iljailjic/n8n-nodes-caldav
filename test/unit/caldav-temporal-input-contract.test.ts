@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
 	upsert: vi.fn(),
 	query: vi.fn(),
 	transport: vi.fn(),
+	resolveUid: vi.fn(),
 }));
 vi.mock('../../nodes/CalDav/transport/http', async (original) => ({
 	...(await original<typeof import('../../nodes/CalDav/transport/http')>()),
@@ -24,6 +25,10 @@ vi.mock('../../nodes/CalDav/events/update', async (original) => ({
 vi.mock('../../nodes/CalDav/events/upsert', async (original) => ({
 	...(await original<typeof import('../../nodes/CalDav/events/upsert')>()),
 	upsertCalendarEvent: mocks.upsert,
+}));
+vi.mock('../../nodes/CalDav/events/resolveByUid', async (original) => ({
+	...(await original<typeof import('../../nodes/CalDav/events/resolveByUid')>()),
+	resolveCalendarEventByUid: mocks.resolveUid,
 }));
 vi.mock('../../nodes/CalDav/events/timeRangeQuery', async (original) => ({
 	...(await original<typeof import('../../nodes/CalDav/events/timeRangeQuery')>()),
@@ -137,6 +142,7 @@ function current(allDay = false) {
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.transport.mockResolvedValue({ serverUrl: URL, request: vi.fn() });
+	mocks.resolveUid.mockResolvedValue(undefined);
 	mocks.create.mockResolvedValue(EVENT);
 	mocks.update.mockResolvedValue(EVENT);
 	mocks.upsert.mockResolvedValue({ action: 'create', event: EVENT });
@@ -204,6 +210,24 @@ describe('r3 strict timed grammar and precision', () => {
 });
 
 describe('r3 local context and DST', () => {
+	it('uses pinned 2026c local rules when host Intl timezone formatting is unavailable', () => {
+		const formatter = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(() => {
+			throw new Error('host Intl timezone data unavailable');
+		});
+		try {
+			expect(
+				normalizeStructuredTimedInput('2026-10-06T09:20:00', 'Africa/Casablanca')?.toISOString(),
+			).toBe('2026-10-06T09:20:00.000Z');
+			expect(() =>
+				normalizeStructuredTimedInput('2026-03-29T02:30:00', 'Europe/Prague', 'Start'),
+			).toThrow(/Start.*nonexistent/);
+			expect(() =>
+				normalizeStructuredTimedInput('2026-10-25T02:30:00', 'Europe/Prague', 'Start'),
+			).toThrow(/Start.*ambiguous/);
+		} finally {
+			formatter.mockRestore();
+		}
+	});
 	it.each([
 		['Europe/Prague', '2026-03-29T02:30:00', 'nonexistent'],
 		['Europe/Prague', '2026-10-25T02:30:00', 'ambiguous'],
@@ -403,7 +427,7 @@ describe('r3 Update deferred final context', () => {
 				timeZone: 'Europe/Prague',
 			},
 		};
-		expect(input.resolveTemporalPatch(prague)).toMatchObject({
+		expect(await input.resolveTemporalPatch(prague)).toMatchObject({
 			start: { kind: 'set', value: new Date(EVENT.start) },
 			end: { kind: 'set', value: new Date(EVENT.end) },
 		});
@@ -413,7 +437,7 @@ describe('r3 Update deferred final context', () => {
 				timeZone: { change: { timeZoneMode: 'utc' } },
 			},
 		});
-		expect(mocks.update.mock.calls[1][1].resolveTemporalPatch(prague).start.value).toEqual(
+		expect((await mocks.update.mock.calls[1][1].resolveTemporalPatch(prague)).start.value).toEqual(
 			new Date('2026-09-30T02:00:00Z'),
 		);
 	});
@@ -421,11 +445,11 @@ describe('r3 Update deferred final context', () => {
 		await execute('update', {
 			fieldsToUpdate: { start: '2026-09-30T02:00:00', end: '2026-09-30T03:00:00' },
 		});
-		expect(() => mocks.update.mock.calls[0][1].resolveTemporalPatch(current(true))).toThrow(
+		await expect(mocks.update.mock.calls[0][1].resolveTemporalPatch(current(true))).rejects.toThrow(
 			/explicit time-zone patch/,
 		);
 		await execute('update', { fieldsToUpdate: { start: EVENT.start, end: EVENT.end } });
-		expect(mocks.update.mock.calls[1][1].resolveTemporalPatch(current(true))).toMatchObject({
+		expect(await mocks.update.mock.calls[1][1].resolveTemporalPatch(current(true))).toMatchObject({
 			start: { value: new Date(EVENT.start) },
 			end: { value: new Date(EVENT.end) },
 		});
@@ -631,7 +655,7 @@ describe('r3 temporal leaf inventory and recurrence safety', () => {
 			},
 		});
 		const existing = current();
-		const resolved = mocks.update.mock.calls[0][1].resolveTemporalPatch({
+		const resolved = await mocks.update.mock.calls[0][1].resolveTemporalPatch({
 			...existing,
 			event: {
 				...existing.event,
@@ -783,7 +807,7 @@ describe('F154-R01 exact stored TZID is authoritative for local Update', () => {
 				},
 			});
 			const input = mocks.update.mock.calls[0][1];
-			const patch = input.resolveTemporalPatch(existing);
+			const patch = await input.resolveTemporalPatch(existing);
 			expect(patch.start.value).toEqual(new Date('2026-09-30T09:00:00Z'));
 			expect(patch.recurrence.value.end.value).toEqual({
 				kind: 'dateTime',

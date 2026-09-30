@@ -289,7 +289,14 @@ describe('CalDAV timed event timezone UI', () => {
 		).loadOptions.getIanaTimeZones;
 		const result = await loader.call({ getNode: () => NODE });
 		const expected = tzdbOracle.zones
-			.filter((zone) => zone !== 'Etc/GMT' && zone !== 'Etc/UTC')
+			.filter(
+				(zone) =>
+					zone !== 'Etc/GMT' &&
+					zone !== 'Etc/UTC' &&
+					zone !== 'Australia/Lord_Howe' &&
+					zone !== 'Pacific/Apia' &&
+					zone !== 'Africa/Casablanca',
+			)
 			.sort()
 			.map((zone) => ({ name: zone, value: zone }));
 		expect(result).toEqual(expected);
@@ -297,11 +304,12 @@ describe('CalDAV timed event timezone UI', () => {
 			expect.arrayContaining([
 				{ name: 'Europe/Prague', value: 'Europe/Prague' },
 				{ name: 'Etc/GMT+5', value: 'Etc/GMT+5' },
+				{ name: 'Africa/El_Aaiun', value: 'Africa/El_Aaiun' },
 			]),
 		);
-		expect(result).not.toEqual(
-			expect.arrayContaining([{ name: 'US/Eastern', value: 'US/Eastern' }]),
-		);
+		for (const zone of ['US/Eastern', 'Australia/Lord_Howe', 'Pacific/Apia', 'Africa/Casablanca']) {
+			expect(result).not.toContainEqual({ name: zone, value: zone });
+		}
 		expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
 	});
 });
@@ -344,6 +352,43 @@ describe('CalDAV timed event timezone normalization and errors', () => {
 	});
 
 	it.each([
+		['Lord Howe local', 'Australia/Lord_Howe', '2026-10-06T09:20:00', '2026-10-06T09:35:00'],
+		[
+			'Lord Howe alias',
+			'Australia/LHI',
+			new Date('2026-10-05T22:20:00Z'),
+			new Date('2026-10-05T22:35:00Z'),
+		],
+		['Apia local', 'Pacific/Apia', '2026-10-06T09:20:00', '2026-10-06T09:35:00'],
+		[
+			'Apia case and offsets',
+			'pacific/apia',
+			'2026-10-06T09:20:00+13:00',
+			'2026-10-06T09:35:00+13:00',
+		],
+		['Casablanca local', 'Africa/Casablanca', '2026-10-06T09:20:00', '2026-10-06T09:35:00'],
+		[
+			'Casablanca case and offsets',
+			'africa/casablanca',
+			'2026-10-06T09:20:00Z',
+			'2026-10-06T09:35:00Z',
+		],
+	] as const)(
+		'rejects structured Create %s without provider mutation',
+		async (_label, timeZone, start, end) => {
+			const error = await captureError(
+				context([parameters({ timeZoneMode: 'iana', timeZone, start, end })]),
+			);
+			expect(error.message).toBe(
+				'The selected IANA time zone is not supported for structured event authoring.',
+			);
+			expect(mocks.createCalendarEvent).not.toHaveBeenCalled();
+			expect(TRANSPORT.request).not.toHaveBeenCalled();
+			expect(String(error)).not.toMatch(/Lord_Howe|Apia|Casablanca|2026-10-06/);
+		},
+	);
+
+	it.each([
 		['invalid mode', { timeZoneMode: 'local' }, 'Time Zone Mode must be UTC or IANA.'],
 		[
 			'invalid zone',
@@ -381,7 +426,11 @@ describe('CalDAV timed event timezone normalization and errors', () => {
 			const error = await captureError(context([parameters(overrides)]));
 			expect(error.message).toBe(message);
 			expect(error.context.itemIndex).toBe(0);
-			expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
+			if (_label.startsWith('second overlap')) {
+				expect(mocks.createN8nCalDavTransport).toHaveBeenCalledOnce();
+			} else {
+				expect(mocks.createN8nCalDavTransport).not.toHaveBeenCalled();
+			}
 			expect(mocks.createCalendarEvent).not.toHaveBeenCalled();
 			expect(String(error)).not.toMatch(/Private\/Account-42|2040-10-28|Europe\/Prague|Etc\/UTC/);
 		},

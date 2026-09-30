@@ -246,7 +246,10 @@ describe('Raw ICS public type, compatibility, documentation, and package contrac
 		expect(packageJson.n8n.nodes).toHaveLength(1);
 		expect(packageJson.n8n.credentials).toHaveLength(1);
 		expect(packageJson.dependencies).toBeUndefined();
-		expect(verifier.match(/^\s*'[^']+',$/gm)).toHaveLength(142);
+		expect(verifier.match(/^\s*'[^']+',$/gm)).toHaveLength(145);
+		for (const extension of ['d.ts', 'js', 'js.map']) {
+			expect(verifier).toContain(`'dist/nodes/CalDav/events/createConfirmation.${extension}',`);
+		}
 		expect(verifier).toContain('EXPECTED_PACKAGE_FILES.size');
 		expect(verifier.match(/rawEventWrite\.(?:d\.ts|js|js\.map)/g)).toHaveLength(3);
 		expect(verifier.match(/resolvedUidIdentity\.(?:d\.ts|js|js\.map)/g)).toHaveLength(3);

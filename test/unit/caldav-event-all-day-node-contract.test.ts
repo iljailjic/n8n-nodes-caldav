@@ -314,6 +314,34 @@ describe('issue #41 Create normalization and output mapping', () => {
 		]);
 	});
 
+	it.each(['Pacific/Apia', 'Australia/Lord_Howe'])(
+		'ignores stale hidden %s IANA fields for all-day Create',
+		async (staleZone) => {
+			mocks.createCalendarEvent.mockResolvedValue(
+				event('all-day-stale-zone', {
+					timeMode: 'allDay',
+					startDate: '2024-02-29',
+					endDate: '2024-03-01',
+				}),
+			);
+			const input = createParameters({
+				uid: 'all-day-stale-zone',
+				timeZoneMode: 'iana',
+				timeZone: staleZone,
+			});
+			await expect(new CalDav().execute.call(context([input]))).resolves.toBeDefined();
+			const authored = mocks.createCalendarEvent.mock.calls[0]?.[1];
+			expect(authored).toMatchObject({
+				timeMode: 'allDay',
+				startDate: '2024-02-29',
+				endDate: '2024-03-01',
+			});
+			expect(authored).not.toHaveProperty('timeZone');
+			expect(authored).not.toHaveProperty('start');
+			expect(authored).not.toHaveProperty('end');
+		},
+	);
+
 	it('projects native Date values through workflow timezone, independent of the host timezone', async () => {
 		const start = new Date('2024-02-29T11:30:00Z');
 		const end = new Date('2024-03-01T11:30:00Z');

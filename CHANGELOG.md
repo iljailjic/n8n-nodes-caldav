@@ -5,6 +5,10 @@ documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Clarify IANA `VTIMEZONE` transition handling for equivalent duplicate historical occurrences, inclusive UTC `UNTIL` cutoffs, and terminal offsets. Bundle pinned TZDB 2026c rules and conversion logic for host-independent IANA fallback generation, with finite-coverage and iCalendar resource guards; embedded provider definitions remain authoritative. All-day Create ignores stale hidden Time Zone choices. Metadata-only structured Update and Upsert preserve IANA time bounds and source `TZID` definitions; semantic no-ops avoid writes. Structured Create and Upsert-create return the event only after authoritative GET confirmation, using a verified governing definition for IANA local input when available. Structured authoring rejects `Australia/Lord_Howe`, `Pacific/Apia`, and `Africa/Casablanca` across providers, including aliases, while retaining existing-event reads, metadata-only updates, and the independent Raw ICS contract. The current diagnostic matrix has 11 positive full round trips and five typed pre-PUT rejections per provider; this does not claim the final live gate has passed. Historical iCloud observations, including Casablanca `VTIMEZONE` loss on GET after PUT acceptance, remain recorded in [#162](https://github.com/iljailjic/n8n-nodes-caldav/issues/162), not as a waiver.
+
 ## [1.0.0-beta.4] - 2026-09-26
 
 ### Changed

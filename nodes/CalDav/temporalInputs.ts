@@ -2,6 +2,7 @@
 
 import {
 	CalDavStructuredLocalTimeError,
+	canonicalizeIanaTimeZone,
 	projectInstantInTimeZone,
 	resolveStructuredLocalDateTimeInTimeZone,
 } from './icalendar/timeZones';
@@ -115,10 +116,19 @@ export function normalizeStructuredTimedInput(
 	definition?: ICalendarComponent,
 ): Date | undefined {
 	const parsed = parseStructuredTimedInput(value);
+	return normalizeParsedStructuredTimedInput(parsed, zone, field, definition);
+}
+
+export function normalizeParsedStructuredTimedInput(
+	parsed: StructuredTimedInput | undefined,
+	zone: string = 'UTC',
+	field: string = 'Date/time',
+	definition?: ICalendarComponent,
+): Date | undefined {
 	if (parsed === undefined) return undefined;
 	// Validate the effective zone even when the caller supplies an absolute instant.
 	try {
-		new Intl.DateTimeFormat('en-US', { timeZone: zone });
+		if (zone !== 'UTC') canonicalizeIanaTimeZone(zone);
 	} catch {
 		throw new CalDavTemporalInputError(field, 'requires a valid effective time zone.');
 	}

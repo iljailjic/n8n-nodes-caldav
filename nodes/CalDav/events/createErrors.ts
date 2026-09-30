@@ -3,6 +3,7 @@ export const CalendarEventCreateFailureCode = Object.freeze({
 	INVALID_CLOCK: 'CALENDAR_EVENT_CREATE_INVALID_CLOCK',
 	NORMALIZATION_FAILED: 'CALENDAR_EVENT_CREATE_NORMALIZATION_FAILED',
 	ETAG_RETRIEVAL_FAILED: 'CALENDAR_EVENT_CREATE_ETAG_RETRIEVAL_FAILED',
+	CONFIRMATION_FAILED: 'CALENDAR_EVENT_CREATE_CONFIRMATION_FAILED',
 } as const);
 
 export type CalendarEventCreateFailureCode =
@@ -16,6 +17,8 @@ const ERROR_MESSAGES: Readonly<Record<CalendarEventCreateFailureCode, string>> =
 		'The serialized calendar event could not be normalized.',
 	CALENDAR_EVENT_CREATE_ETAG_RETRIEVAL_FAILED:
 		'The event was created, but its required ETag could not be retrieved.',
+	CALENDAR_EVENT_CREATE_CONFIRMATION_FAILED:
+		'The event was created, but its current state could not be verified.',
 };
 
 export class CalDavCalendarEventCreateError extends Error {
