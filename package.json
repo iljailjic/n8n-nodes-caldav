@@ -69,7 +69,7 @@
 		"timezonecomplete": "5.15.1",
 		"typescript": "5.9.2",
 		"tzdata": "1.0.50",
-		"vitest": "5.0.2"
+		"vitest": "5.0.5"
 	},
 	"peerDependencies": {
 		"n8n-workflow": "*"
